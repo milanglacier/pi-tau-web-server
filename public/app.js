@@ -1037,6 +1037,21 @@ sidebarOverlay.addEventListener('click', () => {
 
 
 
+const newSessionBtn = document.getElementById('new-session-btn');
+newSessionBtn.addEventListener('click', () => {
+  sessionTotalCost = 0;
+  lastInputTokens = 0;
+  updateCostDisplay();
+  updateTokenUsage();
+  state.reset();
+  messageRenderer.clear();
+  toolCardRenderer.clear();
+  messageRenderer.renderWelcome();
+  sidebar.clearActive();
+  viewingActiveSession = false;
+  updateMirrorInputState();
+});
+
 refreshSessionsBtn.addEventListener('click', () => {
   if (isMobile()) {
     location.reload();
@@ -1124,6 +1139,11 @@ async function handleSessionSelect(session, project) {
 
 async function switchSession(sessionFile, session = null, project = null) {
   try {
+    // Clear any streaming state from previous session to prevent bleed
+    currentStreamingElement = null;
+    currentStreamingThinking = '';
+    currentStreamingText = '';
+    
     state.reset();
     messageRenderer.clear();
     toolCardRenderer.clear();

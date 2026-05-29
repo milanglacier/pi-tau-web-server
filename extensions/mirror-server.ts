@@ -1080,6 +1080,34 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
       return;
     }
 
+    // Session delete
+    if (urlPath === "/api/sessions/delete" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+      req.on("end", () => {
+        try {
+          const { filePath } = JSON.parse(body);
+          if (!filePath || typeof filePath !== "string") {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "filePath required" }));
+            return;
+          }
+          if (!fs.existsSync(filePath)) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Session not found" }));
+            return;
+          }
+          fs.unlinkSync(filePath);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: true }));
+        } catch (err: any) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
     // Memoryd check
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "Not found" }));
@@ -1591,6 +1619,19 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
       });
       server!.once("error", (err: any) => {
         if (err.code === "EADDRINUSE" && port < PORT + maxAttempts) {
+          // Check if a stale Tau instance owns this port and kill it
+          const instances = getRunningInstances();
+          const stale = instances.find(i => i.port === port && i.pid !== process.pid);
+          if (stale) {
+            console.log(`[Mirror] Port ${port} in use by stale Tau instance (PID ${stale.pid}), killing...`);
+            try { process.kill(stale.pid, "SIGTERM"); } catch {}
+            // Wait briefly then retry the same port
+            setTimeout(() => {
+              server!.removeAllListeners("error");
+              tryListen(port, maxAttempts);
+            }, 500);
+            return;
+          }
           console.log(`[Mirror] Port ${port} in use, trying ${port + 1}...`);
           server!.removeAllListeners("error");
           tryListen(port + 1, maxAttempts);

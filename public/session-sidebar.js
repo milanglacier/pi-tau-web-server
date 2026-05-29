@@ -225,6 +225,7 @@ export class SessionSidebar {
       { icon: isFav ? '★' : '☆', label: isFav ? 'Unfavourite' : 'Favourite', action: () => this.toggleFavourite(session.filePath) },
       { icon: '✎', label: 'Rename', action: () => this.startRename(itemEl) },
       { icon: '📋', label: 'Export HTML', action: () => this.exportSession(session) },
+      { icon: '🗑', label: 'Delete', action: () => this.deleteSession(session, itemEl) },
     ];
 
     for (const item of items) {
@@ -294,6 +295,33 @@ export class SessionSidebar {
       if (ke.key === 'Enter') { ke.preventDefault(); input.blur(); }
       if (ke.key === 'Escape') { input.value = currentName; input.blur(); }
     });
+  }
+
+  async deleteSession(session, itemEl) {
+    if (!confirm(`Delete "${session.name || session.firstMessage || 'this session'}"?`)) return;
+    try {
+      const res = await fetch('/api/sessions/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath: session.filePath }),
+      });
+      if (res.ok) {
+        itemEl.remove();
+        // Remove from favourites if present
+        const favIdx = this.favourites.indexOf(session.filePath);
+        if (favIdx >= 0) {
+          this.favourites.splice(favIdx, 1);
+          this.saveFavourites();
+        }
+        // If this was the active session, clear it
+        if (session.filePath === this.activeSessionFile) {
+          this.clearActive();
+          if (this.onSessionSelect) this.onSessionSelect(null, null);
+        }
+      }
+    } catch (e) {
+      console.error('[Sidebar] Delete failed:', e);
+    }
   }
 
   async exportSession(session) {

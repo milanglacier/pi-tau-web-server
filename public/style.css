@@ -1587,6 +1587,7 @@ body {
 .messages {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 68px 24px 100px;
   display: flex;
   flex-direction: column;
@@ -2298,6 +2299,7 @@ body.hide-thinking .thinking-block { display: none !important; }
   left: 0;
   right: 0;
   z-index: 10;
+  overflow-x: hidden;
 }
 
 /* Image previews */
