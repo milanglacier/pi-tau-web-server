@@ -144,35 +144,58 @@ export class MessageRenderer {
 
   updateStreamingMessage(messageElement, content) {
     const contentDiv = messageElement.querySelector('.message-content');
-    if (contentDiv) {
-      // Keep any thinking block, update only the text part
-      const thinkingBlock = contentDiv.querySelector('.streaming-thinking');
-      const escaped = this.escapeHtml(content);
-      if (thinkingBlock) {
-        // Remove everything after the thinking block and re-add text
-        let textNode = contentDiv.querySelector('.streaming-text');
-        if (!textNode) {
-          textNode = document.createElement('div');
-          textNode.className = 'streaming-text';
-          contentDiv.appendChild(textNode);
+    if (!contentDiv) return;
+
+    // Render markdown incrementally so headings, lists, inline formatting,
+    // and other block elements appear live — not just after streaming ends.
+    const rendered = renderMarkdown(content);
+    const thinkingBlock = contentDiv.querySelector('.streaming-thinking');
+
+    if (thinkingBlock) {
+      // Keep the thinking block; update only the text portion
+      let textNode = contentDiv.querySelector('.streaming-text');
+      if (!textNode) {
+        // First time text arrives after thinking started:
+        // remove any stale text nodes that were placed directly in contentDiv
+        // before the thinking block existed.
+        let node = thinkingBlock.nextSibling;
+        while (node) {
+          const next = node.nextSibling;
+          node.remove();
+          node = next;
         }
-        textNode.innerHTML = escaped;
-      } else {
-        contentDiv.innerHTML = escaped;
+        textNode = document.createElement('div');
+        textNode.className = 'streaming-text';
+        contentDiv.appendChild(textNode);
       }
-      this.scrollToBottom();
+      textNode.innerHTML = rendered;
+      // Stash the raw markdown so finalizeStreamingMessage can do a clean
+      // re-render without scraping textContent from already-rendered HTML.
+      textNode.dataset.rawText = content;
+    } else {
+      contentDiv.innerHTML = rendered;
+      contentDiv.dataset.rawText = content;
     }
+    this.scrollToBottom();
   }
 
   finalizeStreamingMessage(messageElement, usage = null, thinking = '') {
     const contentDiv = messageElement.querySelector('.message-content');
     if (contentDiv) {
       contentDiv.classList.remove('streaming');
-      // Get the raw text (exclude thinking block text)
+
+      // Recover the raw markdown text we stashed during streaming updates.
+      // Falls back to textContent (which loses formatting markers) only if
+      // the dataset is somehow missing.
       const streamingText = contentDiv.querySelector('.streaming-text');
-      const rawText = streamingText ? streamingText.textContent : contentDiv.textContent;
-      
-      // Rebuild with thinking block (if any) + markdown text
+      const rawText =
+        (streamingText && streamingText.dataset.rawText) ||
+        contentDiv.dataset.rawText ||
+        contentDiv.textContent ||
+        '';
+
+      // Final render — catches edge cases like code blocks whose closing
+      // fence arrived on the very last delta.
       let html = '';
       if (thinking) {
         html += this.renderThinkingBlock(thinking);
