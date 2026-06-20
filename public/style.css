@@ -1168,6 +1168,12 @@ body {
   box-shadow: 0 0 8px rgba(248, 113, 113, 0.4);
 }
 
+.status-indicator.error {
+  background: var(--error);
+  box-shadow: 0 0 8px rgba(248, 113, 113, 0.4);
+  animation: connectPop 0.4s var(--spring);
+}
+
 .status-indicator.streaming {
   background: var(--accent);
   animation: pulse 1.5s infinite;

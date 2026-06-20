@@ -1297,6 +1297,20 @@ function parseModelSpec(raw) {
   return { provider, modelId, thinking };
 }
 
+// Turn the status indicator red and show an error message; after `ms`,
+// restore the indicator to the real connection state and reset the text.
+function flashStatusError(msg, ms = 3000) {
+  statusIndicator.classList.remove('connected', 'streaming');
+  statusIndicator.classList.add('error');
+  statusText.textContent = msg;
+  setTimeout(() => {
+    statusIndicator.classList.remove('error');
+    const open = wsClient.ws?.readyState === WebSocket.OPEN;
+    statusIndicator.classList.add(open ? 'connected' : 'disconnected');
+    statusText.textContent = open ? 'Connected' : 'Disconnected';
+  }, ms);
+}
+
 async function applyModelInput() {
   // No-op when the user didn't actually edit anything (e.g. focus then blur,
   // or the value was just reverted). Avoids spurious set_model/set_thinking_level
@@ -1306,16 +1320,14 @@ async function applyModelInput() {
     return;
   }
   if (!viewingActiveSession || !activeLiveSessionId) {
-    statusText.textContent = 'Select a live Tau tab first.';
-    setTimeout(() => { statusText.textContent = wsClient.ws?.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'; }, 3000);
+    flashStatusError('Select a live Tau tab first.');
     modelInput.value = modelDisplayString();
     return;
   }
   const parsed = parseModelSpec(modelInput.value);
   if (parsed.error) {
     modelInput.classList.add('invalid');
-    statusText.textContent = parsed.error;
-    setTimeout(() => { statusText.textContent = wsClient.ws?.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'; }, 3000);
+    flashStatusError(parsed.error);
     modelInput.value = modelDisplayString();
     // Clear the red border once the status message clears so a valid reverted
     // value is not left marked invalid indefinitely.
@@ -1341,16 +1353,14 @@ async function applyModelInput() {
       if (t && t.success) {
         currentThinkingLevel = parsed.thinking;
       } else {
-        statusText.textContent = (t && t.error) ? t.error : 'Failed to set thinking level';
-        setTimeout(() => { statusText.textContent = wsClient.ws?.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'; }, 3000);
+        flashStatusError((t && t.error) ? t.error : 'Failed to set thinking level');
       }
     }
     modelInput.classList.remove('invalid');
     updateModelDisplay();
   } else {
     modelInput.classList.add('invalid');
-    statusText.textContent = (r && r.error) ? r.error : 'Unknown model';
-    setTimeout(() => { statusText.textContent = wsClient.ws?.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'; }, 3000);
+    flashStatusError((r && r.error) ? r.error : 'Unknown model');
     modelInput.value = modelDisplayString();
     setTimeout(() => modelInput.classList.remove('invalid'), 3000);
   }
