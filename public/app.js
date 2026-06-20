@@ -1300,14 +1300,21 @@ function parseModelSpec(raw) {
 // Turn the status indicator red and show an error message; after `ms`,
 // restore the indicator to the real connection state and reset the text.
 function flashStatusError(msg, ms = 3000) {
-  statusIndicator.classList.remove('connected', 'streaming');
-  statusIndicator.classList.add('error');
+  // Reset the class atomically so no stale connected/disconnected/streaming
+  // class lingers alongside `error` (matches updateConnectionStatus' style).
+  statusIndicator.className = 'status-indicator error';
   statusText.textContent = msg;
   setTimeout(() => {
-    statusIndicator.classList.remove('error');
     const open = wsClient.ws?.readyState === WebSocket.OPEN;
-    statusIndicator.classList.add(open ? 'connected' : 'disconnected');
-    statusText.textContent = open ? 'Connected' : 'Disconnected';
+    // Preserve an in-progress stream: restore the streaming dot instead of
+    // forcing connected while state.isStreaming is true.
+    if (open && state.isStreaming) {
+      statusIndicator.className = 'status-indicator streaming';
+      statusText.textContent = 'Working...';
+    } else {
+      statusIndicator.className = `status-indicator ${open ? 'connected' : 'disconnected'}`;
+      statusText.textContent = open ? 'Connected' : 'Disconnected';
+    }
   }, ms);
 }
 
