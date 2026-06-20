@@ -1,3 +1,7 @@
+---
+status: COMPLETED
+---
+
 # Review: feat/single-model-input-box
 
 Branch: `feat/single-model-input-box` (1 commit: `caa897e`)
@@ -338,75 +342,55 @@ call site (Enter/blur) can fire when no session is active.
 
 **Disposition.** Not a finding. Double-guarded (disabled state + early-bail).
 
-## A4. `handleRPCEvent` ignores `model_select` / `thinking_level_changed` / `message_end.model` — display can go stale on server-initiated changes (non-blocking nit)
+## A4. `handleRPCEvent` ignores `model_select` / `thinking_level_changed` / `message_end.model` — display can go stale on server-initiated changes
 
-**Claim.** When the model or thinking level changes *server-side* (e.g. the
-user runs `/model opencode-go/...` as a slash command in the prompt, or Pi
-emits `model_select` / `thinking_level_changed`), the input box does not
-update. This gap predates this branch but is more consequential now that the
-single input is the source of truth.
+**Claim (retracted).** The original draft claimed that when the model or
+thinking level changes *server-side* (e.g. the user runs `/model` as a slash
+command, or Pi emits `model_select` / `thinking_level_changed`), the input box
+does not update, because `handleEvent` calls `touch(false)` and therefore sends
+no `live_session_updated`. That claim is **false** — see correction below.
 
-**Evidence — the gap is real.**
-- Backend: `PiRpcSession.handleEvent` updates `session.model` from
-  `model_select` (`bin/tau.js:341`), `session.thinkingLevel` from
-  `thinking_level_changed` (`bin/tau.js:340`), and `session.model` from
-  `message_end.message.model` (`bin/tau.js:349`). It then broadcasts the raw
-event (`bin/tau.js:354`) but calls `touch(false)`, so **no
-`live_session_updated`** is sent (`touch` only broadcasts when passed `true`,
-  `bin/tau.js:390-393`). Therefore `applyActiveSessionMetadata` — the client's
-  object-preserving sync site (`public/app.js:442`) — is **not** invoked for
-  these events.
-- Client: `handleRPCEvent` (`public/app.js:533`) has cases for
-  `agent_start/end`, `message_*`, `tool_execution_*`, `auto_compaction_*`,
-  `extension_*`, `session_name` — and **no** case for `model_select`,
-  `thinking_level_changed`, or any model extraction from `message_end`
-  (`handleMessageEnd`, `public/app.js:692`, does not touch
-  `currentModelId`/`currentThinkingLevel`). So the broadcast event is dropped
-  on arrival.
-- Client-initiated `set_model` (this branch's path) is consistent:
-  `handleResponse` → `updateStateFromResponse` → `touch(true)` →
-  `live_session_updated` → `applyActiveSessionMetadata` (`bin/tau.js:314-315`,
-  `public/app.js:267-269`). So the input updates correctly when the change
-  originates from the input box itself; staleness is limited to
-  server/`/model`-initiated changes.
+**Correction — the display already updates live; no follow-up needed.**
+- `PiRpcSession.handleEvent` does **not** rely on `touch` to broadcast updated
+  state. Its final line (`bin/tau.js:355`) calls
+  `this.manager.broadcastUpdated(this.id)` **directly and unconditionally**,
+  which sends `live_session_updated` with full `metadata()` (including `model`
+  and `thinkingLevel`, `bin/tau.js:174-186`). The `touch(false)` at
+  `bin/tau.js:336` only governs `lastActiveAt`; it is not the broadcast path.
+  The earlier draft read `touch(false)` and missed the direct `broadcastUpdated`
+  call two lines below the raw-event broadcast.
+- Backend state is updated in `handleEvent` *before* that broadcast:
+  `session.model` from `model_select` (`bin/tau.js:341`) and
+  `message_end.message.model` (`bin/tau.js:349-350`), `session.thinkingLevel`
+  from `thinking_level_changed` (`bin/tau.js:340`). So the broadcast carries
+  the *new* values.
+- Client: `liveSessionUpdated` → `applyActiveSessionMetadata(e.detail)` when
+  `e.detail.id === activeLiveSessionId` (`public/app.js:260-263`), which sets
+  `currentModelId = session.model || …` and `currentThinkingLevel =
+  session.thinkingLevel || 'off'` and calls `updateModelDisplay()`
+  (`public/app.js:442-444`). `updateModelDisplay` early-returns only while
+  `dataset.editing === '1'` (`public/app.js:1273`) — i.e. while the user is
+  actively typing in the box — so a `/model` slash command issued from the
+  prompt (user not editing the input) refreshes the input live.
+- Verified empirically: feeding `model_select` and `thinking_level_changed`
+  to a `PiRpcSession` with a stub manager records **2** `broadcastUpdated`
+  calls, with `session.model` / `session.thinkingLevel` updated to the new
+  values. The existing test `thinking_level_changed and model_select update
+  state` (`test/pi-rpc-session.test.js`) already asserts the state update.
 
-**Why the staleness now "sticks" silently.** The Round-2 Fix-2 early-bail
+**Why the "staleness sticks" argument also falls.** The Round-2 Fix-2 early-bail
 `if (modelInput.value.trim() === modelDisplayString()) return`
-(`public/app.js:1300`) compares against the stale `currentModelId`. After a
-`/model` slash command, the input shows the old `provider/model:level`, and a
-focus→blur with no edit bails out (no RPC, no revert) — so the stale value
-persists across interactions instead of being refreshed. With the old
-dropdown the same staleness existed but was cosmetic (a label + a separate
-thinking tag); now the editable input treats the stale string as ground
-truth. A tab switch or reload refreshes it via `fetchModelInfo` /
-`handleMirrorSync`.
+(`public/app.js:1300`) compares against `currentModelId`, but `currentModelId`
+is refreshed by `applyActiveSessionMetadata` on the `live_session_updated`
+  that `handleEvent` emits. So after a `/model` slash command the display and
+`currentModelId` move together; a subsequent focus→blur correctly no-ops
+against the *new* value rather than a stale one.
 
-**Why it is still non-blocking.**
-- Pre-existing: the old `updateModelLabel()` / `updateThinkingBtn()` were
-  wired to the same sync points and also ignored these events, so this branch
-  introduces no new gap — it only inherits one (guideline 4).
-- Not severe: the server's model/thinking state is correct; only the display
-  is stale, and it self-heals on the next tab switch / reconnect / page load.
-- Out of the change's scope: the plan scoped this branch to the header widget
-  swap and explicitly left `handleRPCEvent` alone.
-
-**Suggested follow-up (not required for merge).** Add two cases to
-`handleRPCEvent` for the active session:
-```js
-case 'model_select':
-  if (event.model) { currentModelId = event.model; updateModelDisplay(); }
-  break;
-case 'thinking_level_changed':
-  currentThinkingLevel = event.level || event.thinkingLevel || currentThinkingLevel;
-  updateModelDisplay();
-  break;
-```
-This closes the inherited gap and makes the input reflect `/model` and
-`/thinking` slash commands live. (Optional: also read `event.message.model`
-in the `message_end` branch.)
-
-**Disposition.** Non-blocking nit, recorded for a follow-up issue. Does not
-block merge of `feat/single-model-input-box`.
+**Disposition.** Not a finding. The suggested `handleRPCEvent` cases for
+`model_select` / `thinking_level_changed` are **redundant** — they would
+duplicate what `applyActiveSessionMetadata` already does via the
+`live_session_updated` path, and would be dead code. No follow-up issue
+warranted; does not block merge of `feat/single-model-input-box`.
 
 ## Appendix summary
 
@@ -415,9 +399,9 @@ block merge of `feat/single-model-input-box`.
 | A1 dead `availableModels.find` | not a finding | `availableModels` always `[]`; context window set via other paths; plan scoped as harmless |
 | A2 async races in `applyModelInput` | not a finding | converges by RPC-id ordering; matches old dropdown's async pattern |
 | A3 no-live-session branch missing `.invalid` clear | not a finding | unreachable — input disabled + early-bail on empty value |
-| A4 `handleRPCEvent` ignores server model/thinking events | non-blocking nit | pre-existing gap, self-heals on tab switch; more relevant now; suggested follow-up provided |
+| A4 `handleRPCEvent` ignores server model/thinking events | not a finding (corrected) | `handleEvent` calls `broadcastUpdated` directly (`bin/tau.js:355`), so `live_session_updated` → `applyActiveSessionMetadata` already refreshes the input live; the suggested follow-up is redundant |
 
 **Verdict unchanged: correct as-is, ready to merge.** The appendix documents
-why the four dismissed items do not require revision; A4 is the only one
-worth tracking, as a separate follow-up rather than a blocker for this
-branch.
+why the four dismissed items do not require revision. A4 was initially filed
+as a non-blocking nit but is retracted: the display already updates live via
+the `live_session_updated` broadcast, so no follow-up is warranted.
