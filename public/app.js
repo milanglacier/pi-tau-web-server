@@ -1388,13 +1388,12 @@ async function applyModelInput() {
   const r = await rpcCommand({ type: 'set_model', provider: parsed.provider, modelId: parsed.modelId }, `Switching to ${parsed.provider}/${parsed.modelId}...`);
   if (r && r.success) {
     const data = r.data || {};
-    if (data.provider && data.id) {
-      currentModelId = { provider: data.provider, id: data.id };
-    } else if (data.id) {
-      currentModelId = data.id;
-    } else {
-      currentModelId = { provider: parsed.provider, id: parsed.modelId };
-    }
+    // Always retain the provider so modelDisplayString() can render the
+    // full `provider/model:thinking` form. The server sometimes omits
+    // `provider` in its response; fall back to the user-typed value.
+    const provider = data.provider || parsed.provider;
+    const id = data.id || parsed.modelId;
+    currentModelId = (provider && id) ? { provider, id } : (id || parsed.modelId);
     if (data.contextWindow) {
       contextWindowSize = data.contextWindow;
       updateTokenUsage();

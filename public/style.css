@@ -1107,8 +1107,9 @@ body {
   color: var(--text-primary);
   transition: all var(--duration) var(--ease);
   white-space: nowrap;
-  max-width: 240px;
-  min-width: 160px;
+  flex: 1 1 auto;
+  max-width: 360px;
+  min-width: 120px;
   outline: none;
 }
 
@@ -3080,6 +3081,17 @@ body.hide-thinking .thinking-block { display: none !important; }
 
   .header-right {
     gap: 6px;
+  }
+
+  /* Let the model input use all remaining header space on small screens
+     so the full provider/model:thinking string stays visible. */
+  .model-input {
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: none;
+    width: 100%;
+    padding: 4px 8px;
+    font-size: 11px; /* fit more characters; matches .live-tab-model */
   }
 
 
