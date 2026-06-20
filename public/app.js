@@ -437,9 +437,8 @@ async function selectLiveSession(id) {
 function applyActiveSessionMetadata(session) {
   if (!session) return;
   currentModelId = session.model?.id || session.modelLabel || session.modelSpec || '';
-  updateModelLabel();
   currentThinkingLevel = session.thinkingLevel || 'off';
-  updateThinkingBtn();
+  updateModelDisplay();
 }
 
 async function closeLiveSession(id) {
@@ -1238,18 +1237,130 @@ async function showSessionStats() {
 // Model Picker
 // ═══════════════════════════════════════
 
-const modelDropdown = document.getElementById('model-dropdown');
-const modelDropdownBtn = document.getElementById('model-dropdown-btn');
-const modelDropdownLabel = document.getElementById('model-dropdown-label');
-const modelDropdownMenu = document.getElementById('model-dropdown-menu');
-const thinkingBtn = document.getElementById('thinking-btn');
-function updateThinkingBtn() {
-  thinkingBtn.textContent = currentThinkingLevel;
-  thinkingBtn.classList.toggle('off', currentThinkingLevel === 'off');
-}
+const modelInput = document.getElementById('model-input');
+const VALID_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 let currentModelId = '';
 let availableModels = [];
 let currentThinkingLevel = 'off';
+
+function modelDisplayString() {
+  if (!currentModelId) return '';
+  let provider, modelId;
+  if (typeof currentModelId === 'object' && currentModelId) {
+    provider = currentModelId.provider || '';
+    modelId = currentModelId.id || '';
+  } else {
+    const str = String(currentModelId);
+    const slashIdx = str.indexOf('/');
+    if (slashIdx === -1) {
+      provider = '';
+      modelId = str;
+    } else {
+      provider = str.slice(0, slashIdx);
+      modelId = str.slice(slashIdx + 1);
+    }
+  }
+  const level = currentThinkingLevel || 'off';
+  if (provider && modelId) return `${provider}/${modelId}:${level}`;
+  if (modelId) return `${modelId}:${level}`;
+  return '';
+}
+
+function updateModelDisplay() {
+  if (modelInput.dataset.editing === '1') return;
+  const display = modelDisplayString();
+  modelInput.value = display;
+  modelInput.classList.remove('invalid');
+}
+
+function parseModelSpec(raw) {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) {
+    return { error: 'Use format provider/model[:thinking], e.g. opencode-go/deepseek-v4-pro:xhigh' };
+  }
+  const match = trimmed.match(/^([^\/:]+)\/([^\/:]+)(:([a-zA-Z]+))?$/);
+  if (!match) {
+    return { error: 'Use format provider/model[:thinking], e.g. opencode-go/deepseek-v4-pro:xhigh' };
+  }
+  const provider = match[1];
+  const modelId = match[2];
+  let thinking = null;
+  if (match[4]) {
+    thinking = match[4].toLowerCase();
+    if (!VALID_THINKING_LEVELS.has(thinking)) {
+      return { error: 'Invalid thinking level. Use one of: off, minimal, low, medium, high, xhigh' };
+    }
+  }
+  return { provider, modelId, thinking };
+}
+
+async function applyModelInput() {
+  if (!viewingActiveSession || !activeLiveSessionId) {
+    statusText.textContent = 'Select a live Tau tab first.';
+    setTimeout(() => { statusText.textContent = wsClient.ws?.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'; }, 3000);
+    modelInput.value = modelDisplayString();
+    return;
+  }
+  const parsed = parseModelSpec(modelInput.value);
+  if (parsed.error) {
+    modelInput.classList.add('invalid');
+    statusText.textContent = parsed.error;
+    setTimeout(() => { statusText.textContent = wsClient.ws?.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'; }, 3000);
+    modelInput.value = modelDisplayString();
+    return;
+  }
+  const r = await rpcCommand({ type: 'set_model', provider: parsed.provider, modelId: parsed.modelId }, `Switching to ${parsed.provider}/${parsed.modelId}...`);
+  if (r && r.success) {
+    const data = r.data || {};
+    if (data.provider && data.id) {
+      currentModelId = { provider: data.provider, id: data.id };
+    } else if (data.id) {
+      currentModelId = data.id;
+    } else {
+      currentModelId = { provider: parsed.provider, id: parsed.modelId };
+    }
+    if (data.contextWindow) {
+      contextWindowSize = data.contextWindow;
+      updateTokenUsage();
+    }
+    if (parsed.thinking !== null) {
+      const t = await rpcCommand({ type: 'set_thinking_level', level: parsed.thinking }, 'Setting thinking...');
+      if (t && t.success) {
+        currentThinkingLevel = parsed.thinking;
+      } else {
+        statusText.textContent = (t && t.error) ? t.error : 'Failed to set thinking level';
+        setTimeout(() => { statusText.textContent = wsClient.ws?.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'; }, 3000);
+      }
+    }
+    modelInput.classList.remove('invalid');
+    updateModelDisplay();
+  } else {
+    modelInput.classList.add('invalid');
+    statusText.textContent = (r && r.error) ? r.error : 'Unknown model';
+    setTimeout(() => { statusText.textContent = wsClient.ws?.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'; }, 3000);
+    modelInput.value = modelDisplayString();
+  }
+}
+
+modelInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    modelInput.blur();
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    modelInput.value = modelDisplayString();
+    modelInput.classList.remove('invalid');
+    modelInput.blur();
+  }
+});
+modelInput.addEventListener('focus', () => {
+  modelInput.dataset.editing = '1';
+  modelInput.classList.remove('invalid');
+});
+modelInput.addEventListener('blur', () => {
+  delete modelInput.dataset.editing;
+  applyModelInput();
+});
 
 async function fetchModelInfo() {
   try {
@@ -1266,7 +1377,6 @@ async function fetchModelInfo() {
     if (stateData.success && stateData.data?.model) {
       const stateModel = stateData.data.model;
       currentModelId = typeof stateModel === 'string' ? stateModel : (stateModel.id || stateModel.name || '');
-      updateModelLabel();
 
       const model = availableModels.find(m => m.id === currentModelId);
       if (model?.contextWindow) {
@@ -1276,108 +1386,12 @@ async function fetchModelInfo() {
     }
     if (stateData.success && stateData.data?.thinkingLevel) {
       currentThinkingLevel = stateData.data.thinkingLevel;
-      updateThinkingBtn();
     }
+    updateModelDisplay();
   } catch (e) {
     // ignore
   }
 }
-
-function updateModelLabel() {
-  const shortName = currentModelId.replace(/^claude-/, '').replace(/-\d{8}$/, '');
-  modelDropdownLabel.textContent = shortName || 'model';
-}
-
-function toggleModelDropdown() {
-  const isOpen = !modelDropdownMenu.classList.contains('hidden');
-  if (isOpen) {
-    closeModelDropdown();
-  } else {
-    openModelDropdown();
-  }
-}
-
-function openModelDropdown() {
-  modelDropdownMenu.innerHTML = '';
-
-  // Search input
-  const search = document.createElement('input');
-  search.className = 'model-dropdown-search';
-  search.placeholder = 'Search models…';
-  search.type = 'text';
-  modelDropdownMenu.appendChild(search);
-
-  // Items container
-  const itemsContainer = document.createElement('div');
-  itemsContainer.className = 'model-dropdown-items';
-  modelDropdownMenu.appendChild(itemsContainer);
-
-  function renderItems(filter) {
-    itemsContainer.innerHTML = '';
-    const query = (filter || '').toLowerCase();
-    availableModels.forEach(m => {
-      const shortName = m.id.replace(/-\d{8}$/, '');
-      const providerStr = m.provider || '';
-      if (query && !shortName.toLowerCase().includes(query) && !providerStr.toLowerCase().includes(query)) return;
-
-      const el = document.createElement('div');
-      el.className = `model-dropdown-item${m.id === currentModelId ? ' active' : ''}`;
-      const ctxK = m.contextWindow ? `${(m.contextWindow / 1000).toFixed(0)}k` : '';
-      const providerLabel = m.provider && m.provider !== 'anthropic' ? `<span class="model-dropdown-item-provider">${m.provider}</span>` : '';
-      el.innerHTML = `<span>${shortName}${providerLabel}</span><span class="model-dropdown-item-ctx">${ctxK}</span>`;
-      el.addEventListener('click', async () => {
-        closeModelDropdown();
-        const display = m.id.replace(/^claude-/, '').replace(/-\d{8}$/, '');
-        await rpcCommand({ type: 'set_model', provider: m.provider, modelId: m.id }, `Switching to ${display}...`);
-        currentModelId = m.id;
-        updateModelLabel();
-        if (m.contextWindow) {
-          contextWindowSize = m.contextWindow;
-          updateTokenUsage();
-        }
-      });
-      itemsContainer.appendChild(el);
-    });
-  }
-
-  renderItems('');
-
-  search.addEventListener('input', () => renderItems(search.value));
-  search.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { closeModelDropdown(); e.stopPropagation(); }
-    if (e.key === 'Enter') {
-      const first = itemsContainer.querySelector('.model-dropdown-item');
-      if (first) first.click();
-    }
-  });
-
-  modelDropdownMenu.classList.remove('hidden');
-  modelDropdown.classList.add('open');
-  requestAnimationFrame(() => search.focus());
-}
-
-function closeModelDropdown() {
-  modelDropdownMenu.classList.add('hidden');
-  modelDropdown.classList.remove('open');
-}
-
-modelDropdownBtn.addEventListener('click', toggleModelDropdown);
-
-// Close dropdown on outside click
-document.addEventListener('click', (e) => {
-  if (!modelDropdown.contains(e.target)) {
-    closeModelDropdown();
-  }
-});
-
-// Thinking level button — cycles through levels
-thinkingBtn.addEventListener('click', async () => {
-  const data = await rpcCommand({ type: 'cycle_thinking_level' }, 'Cycling thinking...');
-  if (data?.success && data.data?.level) {
-    currentThinkingLevel = data.data.level;
-    updateThinkingBtn();
-  }
-});
 
 // ═══════════════════════════════════════
 // Keyboard shortcuts
@@ -1393,10 +1407,6 @@ document.addEventListener('keydown', (e) => {
     }
     if (!commandPalette.classList.contains('hidden')) {
       closeCommandPalette();
-      return;
-    }
-    if (!modelDropdownMenu.classList.contains('hidden')) {
-      closeModelDropdown();
       return;
     }
 
@@ -1628,7 +1638,6 @@ function handleMirrorSync(data) {
   // Update model display
   if (data.model || data.session?.modelLabel || data.session?.modelSpec) {
     currentModelId = (typeof data.model === 'string' ? data.model : data.model?.id) || data.session?.modelLabel || data.session?.modelSpec || '';
-    updateModelLabel();
     if (data.model?.contextWindow) {
       contextWindowSize = data.model.contextWindow;
     }
@@ -1637,8 +1646,8 @@ function handleMirrorSync(data) {
   // Update thinking level
   if (data.thinkingLevel) {
     currentThinkingLevel = data.thinkingLevel;
-    updateThinkingBtn();
   }
+  updateModelDisplay();
 
   // Clear and render message history. Reset streaming handles after the
   // snapshot arrives because live deltas may have created a streaming element
@@ -1713,8 +1722,7 @@ function updateMirrorInputState() {
     inputArea?.classList.add('mirror-readonly');
   }
   commandBtn.disabled = !hasLiveSession;
-  modelDropdownBtn.disabled = !hasLiveSession;
-  thinkingBtn.disabled = !hasLiveSession;
+  modelInput.disabled = !hasLiveSession;
 }
 
 // ═══════════════════════════════════════
@@ -2008,7 +2016,7 @@ async function openSettings() {
       // Thinking level
       btnThinkingLevel.textContent = s.thinkingLevel || 'off';
       currentThinkingLevel = s.thinkingLevel || 'off';
-      updateThinkingBtn();
+      updateModelDisplay();
       // Session name is managed by Pi session history; no editable field in standalone settings.
     }
   } catch (e) {
@@ -2051,7 +2059,7 @@ btnThinkingLevel.addEventListener('click', async () => {
   if (data?.success && data.data?.level) {
     btnThinkingLevel.textContent = data.data.level;
     currentThinkingLevel = data.data.level;
-    updateThinkingBtn();
+    updateModelDisplay();
   }
 });
 
