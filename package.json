@@ -18,6 +18,9 @@
   "bin": {
     "tau": "./bin/tau.js"
   },
+  "scripts": {
+    "test": "node --test"
+  },
   "dependencies": {
     "ws": "^8.16.0",
     "qrcode": "^1.5.0"

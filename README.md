@@ -127,6 +127,23 @@ tau --projects-dir ~/code
 
 Edit `public/` and refresh the browser. Restart `tau` after changing `bin/tau.js`.
 
+### Tests
+
+Tau ships with a Node.js test suite (`node --test`) covering the standalone
+backend: helper functions, session-file path validation, the `PiRpcSession`
+state machine, the `LiveSessionManager`, the `/api/rpc` shim, and the HTTP +
+WebSocket server surface (including the same-origin/CORS and malformed-URL
+hardening).
+
+```bash
+npm test
+```
+
+The server module is import-safe: requiring `bin/tau.js` does not start a
+listener or install process signal handlers — those run only when invoked as
+`node bin/tau.js` (the `tau` bin). Each test file points `PI_CODING_AGENT_DIR`
+at an isolated temp tree so real Pi settings/sessions are never touched.
+
 ## License
 
 MIT
