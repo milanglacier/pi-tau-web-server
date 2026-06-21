@@ -1,3 +1,8 @@
+---
+status: COMPLETED
+---
+
+
 Goal: Replace the header model text input with a click-to-open model picker popup that works the same on desktop and mobile, supports fuzzy completion by provider or model name, and only updates the session when the user explicitly saves.
 
 ## Current state from inspection
@@ -145,3 +150,31 @@ Replaced the guard (`if (!viewingActiveSession || !activeLiveSessionId) …`) wi
 ### Fix for Finding 2 — Make thinking-level failure non-fatal
 
 Changed the `set_thinking_level` failure branch in `applyModelSpec()`: instead of returning `{ success: false, error }` (which kept the popup open), the error is now flashed via `flashStatusError` and the function falls through to `return { success: true }`. The popup closes normally, the header shows the new model with the old thinking level (matching server state), and the user can retry the thinking level by reopening the picker.
+
+## Second review of implementation (feat/model-ui-input-box-enable-fuzzy-match)
+
+### Finding 1: Reset the highlighted suggestion when the query changes
+
+`modelPickerInput`'s `input` handler re-renders suggestions without resetting `modelPickerActiveIndex`, and `renderModelPickerSuggestions()` only clamps the old index when it falls outside the new result count. After a user navigates down the list, edits the query, and presses Enter, the picker selects the same numeric index from the new fuzzy results instead of the top-ranked result for the new query. For example, arrowing to the sixth `claude` result, changing the query to `opus`, and pressing Enter fills the sixth `opus` result, which can lead to saving an unintended model with the normal second Enter confirmation. Reset the active index when the query text changes so each new query starts from the top result.
+
+Location: `/Users/northyear/Desktop/personal-projects/tau/public/app.js:1676-1679`
+
+### Verdict: needs revision
+
+The implementation is mostly aligned with the plan, and `npm test` passes. The remaining issue is confined to keyboard selection in the fuzzy picker, but it can cause the explicit confirmation flow to choose a different model than the user expects after editing a query.
+
+### Fix for second-review Finding 1 — Reset suggestion highlight on query edits
+
+Updated the model picker input handler in `public/app.js` so any user edit resets `modelPickerActiveIndex` before suggestions are rendered. Each new query now highlights the top-ranked fuzzy result instead of carrying over the previous numeric selection, while arrow-key movement and async list refresh behavior continue to preserve the current selection as before.
+
+Validation: ran `npm test`; all 121 tests passed.
+
+## Third review of implementation (feat/model-ui-input-box-enable-fuzzy-match)
+
+### Findings
+
+No findings.
+
+### Verdict: correct as-is
+
+The current branch addresses the prior review findings, and the model picker implementation remains aligned with the plan. `npm test` passes with all 121 tests successful.

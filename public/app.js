@@ -1674,6 +1674,7 @@ modelPickerClose.addEventListener('click', closeModelPicker);
 modelPickerCancel.addEventListener('click', closeModelPicker);
 modelPickerSave.addEventListener('click', saveModelPicker);
 modelPickerInput.addEventListener('input', () => {
+  modelPickerActiveIndex = -1;
   modelPickerJustSelected = false;
   setModelPickerMessage(MODEL_PICKER_HELP, false);
   renderModelPickerSuggestions();
