@@ -10,105 +10,12 @@ import { DialogHandler } from './dialogs.js';
 import { SessionSidebar, type SidebarProject, type SidebarSession } from './session-sidebar.js';
 import { themes, applyTheme, getCurrentTheme } from './themes.js';
 import { FileBrowser, getFileIcon } from './file-browser.js';
-import { Launcher } from './launcher.js';
+import { setupLauncherPanel } from './launcher-panel.js';
+import { setupModelPicker } from './model-picker.js';
+import { setupVoiceInput } from './voice-input.js';
+import { setupCommandPalette } from './command-palette.js';
 
-type ModelRecord = {
-  provider?: string;
-  id?: string;
-  name?: string;
-  model?: string;
-  label?: string;
-  context?: string | number;
-  contextWindow?: string | number;
-  context_window?: string | number;
-  maxOutput?: string | number;
-  max_output?: string | number;
-  maxOut?: string | number;
-  thinking?: boolean | string;
-  images?: boolean | string;
-  [key: string]: unknown;
-};
-
-type LiveSession = {
-  id: string;
-  cwd?: string;
-  sessionFile?: string | null;
-  sessionName?: string | null;
-  modelSpec?: string;
-  modelLabel?: string;
-  model?: ModelRecord | string | null;
-  thinkingLevel?: string;
-  isStreaming?: boolean;
-  createdAt?: string;
-  lastActiveAt?: string;
-  contextUsage?: UsageRecord;
-};
-
-type LiveInstance = {
-  sessionFile?: string | null;
-  cwd?: string;
-  port: string;
-};
-
-type UsageRecord = {
-  input?: number;
-  output?: number;
-  cacheRead?: number;
-  cacheWrite?: number;
-  cost?: { total?: number };
-  [key: string]: unknown;
-};
-
-type MessageContentBlock = {
-  type?: string;
-  text?: string;
-  thinking?: string;
-  source?: { data?: string; media_type?: string };
-  data?: string;
-  media_type?: string;
-  id?: string;
-  name?: string;
-  arguments?: Record<string, unknown>;
-};
-
-type AppMessage = {
-  id?: string;
-  role?: string;
-  content?: string | MessageContentBlock[];
-  usage?: UsageRecord;
-  images?: PendingImage[];
-  toolCallId?: string;
-  isError?: boolean;
-};
-
-type AppEvent = {
-  type?: string;
-  sessionId?: string;
-  session?: LiveSession;
-  message?: AppMessage | string;
-  assistantMessageEvent?: { type?: string; delta?: string };
-  toolCallId?: string;
-  toolName?: string;
-  args?: Record<string, unknown>;
-  partialResult?: unknown;
-  result?: unknown;
-  isError?: boolean;
-  method?: string;
-  id?: string;
-  name?: string;
-  error?: string;
-  summary?: string;
-  contextUsage?: UsageRecord;
-  sessionFile?: string;
-  [key: string]: unknown;
-};
-
-type PendingImage = { data: string; mimeType: string };
-type PendingFilePath = { path: string; name: string; ext: string; sessionId?: string | null };
-type QueuedCommand = { type: string; message?: string; images?: PendingImage[]; sessionId?: string };
-type ExtensionUIRequest = { sessionId: string; event: AppEvent };
-type RpcCommand = { type: string; sessionId?: string; filePath?: string; [key: string]: unknown };
-
+import type { AppEvent, AppMessage, ExtensionUIRequest, LiveInstance, LiveSession, ModelRecord, PendingFilePath, PendingImage, QueuedCommand, RpcCommand, UsageRecord } from './app-types.js';
 
 // Initialize components
 const wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws';
@@ -171,6 +78,36 @@ function setStatusMessage(text: string, restoreText: string | null = null, resto
     }, restoreMs);
   }
 }
+// Turn the status indicator red and show an error message; after `ms`,
+// restore the indicator to the real connection state and reset the text.
+function flashStatusError(msg, ms = 3000) {
+  // Reset the class atomically so no stale connected/disconnected/streaming
+  // class lingers alongside `error` (matches updateConnectionStatus' style).
+  statusIndicator.className = 'status-indicator error';
+  // Cancel any pending status-text restore (e.g. rpcCommand's 'Done' ->
+  // 'Connected' timer from an earlier successful step in the same flow) so it
+  // cannot overwrite this error message while the red dot persists.
+  clearTimeout(statusRestoreTimer);
+  // Cancel any prior flash restore so overlapping flashes (a second
+  // model-save failure within 3s) cannot leak a stray restore that
+  // would reset the dot before this flash's own restore fires.
+  clearTimeout(statusFlashTimer);
+  statusText.textContent = msg;
+  // Schedule the dot+text restore on the dedicated statusFlashTimer so a
+  // later setStatusMessage (e.g. the user clicking the thinking-level cycle
+  // button right after a thinking-level failure) cannot cancel the only
+  // callback that clears the `error` class. If a new status message does
+  // arrive, setStatusMessage itself retires the flash via restoreStatusIndicator.
+  statusFlashTimer = setTimeout(() => {
+    statusFlashTimer = null;
+    restoreStatusIndicator();
+    const open = wsClient.ws?.readyState === WebSocket.OPEN;
+    // Preserve an in-progress stream: restore the streaming text too.
+    statusText.textContent = (open && state.isStreaming) ? 'Working...'
+      : (open ? 'Connected' : 'Disconnected');
+  }, ms);
+}
+
 const sidebarEl = document.getElementById('sidebar');
 const sidebarToggle = document.getElementById('sidebar-toggle');
 const sidebarOverlay = document.getElementById('sidebar-overlay');
@@ -184,6 +121,26 @@ const tokenUsageEl = document.getElementById('token-usage');
 const scrollBottomBtn = document.getElementById('scroll-bottom-btn');
 const scrollBottomBadge = document.getElementById('scroll-bottom-badge');
 const messagesContainer = document.getElementById('messages');
+const launcherPanel = setupLauncherPanel({
+  launcherEl: document.getElementById('launcher'),
+  messagesContainer,
+  async createSession(projectPath) {
+    try {
+      const res = await fetch('/api/live-sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cwd: projectPath, model: '' }),
+      });
+      const data = await res.json();
+      if (data.session) {
+        upsertLiveSession(data.session);
+        await selectLiveSession(data.session.id);
+      }
+    } catch (e) {
+      console.error('[Launcher] Failed to create Tau tab:', e);
+    }
+  },
+});
 
 // State tracking
 let currentStreamingElement: HTMLElement | null = null;
@@ -375,7 +332,7 @@ wsClient.addEventListener('serverError', (e) => {
 wsClient.addEventListener('stateUpdate', (e) => {
   if (e.detail.mode === 'standalone') {
     const wasViewingLive = viewingActiveSession;
-    const launcherVisible = isLauncherVisible();
+    const launcherVisible = launcherPanel.isVisible();
     isMirrorMode = true;
     setLiveSessions(e.detail.liveSessions || []);
     if (!hasRestoredInitialLiveSession || (wasViewingLive && !launcherVisible)) {
@@ -544,7 +501,7 @@ async function selectLiveSession(id) {
   const session = liveSessions.find(s => s.id === id);
   if (!session) return;
   suspendCurrentDialogForTabSwitch(id);
-  hideLauncher();
+  launcherPanel.hide();
   activeLiveSessionId = id;
   localStorage.setItem('tau-active-live-session-id', id);
   viewingActiveSession = true;
@@ -581,9 +538,7 @@ function applyActiveSessionMetadata(session) {
   if (!session) return;
   // Server is canonical: session.model is always null or a full {provider,id}
   // object, so assign directly. No modelLabel/modelSpec string fallbacks.
-  currentModelId = session.model || '';
-  currentThinkingLevel = session.thinkingLevel || 'off';
-  updateModelDisplay();
+  modelPickerController.setModelState(session.model || '', session.thinkingLevel || 'off');
 }
 
 async function closeLiveSession(id) {
@@ -1274,53 +1229,14 @@ abortBtn.addEventListener('click', () => {
   showTypingIndicator(false);
 });
 
-// ═══════════════════════════════════════
 // Command Palette
-// ═══════════════════════════════════════
-
-const commandBtn = document.getElementById('command-btn');
-const commandPalette = document.getElementById('command-palette');
-const commandPaletteOverlay = document.getElementById('command-palette-overlay');
-const commandList = document.getElementById('command-list');
-
-const commands = [
+const commandPaletteController = setupCommandPalette([
   { icon: '🗜️', label: 'Compact', desc: 'Compact context to save tokens', action: () => rpcCommand({ type: 'compact' }, 'Compacting...') },
   { icon: '📋', label: 'Export HTML', desc: 'Export session as HTML file', action: () => rpcExportHtml() },
   { icon: '📊', label: 'Session Stats', desc: 'Show session statistics', action: () => showSessionStats() },
   { icon: '⬇️', label: 'Expand All Tools', desc: 'Expand all tool cards', action: () => toolCardRenderer.expandAll() },
   { icon: '⬆️', label: 'Collapse All Tools', desc: 'Collapse all tool cards', action: () => toolCardRenderer.collapseAll() },
-
-];
-
-function openCommandPalette() {
-  commandList.innerHTML = '';
-  commands.forEach(cmd => {
-    const el = document.createElement('div');
-    el.className = 'command-item';
-    el.innerHTML = `
-      <div class="command-icon">${cmd.icon}</div>
-      <div>
-        <div class="command-label">${cmd.label}</div>
-        <div class="command-desc">${cmd.desc}</div>
-      </div>
-    `;
-    el.addEventListener('click', () => {
-      closeCommandPalette();
-      cmd.action();
-    });
-    commandList.appendChild(el);
-  });
-  commandPalette.classList.remove('hidden');
-  commandPaletteOverlay.classList.remove('hidden');
-}
-
-function closeCommandPalette() {
-  commandPalette.classList.add('hidden');
-  commandPaletteOverlay.classList.add('hidden');
-}
-
-commandBtn.addEventListener('click', openCommandPalette);
-commandPaletteOverlay.addEventListener('click', closeCommandPalette);
+]);
 
 async function rpcCommand(cmd: RpcCommand, statusMsg = '') {
   try {
@@ -1373,482 +1289,16 @@ async function showSessionStats() {
   }
 }
 
-// ═══════════════════════════════════════
 // Model Picker
-// ═══════════════════════════════════════
-
-const modelInput = document.getElementById('model-input');
-const modelPickerOverlay = document.getElementById('model-picker-overlay');
-const modelPicker = document.getElementById('model-picker');
-const modelPickerInput = document.getElementById('model-picker-input');
-const modelPickerList = document.getElementById('model-picker-list');
-const modelPickerMessage = document.getElementById('model-picker-message');
-const modelPickerClose = document.getElementById('model-picker-close');
-const modelPickerCancel = document.getElementById('model-picker-cancel');
-const modelPickerSave = document.getElementById('model-picker-save');
-const VALID_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
-const MODEL_PICKER_HELP = 'Type provider or model name; optional :off|minimal|low|medium|high|xhigh';
-let currentModelId: ModelRecord | string = '';
-let availableModels: Array<ModelRecord | string> = [];
-let currentThinkingLevel = 'off';
-let modelPickerMatches: ModelRecord[] = [];
-let modelPickerActiveIndex = -1;
-let modelPickerJustSelected = false;
-
-function modelDisplayString() {
-  if (!currentModelId) return '';
-  let provider, modelId;
-  if (typeof currentModelId === 'object' && currentModelId) {
-    provider = currentModelId.provider || '';
-    modelId = currentModelId.id || '';
-  } else {
-    // Legacy fallback: a bare string is ambiguous when model names contain
-    // slashes (e.g. openrouter/z-ai/glm-5.2). Split ONCE on the first slash
-    // to separate provider from the rest, because the server normalizes
-    // everything into {provider, id} objects before it reaches us.
-    const str = String(currentModelId);
-    const slashIdx = str.indexOf('/');
-    if (slashIdx === -1) {
-      provider = '';
-      modelId = str;
-    } else {
-      provider = str.slice(0, slashIdx);
-      modelId = str.slice(slashIdx + 1);
-    }
-  }
-  const level = currentThinkingLevel || 'off';
-  if (provider && modelId) return `${provider}/${modelId}:${level}`;
-  if (modelId) return `${modelId}:${level}`;
-  return '';
-}
-
-function updateModelDisplay() {
-  const display = modelDisplayString() || 'Model';
-  modelInput.textContent = display;
-  modelInput.title = display === 'Model' ? 'Choose model and (optionally) thinking level for this session' : display;
-  modelInput.classList.remove('invalid');
-}
-
-function parseModelSpec(raw) {
-  const trimmed = String(raw || '').trim();
-  if (!trimmed) {
-    return { error: 'Use format provider/model[:thinking], e.g. opencode-go/deepseek-v4-pro:xhigh' };
-  }
-  // Model IDs can contain slashes (e.g. OpenRouter "z-ai/glm-5.2"), so the
-  // input format is provider/<rest...>[:level]. Split on the FIRST slash to
-  // separate provider, then split off the optional :level suffix from the end.
-  const firstSlash = trimmed.indexOf('/');
-  if (firstSlash === -1) {
-    return { error: 'Use format provider/model[:thinking], e.g. opencode-go/deepseek-v4-pro:xhigh' };
-  }
-  const provider = trimmed.slice(0, firstSlash);
-  const rest = trimmed.slice(firstSlash + 1);
-  if (!provider || !rest) {
-    return { error: 'Use format provider/model[:thinking], e.g. opencode-go/deepseek-v4-pro:xhigh' };
-  }
-  let modelId = rest;
-  let thinking = null;
-  const lastColon = rest.lastIndexOf(':');
-  if (lastColon !== -1) {
-    const candidate = rest.slice(lastColon + 1).toLowerCase();
-    if (VALID_THINKING_LEVELS.has(candidate)) {
-      thinking = candidate;
-      modelId = rest.slice(0, lastColon);
-    }
-  }
-  if (!modelId) {
-    return { error: 'Use format provider/model[:thinking], e.g. opencode-go/deepseek-v4-pro:xhigh' };
-  }
-  return { provider, modelId, thinking };
-}
-
-// Turn the status indicator red and show an error message; after `ms`,
-// restore the indicator to the real connection state and reset the text.
-function flashStatusError(msg, ms = 3000) {
-  // Reset the class atomically so no stale connected/disconnected/streaming
-  // class lingers alongside `error` (matches updateConnectionStatus' style).
-  statusIndicator.className = 'status-indicator error';
-  // Cancel any pending status-text restore (e.g. rpcCommand's 'Done' ->
-  // 'Connected' timer from an earlier successful step in the same flow) so it
-  // cannot overwrite this error message while the red dot persists.
-  clearTimeout(statusRestoreTimer);
-  // Cancel any prior flash restore so overlapping flashes (a second
-  // model-save failure within 3s) cannot leak a stray restore that
-  // would reset the dot before this flash's own restore fires.
-  clearTimeout(statusFlashTimer);
-  statusText.textContent = msg;
-  // Schedule the dot+text restore on the dedicated statusFlashTimer so a
-  // later setStatusMessage (e.g. the user clicking the thinking-level cycle
-  // button right after a thinking-level failure) cannot cancel the only
-  // callback that clears the `error` class. If a new status message does
-  // arrive, setStatusMessage itself retires the flash via restoreStatusIndicator.
-  statusFlashTimer = setTimeout(() => {
-    statusFlashTimer = null;
-    restoreStatusIndicator();
-    const open = wsClient.ws?.readyState === WebSocket.OPEN;
-    // Preserve an in-progress stream: restore the streaming text too.
-    statusText.textContent = (open && state.isStreaming) ? 'Working...'
-      : (open ? 'Connected' : 'Disconnected');
-  }, ms);
-}
-
-function normalizeAvailableModel(model) {
-  if (!model) return null;
-  if (typeof model === 'string') {
-    const slashIdx = model.indexOf('/');
-    if (slashIdx === -1) return null;
-    return { provider: model.slice(0, slashIdx), id: model.slice(slashIdx + 1), label: model };
-  }
-  const provider = model.provider || '';
-  const id = model.id || model.model || model.name || '';
-  if (!provider || !id) return null;
-  return {
-    provider,
-    id,
-    label: `${provider}/${id}`,
-    contextWindow: model.contextWindow || model.context || model.context_window || '',
-    maxOutput: model.maxOutput || model.max_output || model.maxOut || '',
-    thinking: model.thinking,
-    images: model.images,
-  };
-}
-
-function normalizedAvailableModels() {
-  const seen = new Set();
-  const out = [];
-  for (const item of availableModels || []) {
-    const normalized = normalizeAvailableModel(item);
-    if (!normalized) continue;
-    const key = `${normalized.provider}/${normalized.id}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(normalized);
-  }
-  return out;
-}
-
-function modelRef(model) {
-  return `${model.provider}/${model.id}`;
-}
-
-function fuzzyCharsEquivalent(a, b) {
-  if (a === b) return true;
-  const groups = ['o0', 'i1l', 's5', 'b8', 'g9', 'z2'];
-  return groups.some((group) => group.includes(a) && group.includes(b));
-}
-
-function fuzzyMatch(query, text) {
-  const q = String(query || '').toLowerCase();
-  const t = String(text || '').toLowerCase();
-  if (!q) return { score: 0 };
-  if (!t) return null;
-  const compactQ = q.replace(/[\W_]+/g, '');
-  const compactT = t.replace(/[\W_]+/g, '');
-  if (compactQ && compactT.includes(compactQ)) {
-    return { score: 1200 - compactT.indexOf(compactQ) };
-  }
-
-  let qi = 0;
-  let lastMatch = -1;
-  let score = 0;
-  for (let ti = 0; ti < t.length && qi < q.length; ti++) {
-    const qc = q[qi];
-    const tc = t[ti];
-    const direct = qc === tc;
-    const swap = fuzzyCharsEquivalent(qc, tc);
-    if (!direct && !swap) continue;
-    score += direct ? 20 : 8;
-    if (ti === 0 || /[\s/_:.-]/.test(t[ti - 1])) score += 12;
-    if (lastMatch === ti - 1) score += 18;
-    if (lastMatch !== -1) score -= Math.max(0, ti - lastMatch - 1);
-    lastMatch = ti;
-    qi++;
-  }
-  if (qi !== q.length) return null;
-  if (t === q) score += 500;
-  if (t.startsWith(q)) score += 250;
-  return { score };
-}
-
-function fuzzyFilter(items, query, getText) {
-  const tokens = String(query || '').trim().split(/\s+/).filter(Boolean);
-  if (!tokens.length) return items.map((item, index) => ({ item, score: -index }));
-  const scored = [];
-  items.forEach((item, index) => {
-    const text = getText(item);
-    let total = 0;
-    for (const token of tokens) {
-      const match = fuzzyMatch(token, text);
-      if (!match) return;
-      total += match.score;
-    }
-    scored.push({ item, score: total - index * 0.01 });
-  });
-  return scored.sort((a, b) => b.score - a.score);
-}
-
-function validThinkingSuffix(raw) {
-  const text = String(raw || '').trim();
-  const colonIdx = text.lastIndexOf(':');
-  if (colonIdx === -1) return '';
-  const candidate = text.slice(colonIdx + 1).toLowerCase();
-  return VALID_THINKING_LEVELS.has(candidate) ? `:${candidate}` : '';
-}
-
-function setModelPickerMessage(message = MODEL_PICKER_HELP, isError = false) {
-  modelPickerMessage.textContent = message;
-  modelPickerMessage.classList.toggle('error', isError);
-  modelPickerInput.classList.toggle('invalid', isError);
-}
-
-function updateModelPickerActiveItem() {
-  modelPickerList.querySelectorAll('.model-item').forEach((item, index) => {
-    const active = index === modelPickerActiveIndex;
-    item.classList.toggle('active', active);
-    item.setAttribute('aria-selected', active ? 'true' : 'false');
-  });
-}
-
-function renderModelPickerSuggestions() {
-  const raw = modelPickerInput.value || '';
-  modelPickerSave.disabled = !raw.trim();
-  modelPickerList.innerHTML = '';
-  modelPickerJustSelected = false;
-  if (raw.includes(':')) {
-    modelPickerMatches = [];
-    modelPickerActiveIndex = -1;
-    setModelPickerMessage(MODEL_PICKER_HELP, false);
-    return;
-  }
-
-  const models = normalizedAvailableModels();
-  const query = raw.trim();
-  modelPickerMatches = fuzzyFilter(models, query, (model) => `${model.id} ${model.provider}`).slice(0, 50).map((m) => m.item);
-  if (modelPickerActiveIndex >= modelPickerMatches.length) modelPickerActiveIndex = modelPickerMatches.length - 1;
-  if (modelPickerActiveIndex < 0 && modelPickerMatches.length) modelPickerActiveIndex = 0;
-
-  if (!modelPickerMatches.length) {
-    const empty = document.createElement('div');
-    empty.className = 'model-item-context';
-    empty.textContent = models.length ? 'No matching models. You can still save a manual provider/model value.' : 'No model list available. You can still save a manual provider/model value.';
-    empty.style.padding = '10px 12px';
-    modelPickerList.appendChild(empty);
-    return;
-  }
-
-  modelPickerMatches.forEach((model, index) => {
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = `model-item${index === modelPickerActiveIndex ? ' active' : ''}`;
-    item.setAttribute('role', 'option');
-    item.setAttribute('aria-selected', index === modelPickerActiveIndex ? 'true' : 'false');
-    const meta = [
-      model.contextWindow || model.context,
-      model.maxOutput ? `out ${model.maxOutput}` : '',
-      model.thinking === true ? 'thinking' : '',
-      model.images === true ? 'images' : '',
-    ].filter(Boolean).join(' · ');
-    item.innerHTML = `
-      <span class="model-item-name">${escapeHtml(model.id)}<span class="model-item-provider">${escapeHtml(model.provider)}</span></span>
-      <span class="model-item-context">${escapeHtml(meta)}</span>
-    `;
-    item.addEventListener('mouseenter', () => {
-      modelPickerActiveIndex = index;
-      updateModelPickerActiveItem();
-    });
-    item.addEventListener('click', () => selectModelSuggestion(index));
-    modelPickerList.appendChild(item);
-  });
-}
-
-function selectModelSuggestion(index) {
-  const model = modelPickerMatches[index];
-  if (!model) return;
-  const suffix = validThinkingSuffix(modelPickerInput.value);
-  modelPickerInput.value = `${modelRef(model)}${suffix}`;
-  modelPickerInput.focus();
-  modelPickerInput.setSelectionRange(modelPickerInput.value.length, modelPickerInput.value.length);
-  modelPickerMatches = [];
-  modelPickerActiveIndex = -1;
-  modelPickerList.innerHTML = '';
-  modelPickerSave.disabled = false;
-  modelPickerJustSelected = true;
-}
-
-function openModelPicker() {
-  // The model button is disabled by updateMirrorInputState when there is no
-  // active live session, so this handler is only reachable via click when a
-  // session exists.
-  modelPickerInput.value = modelDisplayString();
-  modelPickerActiveIndex = -1;
-  modelPickerJustSelected = false;
-  setModelPickerMessage(MODEL_PICKER_HELP, false);
-  renderModelPickerSuggestions();
-  modelPicker.classList.remove('hidden');
-  modelPickerOverlay.classList.remove('hidden');
-  requestAnimationFrame(() => {
-    modelPickerInput.focus();
-    modelPickerInput.select();
-  });
-  fetchModelInfo().then(() => {
-    if (!modelPicker.classList.contains('hidden')) renderModelPickerSuggestions();
-  }).catch(() => {});
-}
-
-function closeModelPicker() {
-  modelPicker.classList.add('hidden');
-  modelPickerOverlay.classList.add('hidden');
-  modelPickerMatches = [];
-  modelPickerActiveIndex = -1;
-  modelPickerJustSelected = false;
-  modelPickerList.innerHTML = '';
-  setModelPickerMessage(MODEL_PICKER_HELP, false);
-}
-
-async function applyModelSpec(rawSpec) {
-  const raw = String(rawSpec || '').trim();
-  // No-op when the user didn't actually edit anything. Avoids spurious
-  // set_model/set_thinking_level RPCs and false validation errors on the
-  // current display string.
-  if (raw === modelDisplayString()) {
-    modelInput.classList.remove('invalid');
-    return { success: true };
-  }
-  if (!viewingActiveSession || !activeLiveSessionId) {
-    const error = 'Select a live Tau tab first.';
-    flashStatusError(error);
-    return { success: false, error };
-  }
-  const parsed = parseModelSpec(raw);
-  if (parsed.error) {
-    flashStatusError(parsed.error);
-    return { success: false, error: parsed.error };
-  }
-  const r = await rpcCommand({ type: 'set_model', provider: parsed.provider, modelId: parsed.modelId }, `Switching to ${parsed.provider}/${parsed.modelId}...`);
-  if (r && r.success) {
-    const data = r.data || {};
-    // Always retain the provider so modelDisplayString() can render the
-    // full `provider/model:thinking` form. The server sometimes omits
-    // `provider` in its response; fall back to the user-typed value.
-    const responseModel = data.model || data;
-    const provider = responseModel.provider || parsed.provider;
-    const id = responseModel.id || parsed.modelId;
-    currentModelId = (provider && id) ? { ...responseModel, provider, id } : (id || parsed.modelId);
-    const responseContextWindow = responseModel.contextWindow || data.contextWindow;
-    if (responseContextWindow) {
-      contextWindowSize = responseContextWindow;
-      updateTokenUsage();
-    }
-    if (parsed.thinking !== null) {
-      const t = await rpcCommand({ type: 'set_thinking_level', level: parsed.thinking }, 'Setting thinking...');
-      if (t && t.success) {
-        currentThinkingLevel = parsed.thinking;
-      } else {
-        // Non-fatal: the model was already changed on the server.
-        // Show the error but still consider the model update successful
-        // so the popup closes and the user can retry thinking separately.
-        flashStatusError((t && t.error) ? t.error : 'Failed to set thinking level');
-      }
-    }
-    modelInput.classList.remove('invalid');
-    updateModelDisplay();
-    return { success: true };
-  }
-  const error = (r && r.error) ? r.error : 'Unknown model';
-  flashStatusError(error);
-  modelInput.classList.add('invalid');
-  setTimeout(() => modelInput.classList.remove('invalid'), 1200);
-  return { success: false, error };
-}
-
-async function saveModelPicker() {
-  const result = await applyModelSpec(modelPickerInput.value);
-  if (result.success) {
-    closeModelPicker();
-  } else {
-    setModelPickerMessage(result.error || 'Failed to update model', true);
-    modelPickerInput.focus();
-  }
-}
-
-modelInput.addEventListener('click', openModelPicker);
-modelPickerOverlay.addEventListener('click', closeModelPicker);
-modelPickerClose.addEventListener('click', closeModelPicker);
-modelPickerCancel.addEventListener('click', closeModelPicker);
-modelPickerSave.addEventListener('click', saveModelPicker);
-modelPickerInput.addEventListener('input', () => {
-  modelPickerActiveIndex = -1;
-  modelPickerJustSelected = false;
-  setModelPickerMessage(MODEL_PICKER_HELP, false);
-  renderModelPickerSuggestions();
+const modelPickerController = setupModelPicker({
+  getActiveLiveSessionId: () => activeLiveSessionId,
+  isViewingActiveSession: () => viewingActiveSession,
+  rpcCommand,
+  flashStatusError,
+  escapeHtml,
+  setContextWindowSize(value) { contextWindowSize = value; },
+  updateTokenUsage,
 });
-modelPickerInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') {
-    e.preventDefault();
-    e.stopPropagation();
-    closeModelPicker();
-    return;
-  }
-  if (e.key === 'ArrowDown') {
-    e.preventDefault();
-    if (modelPickerMatches.length) {
-      modelPickerActiveIndex = (modelPickerActiveIndex + 1) % modelPickerMatches.length;
-      renderModelPickerSuggestions();
-    }
-    return;
-  }
-  if (e.key === 'ArrowUp') {
-    e.preventDefault();
-    if (modelPickerMatches.length) {
-      modelPickerActiveIndex = (modelPickerActiveIndex - 1 + modelPickerMatches.length) % modelPickerMatches.length;
-      renderModelPickerSuggestions();
-    }
-    return;
-  }
-  if (e.key === 'Tab' && modelPickerMatches.length && modelPickerActiveIndex >= 0) {
-    e.preventDefault();
-    selectModelSuggestion(modelPickerActiveIndex);
-    return;
-  }
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    if (!modelPickerJustSelected && modelPickerMatches.length && modelPickerActiveIndex >= 0) {
-      selectModelSuggestion(modelPickerActiveIndex);
-    } else {
-      saveModelPicker();
-    }
-  }
-});
-
-async function fetchModelInfo() {
-  try {
-    const [modelsResp, stateResp] = await Promise.all([
-      fetch('/api/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'get_available_models', sessionId: activeLiveSessionId }) }),
-      fetch('/api/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'get_state', sessionId: activeLiveSessionId }) }),
-    ]);
-    const modelsData = await modelsResp.json();
-    const stateData = await stateResp.json();
-
-    if (modelsData.success && modelsData.data?.models) {
-      availableModels = modelsData.data.models;
-    }
-    if (stateData.success && stateData.data?.model !== undefined) {
-      // Server is canonical: stateData.data.model is null or a full
-      // {provider,id} object. Assign directly — no string fallback.
-      currentModelId = stateData.data.model || '';
-      if (stateData.data.model?.contextWindow) {
-        contextWindowSize = stateData.data.model.contextWindow;
-        updateTokenUsage();
-      }
-    }
-    if (stateData.success && stateData.data?.thinkingLevel) {
-      currentThinkingLevel = stateData.data.thinkingLevel || 'off';
-    }
-    updateModelDisplay();
-  } catch (e) {
-    // ignore
-  }
-}
 
 // ═══════════════════════════════════════
 // Keyboard shortcuts
@@ -1858,18 +1308,12 @@ document.addEventListener('keydown', (e) => {
   // Escape — Abort streaming, or close sidebar on mobile
   if (e.key === 'Escape') {
     // Close palettes/panels first
-    if (!modelPicker.classList.contains('hidden')) {
-      closeModelPicker();
-      return;
-    }
+    if (modelPickerController.closeIfOpen()) return;
     if (!settingsPanel.classList.contains('hidden')) {
       closeSettings();
       return;
     }
-    if (!commandPalette.classList.contains('hidden')) {
-      closeCommandPalette();
-      return;
-    }
+    if (commandPaletteController.closeIfOpen()) return;
 
     if (state.isStreaming && viewingActiveSession && activeLiveSessionId) {
       wsClient.send({ type: 'abort', sessionId: activeLiveSessionId });
@@ -2098,17 +1542,13 @@ function handleMirrorSync(data) {
 
   // Update model display — server is canonical, assign directly.
   if (data.model !== undefined) {
-    currentModelId = data.model || '';
     if (data.model?.contextWindow) {
-      contextWindowSize = data.model.contextWindow;
+      contextWindowSize = Number(data.model.contextWindow) || 0;
     }
+    modelPickerController.setModelState(data.model || '', data.thinkingLevel || 'off');
+  } else if (data.thinkingLevel) {
+    modelPickerController.setThinkingLevel(data.thinkingLevel || 'off');
   }
-
-  // Update thinking level
-  if (data.thinkingLevel) {
-    currentThinkingLevel = data.thinkingLevel || 'off';
-  }
-  updateModelDisplay();
 
   // Clear and render message history. Reset streaming handles after the
   // snapshot arrives because live deltas may have created a streaming element
@@ -2182,8 +1622,8 @@ function updateMirrorInputState() {
     messageInput.placeholder = isMirrorMode ? 'Create or select a Tau tab to chat' : 'Connecting...';
     inputArea?.classList.add('mirror-readonly');
   }
-  commandBtn.disabled = !hasLiveSession;
-  modelInput.disabled = !hasLiveSession;
+  document.getElementById('command-btn').disabled = !hasLiveSession;
+  modelPickerController.setEnabled(hasLiveSession);
 }
 
 // ═══════════════════════════════════════
@@ -2358,7 +1798,7 @@ function hideCompactButton() {
 
 async function fetchContextWindow() {
   // Delegate to fetchModelInfo which also updates the model button
-  await fetchModelInfo();
+  await modelPickerController.fetchModelInfo();
 }
 
 let tailscaleUrl = '';
@@ -2483,8 +1923,7 @@ async function openSettings() {
       toggleAutoCompact.className = `settings-toggle${s.autoCompactionEnabled ? ' on' : ''}`;
       // Thinking level
       btnThinkingLevel.textContent = s.thinkingLevel || 'off';
-      currentThinkingLevel = s.thinkingLevel || 'off';
-      updateModelDisplay();
+      modelPickerController.setThinkingLevel(s.thinkingLevel || 'off');
       // Session name is managed by Pi session history; no editable field in standalone settings.
     }
   } catch (e) {
@@ -2526,8 +1965,7 @@ btnThinkingLevel.addEventListener('click', async () => {
   const data = await rpcCommand({ type: 'cycle_thinking_level' });
   if (data?.success && data.data?.level) {
     btnThinkingLevel.textContent = data.data.level;
-    currentThinkingLevel = data.data.level;
-    updateModelDisplay();
+    modelPickerController.setThinkingLevel(data.data.level);
   }
 });
 
@@ -2654,84 +2092,8 @@ document.addEventListener('click', (e) => {
   }
 });
 
-// ═══════════════════════════════════════
 // Voice Input
-// ═══════════════════════════════════════
-
-const micBtn = document.getElementById('mic-btn');
-let recognition = null;
-let isRecording = false;
-
-if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  recognition = new SpeechRecognition();
-  recognition.continuous = true;
-  recognition.interimResults = true;
-  recognition.lang = 'en-AU';
-
-  let finalTranscript = '';
-  let interimTranscript = '';
-
-  recognition.addEventListener('result', (e) => {
-    interimTranscript = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) {
-        finalTranscript += e.results[i][0].transcript;
-      } else {
-        interimTranscript += e.results[i][0].transcript;
-      }
-    }
-    // Show live transcription in the input
-    messageInput.value = finalTranscript + interimTranscript;
-    messageInput.dispatchEvent(new Event('input'));
-  });
-
-  recognition.addEventListener('end', () => {
-    if (isRecording) {
-      // Stopped unexpectedly — clean up
-      stopRecording();
-    }
-  });
-
-  recognition.addEventListener('error', (e) => {
-    console.error('[Voice] Error:', e.error);
-    stopRecording();
-  });
-
-  micBtn.addEventListener('click', () => {
-    if (isRecording) {
-      stopRecording();
-    } else {
-      startRecording();
-    }
-  });
-
-  function startRecording() {
-    finalTranscript = messageInput.value; // Append to existing text
-    interimTranscript = '';
-    isRecording = true;
-    micBtn.classList.add('recording');
-    micBtn.title = 'Stop recording';
-    recognition.start();
-    messageInput.focus();
-  }
-
-  function stopRecording() {
-    isRecording = false;
-    micBtn.classList.remove('recording');
-    micBtn.title = 'Voice input';
-    try { recognition.stop(); } catch {}
-    // Commit final transcript
-    messageInput.value = finalTranscript;
-    messageInput.dispatchEvent(new Event('input'));
-    messageInput.focus();
-  }
-} else {
-  // No speech recognition support — hide mic button
-  micBtn.style.display = 'none';
-}
-
-
+setupVoiceInput(document.getElementById('mic-btn'), messageInput);
 
 // ═══════════════════════════════════════
 // Initialize
@@ -2760,93 +2122,13 @@ if (isMobile()) {
   });
 }
 
-// Launcher
-const launcherEl = document.getElementById('launcher');
-const launcher = new Launcher(launcherEl, async (projectPath) => {
-  try {
-    const res = await fetch('/api/live-sessions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cwd: projectPath, model: '' }),
-    });
-    const data = await res.json();
-    if (data.session) {
-      upsertLiveSession(data.session);
-      await selectLiveSession(data.session.id);
-    }
-  } catch (e) {
-    console.error('[Launcher] Failed to create Tau tab:', e);
-  }
-});
-
-// Check if launcher should show (projects configured)
-async function initLauncher() {
-  try {
-    const res = await fetch('/api/projects');
-    const data = await res.json();
-    if (data.projects && data.projects.length > 0) {
-      launcher.projects = data.projects;
-      launcher.render();
-      // Show launcher by default, add a nav link in the sidebar
-      addLauncherNav();
-    }
-  } catch {}
-}
-
-function addLauncherNav() {
-  const modeToggle = document.getElementById('mode-toggle');
-  if (!modeToggle || modeToggle.querySelector('.mode-link-launcher')) return;
-
-  const launcherLink = document.createElement('span');
-  launcherLink.className = 'mode-link mode-link-launcher';
-  launcherLink.title = 'Projects';
-  launcherLink.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>';
-  launcherLink.addEventListener('click', () => {
-    showLauncher();
-  });
-  modeToggle.appendChild(launcherLink);
-}
-
-function isLauncherVisible() {
-  const el = document.getElementById('launcher');
-  return !!el && !el.classList.contains('hidden');
-}
-
-function showLauncher() {
-  launcherEl.classList.remove('hidden');
-  messagesContainer.style.display = 'none';
-  document.querySelector('.input-area').style.display = 'none';
-  document.querySelector('.welcome')?.remove();
-
-  // Update nav state
-  document.querySelectorAll('.mode-link').forEach(l => l.classList.remove('active'));
-  document.querySelector('.mode-link-launcher')?.classList.add('active');
-
-  launcher.load();
-}
-
-function hideLauncher() {
-  launcherEl.classList.add('hidden');
-  messagesContainer.style.display = '';
-  document.querySelector('.input-area').style.display = '';
-
-  // Update nav state
-  document.querySelectorAll('.mode-link').forEach(l => l.classList.remove('active'));
-  document.querySelector('.mode-link:first-child')?.classList.add('active');
-}
-
-// Make the tau icon in sidebar switch back to chat
-document.querySelector('.mode-link:first-child')?.addEventListener('click', () => {
-  hideLauncher();
-});
-
 wsClient.connect();
 messageRenderer.renderWelcome();
 updateMirrorInputState();
 sidebar.loadSessions().then(() => {
   if (isMirrorMode) updateMirrorLiveIndicator();
 });
-initLauncher();
+launcherPanel.init();
 
 // Register service worker for PWA
 if ('serviceWorker' in navigator) {
