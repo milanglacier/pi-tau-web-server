@@ -136,6 +136,47 @@ function modelLabel(model, fallback = '') {
   return model.id || model.name || fallback || '';
 }
 
+// Normalize any model value into the canonical form: null or a full
+// {provider, id, ...} object. Bare `provider/id` strings (and "id" strings
+// with no slash) are parsed into objects; anything unrecognizable becomes null.
+function normalizeModel(value) {
+  if (!value) return null;
+  if (typeof value === 'object') {
+    if (value.provider && value.id) return { ...value };
+    if (value.id) return { ...value, provider: value.provider || '' };
+    return null;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const slashIdx = trimmed.indexOf('/');
+    if (slashIdx === -1) return { provider: '', id: trimmed };
+    const provider = trimmed.slice(0, slashIdx);
+    const id = trimmed.slice(slashIdx + 1);
+    if (!id) return null;
+    return { provider, id };
+  }
+  return null;
+}
+
+// Parse a `provider/id[:level]` spec string (as passed on session creation or
+// the model-input box) into a canonical {provider, id} object plus an optional
+// thinking level. Returns {model, level} where `model` is null when unparseable.
+function parseModelSpecToModel(spec) {
+  const trimmed = String(spec || '').trim();
+  if (!trimmed) return { model: null, level: null };
+  let level = null;
+  const colonIdx = trimmed.lastIndexOf(':');
+  if (colonIdx !== -1) {
+    const candidate = trimmed.slice(colonIdx + 1).toLowerCase();
+    if (['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(candidate)) {
+      level = candidate;
+    }
+  }
+  const core = (colonIdx !== -1 && level) ? trimmed.slice(0, colonIdx) : trimmed;
+  return { model: normalizeModel(core), level };
+}
+
 function makeId() {
   return `tau_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
 }
@@ -152,8 +193,9 @@ class PiRpcSession {
     this.lastActiveAt = this.createdAt;
     this.isStreaming = false;
     this.entries = [];
-    this.model = this.modelSpec || null;
-    this.thinkingLevel = 'off';
+    const parsed = parseModelSpecToModel(this.modelSpec);
+    this.model = parsed.model;
+    this.thinkingLevel = parsed.level || 'off';
     this.sessionFile = null;
     this.sessionName = null;
     this.contextUsage = null;
@@ -321,13 +363,13 @@ class PiRpcSession {
     if (data.sessionFile) this.sessionFile = data.sessionFile;
     if (data.sessionName) this.sessionName = data.sessionName;
     if (data.contextUsage) this.contextUsage = data.contextUsage;
-    if (data.model) this.model = data.model;
+    if (data.model) this.model = normalizeModel(data.model);
     if (data.thinkingLevel) this.thinkingLevel = data.thinkingLevel;
     if (data.level) this.thinkingLevel = data.level;
     if (data.tokens) this.contextUsage = { ...(this.contextUsage || {}), tokens: data.tokens };
     if (command === 'set_model' || command === 'cycle_model') {
-      if (data.model) this.model = data.model;
-      else if (data.provider && data.id) this.model = data;
+      if (data.model) this.model = normalizeModel(data.model);
+      else if (data.provider && data.id) this.model = normalizeModel(data);
     }
     this.touch(true);
   }
@@ -337,8 +379,6 @@ class PiRpcSession {
     const type = event.type;
     if (type === 'agent_start' || type === 'turn_start') this.isStreaming = true;
     if (type === 'agent_end' || type === 'turn_end') this.isStreaming = false;
-    if (type === 'thinking_level_changed') this.thinkingLevel = event.level || event.thinkingLevel || this.thinkingLevel;
-    if (type === 'model_select' && event.model) this.model = event.model;
     if (event.contextUsage) this.contextUsage = event.contextUsage;
     if (event.sessionFile) this.sessionFile = event.sessionFile;
     if (type === 'session_name' && event.name) this.sessionName = event.name;
@@ -346,8 +386,12 @@ class PiRpcSession {
     if ((type === 'message_start' || type === 'message_end') && event.message) {
       this.trackMessage(event.message, type);
     }
+    // NOTE: the assistant `message_end` event carries `event.message.model` as
+    // a bare id describing WHICH model produced that message, not a selection
+    // change. Overwriting `this.model` with it downgraded the canonical
+    // {provider,id} object to a bare string and propagated to all clients via
+    // broadcastUpdated. Do NOT touch model identity here — only record usage.
     if (type === 'message_end' && event.message?.role === 'assistant') {
-      if (event.message.model) this.model = event.message.model;
       if (event.message.usage) this.contextUsage = { ...(this.contextUsage || {}), usage: event.message.usage };
     }
 
@@ -530,6 +574,20 @@ function openUrl(url) {
   });
 }
 
+// Fire-and-forget: refresh session.model/thinkingLevel from pi's get_state.
+// Used after prompt/steer/follow_up acks so extension-driven model/thinking
+// changes (e.g. pi-session-model's /session-model) propagate to tau and all
+// clients. Silently skips on failure — the next user input or snapshot resyncs.
+async function refreshSessionModel(session) {
+  if (!session || session.terminating) return;
+  const resp = await session.send({ type: 'get_state' }, { timeoutMs: 5000 });
+  const data = resp && (resp.data || resp.result || resp);
+  if (!data) return;
+  if (data.model !== undefined) session.model = normalizeModel(data.model);
+  if (data.thinkingLevel) session.thinkingLevel = data.thinkingLevel;
+  liveManager.broadcastUpdated(session.id);
+}
+
 async function handleRpcCommand(command) {
   const id = command.id;
   const cmd = command.type;
@@ -611,10 +669,36 @@ async function handleRpcCommand(command) {
 
   const native = new Set(['prompt', 'steer', 'follow_up', 'abort', 'compact', 'set_model', 'cycle_model', 'set_thinking_level', 'cycle_thinking_level', 'get_session_stats', 'extension_ui_response']);
   if (!native.has(cmd)) return error(`Unknown command: ${cmd}`);
+
+  // `set_thinking_level` is forwarded to pi but pi's response carries no
+  // level/thinkingLevel field, so updateStateFromResponse would never update
+  // session.thinkingLevel — yet touch(true)->broadcastUpdated would echo the
+  // stale level to all clients (reverting a client's just-set optimistic
+  // level). Record the level optimistically here and restore on pi failure.
+  const isSetThinkingLevel = cmd === 'set_thinking_level';
+  let prevThinkingLevel = null;
+  if (isSetThinkingLevel) {
+    prevThinkingLevel = session.thinkingLevel;
+    if (command.level) session.thinkingLevel = command.level;
+  }
+
   try {
     const resp = await session.send(command, { timeoutMs: cmd === 'prompt' ? 10000 : 60000 });
+    if (isSetThinkingLevel && resp.success === false) {
+      session.thinkingLevel = prevThinkingLevel;
+    }
+    // Extension-driven model/thinking changes (e.g. the pi-session-model
+    // `/session-model` slash command) call pi.setModel/pi.setThinkingLevel
+    // inside a prompt/steer/follow_up. Those acks carry no model data and emit
+    // no runtime stream event, so tau would stay stale. Fire-and-forget a
+    // get_state refresh so tau and all clients learn the new model/level. Do
+    // NOT block this HTTP response — return the original ack first.
+    if (resp.success !== false && (cmd === 'prompt' || cmd === 'steer' || cmd === 'follow_up')) {
+      refreshSessionModel(session).catch(() => {});
+    }
     return { ...resp, success: resp.success !== false };
   } catch (e) {
+    if (isSetThinkingLevel) session.thinkingLevel = prevThinkingLevel;
     // Some commands are ack-less fire-and-forget in practice; keep UX moving
     // only when the write succeeded and the child simply did not acknowledge.
     const isAckTimeout = /^RPC command timed out:/.test(e.message || '');
@@ -1139,6 +1223,8 @@ module.exports = {
   expandHome,
   loadTauSettings,
   modelLabel,
+  normalizeModel,
+  parseModelSpecToModel,
   makeId,
   PiRpcSession,
   LiveSessionManager,

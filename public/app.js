@@ -476,10 +476,9 @@ async function selectLiveSession(id) {
 
 function applyActiveSessionMetadata(session) {
   if (!session) return;
-  // Keep the full {provider,id} object when available so modelDisplayString()
-  // can render the provider/model:thinking format; fall back to modelLabel
-  // (already 'provider/id' shaped) or the raw spec string.
-  currentModelId = session.model || session.modelLabel || session.modelSpec || '';
+  // Server is canonical: session.model is always null or a full {provider,id}
+  // object, so assign directly. No modelLabel/modelSpec string fallbacks.
+  currentModelId = session.model || '';
   currentThinkingLevel = session.thinkingLevel || 'off';
   updateModelDisplay();
 }
@@ -1453,20 +1452,17 @@ async function fetchModelInfo() {
     if (modelsData.success && modelsData.data?.models) {
       availableModels = modelsData.data.models;
     }
-    if (stateData.success && stateData.data?.model) {
-      const stateModel = stateData.data.model;
-      // Preserve the object form ({provider,id}) so the input can render
-      // provider/model:thinking; only flatten to a string when it already is one.
-      currentModelId = (typeof stateModel === 'object' && stateModel) ? stateModel : (typeof stateModel === 'string' ? stateModel : '');
-
-      const model = availableModels.find(m => m.id === currentModelId);
-      if (model?.contextWindow) {
-        contextWindowSize = model.contextWindow;
+    if (stateData.success && stateData.data?.model !== undefined) {
+      // Server is canonical: stateData.data.model is null or a full
+      // {provider,id} object. Assign directly — no string fallback.
+      currentModelId = stateData.data.model || '';
+      if (stateData.data.model?.contextWindow) {
+        contextWindowSize = stateData.data.model.contextWindow;
         updateTokenUsage();
       }
     }
     if (stateData.success && stateData.data?.thinkingLevel) {
-      currentThinkingLevel = stateData.data.thinkingLevel;
+      currentThinkingLevel = stateData.data.thinkingLevel || 'off';
     }
     updateModelDisplay();
   } catch (e) {
@@ -1716,11 +1712,9 @@ function handleMirrorSync(data) {
   updateUI();
   updateMirrorLiveIndicator();
 
-  // Update model display
-  if (data.model || data.session?.modelLabel || data.session?.modelSpec) {
-    // Preserve the object form ({provider,id}) so the input can render
-    // provider/model:thinking; only flatten when the server sent a string.
-    currentModelId = (typeof data.model === 'object' && data.model) ? data.model : (typeof data.model === 'string' ? data.model : (data.session?.modelLabel || data.session?.modelSpec || ''));
+  // Update model display — server is canonical, assign directly.
+  if (data.model !== undefined) {
+    currentModelId = data.model || '';
     if (data.model?.contextWindow) {
       contextWindowSize = data.model.contextWindow;
     }
@@ -1728,7 +1722,7 @@ function handleMirrorSync(data) {
 
   // Update thinking level
   if (data.thinkingLevel) {
-    currentThinkingLevel = data.thinkingLevel;
+    currentThinkingLevel = data.thinkingLevel || 'off';
   }
   updateModelDisplay();
 

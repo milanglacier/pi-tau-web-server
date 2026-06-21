@@ -171,7 +171,9 @@ test('create() resolves cwd, stores the session, and broadcasts live_session_cre
   const msg = JSON.parse(client.sent[0]);
   assert.equal(msg.type, 'live_session_created');
   assert.equal(msg.session.id, session.id);
-  assert.equal(msg.session.model, 'openai/gpt-5.5');
+  // The server canonicalizes the spec into a full {provider,id} object.
+  assert.deepEqual(msg.session.model, { provider: 'openai', id: 'gpt-5.5' });
+  assert.equal(msg.session.modelLabel, 'openai/gpt-5.5');
 });
 
 test('create() rejects when the cwd does not exist', async (t) => {
