@@ -1751,14 +1751,12 @@ function renderSessionHistory(entries: SessionHistoryEntry[]) {
   fetchContextWindow();
 
   // Jump to bottom instantly (no smooth scroll animation)
-  const messagesEl = document.getElementById('messages');
-  if (!messagesEl) return;
-  messagesEl.style.scrollBehavior = 'auto';
+  messagesContainer.style.scrollBehavior = 'auto';
   requestAnimationFrame(() => {
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
     // Restore smooth scrolling after a frame
     requestAnimationFrame(() => {
-      messagesEl.style.scrollBehavior = '';
+      messagesContainer.style.scrollBehavior = '';
     });
   });
 }
