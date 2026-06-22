@@ -1,3 +1,7 @@
+---
+status: COMPLETED
+---
+
 # Fix Project Name Truncated In The Left Panel
 
 ## Problem
@@ -67,3 +71,13 @@ This finding is rejected because backward compatibility for older session JSONL 
 ### Rejected: Count `/api/projects` sessions by each file's header cwd
 
 This finding is rejected as an intentional performance tradeoff. Counting `/api/projects` by reading and grouping every session file's header cwd would add extra I/O and implementation complexity for metadata that is acceptable to keep approximate; the rare lossy-directory collision case is not worth burdening the current route.
+
+## Review Findings (2nd round reviewer)
+
+No additional findings.
+
+### Overall Assessment (2nd round reviewer)
+
+**Verdict**: Correct as-is.
+
+**Explanation**: I reviewed the last two commits and did not find any new high-confidence, actionable issues beyond the findings already recorded and rejected above.

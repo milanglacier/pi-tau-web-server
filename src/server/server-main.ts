@@ -505,7 +505,7 @@ async function serveSessionsList(res: ServerResponse) {
           const filePath = path.join(projectDir, file);
           const parsed = await parseSessionFile(filePath);
           if (parsed) {
-            const projectPath = parsed.cwd || '';
+            const projectPath = parsed.cwd || ''; // Intentionally leave missing header cwd empty; backward compatibility for legacy/incomplete sessions without cwd is not required.
             let project = projectsByPath.get(projectPath);
             if (!project) {
               project = { path: projectPath, dirName: dir.name, sessions: [] };
