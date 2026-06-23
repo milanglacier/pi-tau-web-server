@@ -332,6 +332,64 @@ test('set_thinking_level restores previous level on pi failure', async () => {
   }
 });
 
+test('constructor accepts sessionFile, entries, and sessionName and they appear in snapshot/metadata', () => {
+  const manager = makeManager();
+  const entries = [{ type: 'message', message: { role: 'user', content: 'hello' } }, { type: 'message', message: { role: 'assistant', content: 'hi' } }];
+  const session = new PiRpcSession(manager, {
+    cwd: '/tmp',
+    modelSpec: 'openai/gpt-4o',
+    sessionFile: '/tmp/resumed.jsonl',
+    entries,
+    sessionName: 'Resumed Chat',
+  });
+  assert.equal(session.sessionFile, '/tmp/resumed.jsonl');
+  assert.equal(session.sessionName, 'Resumed Chat');
+  assert.equal(session.entries.length, 2);
+  assert.deepEqual(session.entries[0], entries[0]);
+  // Snapshot must include the pre-seeded fields.
+  const snap = session.snapshot();
+  assert.equal(snap.sessionFile, '/tmp/resumed.jsonl');
+  assert.equal(snap.sessionName, 'Resumed Chat');
+  assert.equal(snap.entries.length, 2);
+  // Metadata must expose sessionFile and sessionName.
+  const meta = session.metadata();
+  assert.equal(meta.sessionFile, '/tmp/resumed.jsonl');
+  assert.equal(meta.sessionName, 'Resumed Chat');
+});
+
+test('start() passes --session <file> to spawned pi when sessionFile is set', async (t: TestContext) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const spawnArgs: Array<{ cmd: string; args: string[] }> = [];
+  _setSpawnPiForTest((cmd: string, args: string[], _opts: Record<string, unknown>) => {
+    spawnArgs.push({ cmd, args });
+    const { EventEmitter } = require('node:events');
+    const { PassThrough } = require('node:stream');
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.pid = 55555;
+    child.kill = () => {};
+    return child;
+  });
+  t.after(() => _setSpawnPiForTest(null));
+  const mgr = new (require('../bin/tau.js').LiveSessionManager)();
+  const cwd = require('node:fs').mkdtempSync(require('node:path').join(require('node:os').tmpdir(), 'tau-spawnargs-'));
+  const createP = mgr.resume({ sessionFile: '/tmp/some-session.jsonl', cwd, model: 'openai/gpt-4o' });
+  t.mock.timers.tick(100);
+  await createP;
+  assert.equal(spawnArgs.length, 1);
+  const args = spawnArgs[0].args;
+  assert.ok(args.includes('--mode'));
+  assert.ok(args.includes('rpc'));
+  assert.ok(args.includes('--session'));
+  const sessionIdx = args.indexOf('--session');
+  assert.ok(sessionIdx >= 0);
+  assert.equal(args[sessionIdx + 1], '/tmp/some-session.jsonl');
+  assert.ok(args.includes('--model'));
+  assert.equal(args[args.indexOf('--model') + 1], 'openai/gpt-4o');
+});
+
 test('extension-refresh: prompt ack triggers get_state refresh and broadcast', async () => {
   const { session, manager } = makeSession('openai/gpt-4o:off');
   // Register this session in the liveManager so refreshSessionModel's

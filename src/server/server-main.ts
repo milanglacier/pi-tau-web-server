@@ -20,7 +20,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Stats, Dirent } from 'node:fs';
 import type { Socket } from 'node:net';
 import type { WebSocket as WsType } from 'ws';
-import type { RpcCommand, RpcResponse, StatusError } from './types.js';
+import type { JsonRecord, RpcCommand, RpcResponse, StatusError } from './types.js';
 import { ARGS, AUTH_CONFIGURED, HOST, MIME_TYPES, PI_AGENT_DIR, PORT, SESSIONS_DIR, STATIC_DIR, TAU_SETTINGS, expandHome, loadTauSettings, parseArgs, saveTauSetting } from './config.js';
 import { getAvailableModels, modelLabel, normalizeModel, parseModelSpecToModel, parsePiListModels, _clearModelListCacheForTest, _setExecFileForTest } from './model-utils.js';
 import { LiveSessionManager, PiRpcSession, liveManager, makeId, _setSpawnPiForTest } from './sessions.js';
@@ -343,6 +343,33 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
     }).catch((e) => json(res, 400, { error: errorMessage(e) }));
     return;
   }
+  if (cleanPath === '/api/live-sessions/resume' && req.method === 'POST') {
+    readBody(req).then(async (body) => {
+      if (!body.filePath || typeof body.filePath !== 'string') return json(res, 400, { error: 'filePath required' });
+      let resolvedFile: string;
+      try { resolvedFile = resolveSessionFile(body.filePath); } catch (e) { return json(res, 400, { error: errorMessage(e) }); }
+      const existing = Array.from(liveManager.sessions.values()).find(
+        (s) => s.sessionFile && path.resolve(s.sessionFile) === resolvedFile,
+      );
+      if (existing) return json(res, 200, { session: existing.metadata(), reused: true });
+      let cwd: string | null = normalizeSessionCwd(body.cwd);
+      if (!cwd) cwd = readSessionHeaderCwd(resolvedFile);
+      if (!cwd || !fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
+        return json(res, 400, { error: 'Cannot resume session because its project directory no longer exists' });
+      }
+      const entries = readSessionEntries(resolvedFile) as JsonRecord[];
+      let sessionName: string | null = null;
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i] as { type?: string; name?: string };
+        if (e && e.type === 'session_info' && e.name) { sessionName = e.name; break; }
+      }
+      try {
+        const session = await liveManager.resume({ sessionFile: resolvedFile, cwd, model: body.model || '', entries, sessionName });
+        json(res, 200, { session: session.metadata() });
+      } catch (e) { json(res, 400, { error: errorMessage(e) }); }
+    }).catch((e) => json(res, 400, { error: errorMessage(e) }));
+    return;
+  }
   const liveMatch = cleanPath.match(/^\/api\/live-sessions\/([^/]+)(?:\/snapshot)?$/);
   if (liveMatch) {
     let id;
@@ -431,6 +458,18 @@ function liveFilesSet() {
 
 function normalizeSessionCwd(cwd: unknown) {
   return typeof cwd === 'string' && cwd.trim() ? path.resolve(expandHome(cwd)) : null;
+}
+
+function readSessionEntries(filePath: string): unknown[] {
+  const entries: unknown[] = [];
+  try {
+    const text = fs.readFileSync(filePath, 'utf8');
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try { entries.push(JSON.parse(line)); } catch { /* skip malformed lines */ }
+    }
+  } catch { /* file may not exist yet */ }
+  return entries;
 }
 
 function readSessionHeaderCwd(filePath: string) {

@@ -187,6 +187,65 @@ test('create() resolves cwd, stores the session, and broadcasts live_session_cre
   assert.equal(msg.session.modelLabel, 'openai/gpt-5.5');
 });
 
+test('resume() passes --session, seeds entries/name, stores, and broadcasts', async (t: TestContext) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const child = makeFakeChild();
+  _setSpawnPiForTest(() => child);
+  t.after(() => _setSpawnPiForTest(null));
+
+  const mgr = new LiveSessionManager();
+  const client = openClient();
+  mgr.addClient(client);
+
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-resume-'));
+  const sessionFile = path.join(cwd, 'test.jsonl');
+  const entries = [{ type: 'message', message: { role: 'user', content: 'hi' } }];
+
+  const resumeP = mgr.resume({ sessionFile, cwd, model: 'openai/gpt-4o', entries, sessionName: 'My Session' });
+  t.mock.timers.tick(100);
+  const session = await resumeP;
+
+  assert.equal(mgr.get(session.id), session);
+  assert.equal(session.sessionFile, path.resolve(sessionFile));
+  assert.equal(session.sessionName, 'My Session');
+  assert.equal(session.entries.length, 1);
+  assert.deepEqual(session.entries[0], entries[0]);
+  assert.equal(session.cwd, path.resolve(cwd));
+
+  // Broadcast includes sessionFile and sessionName in metadata.
+  const msg = JSON.parse(client.sent[0]);
+  assert.equal(msg.type, 'live_session_created');
+  assert.equal(msg.session.sessionFile, path.resolve(sessionFile));
+  assert.equal(msg.session.sessionName, 'My Session');
+});
+
+test('resume() creates a second live session for the same file (idempotency is enforced at the route level)', async (t: TestContext) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const child1 = makeFakeChild();
+  const child2 = makeFakeChild();
+  let call = 0;
+  _setSpawnPiForTest(() => call++ === 0 ? child1 : child2);
+  t.after(() => _setSpawnPiForTest(null));
+
+  const mgr = new LiveSessionManager();
+  const client = openClient();
+  mgr.addClient(client);
+
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-resume2-'));
+  const sessionFile = path.join(cwd, 'dup.jsonl');
+
+  const s1 = await (async () => { const p = mgr.resume({ sessionFile, cwd }); t.mock.timers.tick(100); return p; })();
+  // Second resume() at the manager level creates a new session — it is the
+  // http route's responsibility to check for existing sessions and return
+  // reused: true before calling resume(). The manager itself does not enforce
+  // idempotency so that tests and edge cases can explicitly create duplicates.
+  const s2 = await (async () => { const p = mgr.resume({ sessionFile, cwd }); t.mock.timers.tick(100); return p; })();
+  assert.notEqual(s1.id, s2.id);
+  assert.equal(mgr.sessions.size, 2);
+  // Both broadcasts were sent.
+  assert.equal(client.sent.length, 2);
+});
+
 test('create() rejects when the cwd does not exist', async (t: TestContext) => {
   _setSpawnPiForTest(() => makeFakeChild());
   t.after(() => _setSpawnPiForTest(null));

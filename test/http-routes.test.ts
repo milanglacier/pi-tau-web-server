@@ -489,6 +489,107 @@ test('POST /api/live-sessions creates a live session and returns 200', async (t:
   child.stdin.end();
 });
 
+test('POST /api/live-sessions/resume rejects missing filePath with 400', async () => {
+  const res = await fetch(`${base}/api/live-sessions/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base, Host: new URL(base).host },
+    body: JSON.stringify({}),
+  });
+  assert.equal(res.status, 400);
+  assert.match((await jsonBody(res)).error, /filePath required/);
+});
+
+test('POST /api/live-sessions/resume rejects a filePath outside SESSIONS_DIR with 400', async () => {
+  const res = await fetch(`${base}/api/live-sessions/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base, Host: new URL(base).host },
+    body: JSON.stringify({ filePath: '/etc/hosts' }),
+  });
+  assert.equal(res.status, 400);
+  assert.match((await jsonBody(res)).error, /Invalid session file/);
+});
+
+test('POST /api/live-sessions/resume creates a live session with matching sessionFile', async (t: TestContext) => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-resume-http-'));
+  writeSessionFileAt(PROJ_DIR, 'resume.jsonl', [
+    { type: 'session', id: 'resume-sess', timestamp: '2026-01-01T00:00:00.000Z', cwd },
+    { type: 'message', message: { role: 'user', content: 'first message' } },
+    { type: 'message', message: { role: 'assistant', content: 'reply' } },
+    { type: 'session_info', name: 'Named Chat' },
+  ]);
+  const sessionFile = path.join(PROJ_DIR, 'resume.jsonl');
+
+  const child = makeFakeChild();
+  _setSpawnPiForTest(() => child);
+  t.after(() => _setSpawnPiForTest(null));
+
+  const res = await fetch(`${base}/api/live-sessions/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base, Host: new URL(base).host },
+    body: JSON.stringify({ filePath: sessionFile }),
+  });
+  assert.equal(res.status, 200);
+  const body = await jsonBody(res);
+  assert.equal(body.session.id.startsWith('tau_'), true);
+  assert.equal(body.session.sessionFile, path.resolve(sessionFile));
+  assert.equal(body.session.sessionName, 'Named Chat');
+  assert.equal(body.reused, undefined);
+  // Verify the session was added to liveManager.
+  assert.equal(liveManager.get(body.session.id)?.sessionFile, path.resolve(sessionFile));
+  child.stdin.end();
+});
+
+test('POST /api/live-sessions/resume returns reused:true when a live session already exists for the file', async (t: TestContext) => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-resume-reuse-'));
+  writeSessionFileAt(PROJ_DIR, 'reuse.jsonl', [
+    { type: 'session', id: 'reuse-sess', timestamp: '2026-01-01T00:00:00.000Z', cwd },
+  ]);
+  const sessionFile = path.join(PROJ_DIR, 'reuse.jsonl');
+
+  const child = makeFakeChild();
+  _setSpawnPiForTest(() => child);
+  t.after(() => _setSpawnPiForTest(null));
+
+  // First resume creates the session.
+  const res1 = await fetch(`${base}/api/live-sessions/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base, Host: new URL(base).host },
+    body: JSON.stringify({ filePath: sessionFile }),
+  });
+  assert.equal(res1.status, 200);
+  const body1 = await jsonBody(res1);
+  assert.equal(body1.reused, undefined);
+
+  // Second resume returns the same session with reused:true.
+  const res2 = await fetch(`${base}/api/live-sessions/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base, Host: new URL(base).host },
+    body: JSON.stringify({ filePath: sessionFile }),
+  });
+  assert.equal(res2.status, 200);
+  const body2 = await jsonBody(res2);
+  assert.equal(body2.reused, true);
+  assert.equal(body2.session.id, body1.session.id);
+  // Only one session in the manager.
+  assert.equal(liveManager.sessions.size, 1);
+  child.stdin.end();
+});
+
+test('POST /api/live-sessions/resume rejects when the session header cwd no longer exists', async () => {
+  writeSessionFileAt(PROJ_DIR, 'gone-cwd.jsonl', [
+    { type: 'session', id: 'gone-sess', timestamp: '2026-01-01T00:00:00.000Z', cwd: '/definitely/not/a/real/path/tau' },
+  ]);
+  const sessionFile = path.join(PROJ_DIR, 'gone-cwd.jsonl');
+
+  const res = await fetch(`${base}/api/live-sessions/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base, Host: new URL(base).host },
+    body: JSON.stringify({ filePath: sessionFile }),
+  });
+  assert.equal(res.status, 400);
+  assert.match((await jsonBody(res)).error, /Cannot resume session because its project directory no longer exists/);
+});
+
 test('POST /api/live-sessions returns 400 when the cwd does not exist', async (t: TestContext) => {
   _setSpawnPiForTest(() => makeFakeChild());
   t.after(() => _setSpawnPiForTest(null));

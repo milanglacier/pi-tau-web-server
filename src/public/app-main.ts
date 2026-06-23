@@ -1520,18 +1520,51 @@ async function switchSession(sessionFile: string | null | undefined, session: Si
       messageRenderer.renderWelcome();
     }
 
-    // In standalone mode, historical sessions are read-only. If the selected
-    // history file belongs to a live backend Tau tab, jump to that tab.
+    // In standalone mode, clicking a historical session resumes it as a
+    // live backend Tau tab. If a live tab already exists for that session
+    // file, just focus it instead of creating a duplicate.
     if (isMirrorMode) {
       const live = liveSessions.find(s => s.sessionFile === sessionFile);
       if (live) {
         await selectLiveSession(live.id);
         return;
       }
-      viewingActiveSession = false;
-      updateMirrorInputState();
-      updateUI();
-      if (!fileSidebar.classList.contains('collapsed')) fileBrowser.load();
+      // No live tab yet — ask the server to resume this session.
+      messageRenderer.clear();
+      messageRenderer.renderSystemMessage('Resuming session…');
+      try {
+        const resumeBody: Record<string, unknown> = { filePath: sessionFile };
+        if (project?.path) resumeBody.cwd = project.path;
+        const res = await fetch('/api/live-sessions/resume', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(resumeBody),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          messageRenderer.clear();
+          messageRenderer.renderError(data.error || 'Failed to resume session');
+          viewingActiveSession = false;
+          updateMirrorInputState();
+          updateUI();
+          return;
+        }
+        // If the server found an existing live tab (reused), just focus it.
+        if (data.reused && data.session) {
+          upsertLiveSession(data.session);
+          await selectLiveSession(data.session.id);
+          return;
+        }
+        upsertLiveSession(data.session);
+        await selectLiveSession(data.session.id);
+      } catch (e) {
+        messageRenderer.clear();
+        messageRenderer.renderError('Failed to resume session');
+        viewingActiveSession = false;
+        updateMirrorInputState();
+        updateUI();
+      }
+      return;
     } else {
       const res = await fetch('/api/sessions/switch', {
         method: 'POST',

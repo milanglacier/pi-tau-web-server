@@ -60,7 +60,7 @@ export class PiRpcSession {
   titleSet: boolean;
   userMessages: string[];
 
-  constructor(manager: LiveSessionManager, opts: { id?: string; cwd: string; modelSpec?: string }) {
+  constructor(manager: LiveSessionManager, opts: { id?: string; cwd: string; modelSpec?: string; sessionFile?: string | null; entries?: JsonRecord[]; sessionName?: string | null }) {
     this.manager = manager;
     this.id = opts.id || makeId();
     this.cwd = opts.cwd;
@@ -74,8 +74,9 @@ export class PiRpcSession {
     const parsed = parseModelSpecToModel(this.modelSpec);
     this.model = parsed.model;
     this.thinkingLevel = parsed.level || 'off';
-    this.sessionFile = null;
-    this.sessionName = null;
+    this.sessionFile = opts.sessionFile || null;
+    this.sessionName = opts.sessionName || null;
+    if (opts.entries && opts.entries.length) this.entries = opts.entries;
     this.contextUsage = null;
     this.pending = new Map();
     this.stdoutBuffer = '';
@@ -121,6 +122,7 @@ export class PiRpcSession {
       throw new Error(`Directory not found: ${this.cwd}`);
     }
     const args = ['--mode', 'rpc'];
+    if (this.sessionFile) args.push('--session', this.sessionFile);
     if (this.modelSpec) args.push('--model', this.modelSpec);
     const spawnFn: SpawnFn = _spawnPiForTest || spawn;
     const child = spawnFn('pi', args, {
@@ -370,6 +372,14 @@ export class LiveSessionManager {
   async create({ cwd, model }: { cwd?: string; model?: string }) {
     const resolved = path.resolve(expandHome(cwd || process.cwd()));
     const session = new PiRpcSession(this, { cwd: resolved, modelSpec: (model || '').trim() });
+    await session.start();
+    this.sessions.set(session.id, session);
+    this.broadcast({ type: 'live_session_created', session: session.metadata() });
+    return session;
+  }
+  async resume({ sessionFile, cwd, model, entries, sessionName }: { sessionFile: string; cwd: string; model?: string; entries?: JsonRecord[]; sessionName?: string | null }) {
+    const resolved = path.resolve(sessionFile);
+    const session = new PiRpcSession(this, { cwd, modelSpec: (model || '').trim(), sessionFile: resolved, entries, sessionName });
     await session.start();
     this.sessions.set(session.id, session);
     this.broadcast({ type: 'live_session_created', session: session.metadata() });
