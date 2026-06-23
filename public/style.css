@@ -3459,8 +3459,8 @@ body.hide-thinking .thinking-block { display: none !important; }
   min-height: 38px;
   margin-top: 48px;
   padding: 0 12px;
-  border-bottom: 1px solid var(--border-color, rgba(0,0,0,0.08));
-  background: rgba(255,255,255,0.22);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-glass);
   position: relative;
   z-index: 9;
 }
@@ -3480,19 +3480,19 @@ body.hide-thinking .thinking-block { display: none !important; }
   max-width: 240px;
   min-width: 112px;
   padding: 7px 8px 6px 10px;
-  border: 1px solid rgba(0,0,0,0.08);
+  border: 1px solid var(--border);
   border-bottom-color: transparent;
   border-radius: 10px 10px 0 0;
-  background: rgba(255,255,255,0.35);
-  color: var(--text-secondary, rgba(0,0,0,0.62));
+  background: var(--bg-glass-strong);
+  color: var(--text-secondary);
   cursor: pointer;
   font-size: 12px;
   white-space: nowrap;
 }
 .live-tab.active {
-  background: var(--bg-primary, rgba(255,255,255,0.78));
-  color: var(--text-primary, #1c1c1c);
-  box-shadow: 0 -1px 10px rgba(0,0,0,0.04);
+  background: var(--bg-frosted);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-sm);
 }
 .live-tab-title {
   overflow: hidden;
@@ -3540,17 +3540,17 @@ body.hide-thinking .thinking-block { display: none !important; }
   line-height: 16px;
   opacity: .6;
 }
-.live-tab-close:hover { background: rgba(0,0,0,.08); opacity: 1; }
+.live-tab-close:hover { background: var(--bg-glass-active); opacity: 1; }
 .live-tab-add {
   width: 26px;
   height: 26px;
   border-radius: 8px;
-  background: rgba(255,255,255,.42);
-  border: 1px solid rgba(0,0,0,.08);
+  background: var(--bg-glass-strong);
+  border: 1px solid var(--border);
   font-size: 18px;
   line-height: 20px;
 }
-.live-tab-add:hover { background: rgba(255,255,255,.7); }
+.live-tab-add:hover { background: var(--bg-glass-hover); }
 .new-live-session-overlay {
   position: fixed;
   inset: 0;
