@@ -10,8 +10,7 @@ Everything customised for mobile (≤768px) compared to the desktop experience.
 
 ## Header
 - **Slimmed down** — tighter padding (6px 12px), reduced gaps
-- **Model picker stays in header** — alongside thinking button
-- **Cost + token usage moved above input** — collapsible via chevron toggle, starts collapsed
+- **Model picker in header** — thinking level is chosen through the picker itself, no separate thinking button
 
 ## Session List
 - **iOS-native styling** — 17px regular-weight titles (not bold), 13px meta text, flat divider lines between items
@@ -29,7 +28,6 @@ Everything customised for mobile (≤768px) compared to the desktop experience.
 ## Input Area
 - **16px font size** — prevents iOS Safari auto-zoom on focus
 - **No autofocus** — keyboard doesn't hijack the screen on load/navigation
-- **Viewport locked** — `maximum-scale=1, user-scalable=no`
 - **Form buttons removed from tab order** — `tabindex="-1"` on all non-textarea elements
 
 ## Connection & Lifecycle
