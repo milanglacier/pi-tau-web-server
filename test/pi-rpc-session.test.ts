@@ -79,9 +79,10 @@ test('user message_start tracks an entry and derives a session title', () => {
 });
 
 test('generic session_name events do not block local title generation', () => {
-  const { session } = makeSession();
+  const { session, manager } = makeSession();
   session.handleEvent({ type: 'session_name', name: 'chat' });
   assert.equal(session.sessionName, null);
+  assert.equal(manager.broadcasts.length, 0, 'generic session_name events must not reach clients');
   session.handleEvent({ type: 'message_start', message: { role: 'user', content: 'fix the resumed tab title' } });
   assert.equal(session.sessionName, 'Fix the resumed tab title');
 });

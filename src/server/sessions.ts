@@ -270,7 +270,10 @@ export class PiRpcSession {
     if (type === 'agent_end' || type === 'turn_end') this.isStreaming = false;
     if (event.contextUsage) this.contextUsage = event.contextUsage;
     if (event.sessionFile) this.sessionFile = event.sessionFile;
-    if (type === 'session_name' && event.name) this.setSessionName(event.name);
+    if (type === 'session_name' && event.name) {
+      if (!this.setSessionName(event.name)) return;
+      event.name = this.sessionName || event.name;
+    }
 
     if ((type === 'message_start' || type === 'message_end') && event.message) {
       this.trackMessage(event.message, type);
@@ -307,8 +310,9 @@ export class PiRpcSession {
 
   setSessionName(name: unknown) {
     const trimmed = String(name || '').trim();
-    if (!trimmed || isGenericSessionName(trimmed)) return;
+    if (!trimmed || isGenericSessionName(trimmed)) return false;
     this.sessionName = trimmed;
+    return true;
   }
 
   maybeTitle() {
@@ -362,11 +366,13 @@ export class LiveSessionManager {
   sessions: Map<string, PiRpcSession>;
   clients: Set<LiveClient>;
   pendingResumes: Map<string, Promise<PiRpcSession>>;
+  terminatingResumes: Map<string, Promise<void>>;
 
   constructor() {
     this.sessions = new Map();
     this.clients = new Set();
     this.pendingResumes = new Map();
+    this.terminatingResumes = new Map();
   }
   addClient(ws: LiveClient) { this.clients.add(ws); }
   removeClient(ws: LiveClient) { this.clients.delete(ws); }
@@ -387,6 +393,7 @@ export class LiveSessionManager {
     return Array.from(this.sessions.values()).find((s) => s.sessionFile && path.resolve(s.sessionFile) === resolved);
   }
   hasPendingResume(sessionFile: string) { return this.pendingResumes.has(path.resolve(sessionFile)); }
+  hasTerminatingResume(sessionFile: string) { return this.terminatingResumes.has(path.resolve(sessionFile)); }
   async create({ cwd, model }: { cwd?: string; model?: string }) {
     const resolved = path.resolve(expandHome(cwd || process.cwd()));
     const session = new PiRpcSession(this, { cwd: resolved, modelSpec: (model || '').trim() });
@@ -401,9 +408,13 @@ export class LiveSessionManager {
     if (existing) return existing;
     const pending = this.pendingResumes.get(resolved);
     if (pending) return pending;
-    const session = new PiRpcSession(this, { cwd, modelSpec: (model || '').trim(), sessionFile: resolved, entries, sessionName });
     const resumePromise = (async () => {
       try {
+        const terminating = this.terminatingResumes.get(resolved);
+        if (terminating) await terminating.catch(() => {});
+        const afterTerminationExisting = this.findBySessionFile(resolved);
+        if (afterTerminationExisting) return afterTerminationExisting;
+        const session = new PiRpcSession(this, { cwd, modelSpec: (model || '').trim(), sessionFile: resolved, entries, sessionName });
         await session.start();
         this.sessions.set(session.id, session);
         this.broadcast({ type: 'live_session_created', session: session.metadata() });
@@ -418,9 +429,14 @@ export class LiveSessionManager {
   async delete(id: string, reason = 'closed_by_user') {
     const session = this.sessions.get(id);
     if (!session) return false;
+    const resolvedFile = session.sessionFile ? path.resolve(session.sessionFile) : null;
+    const termination = session.terminate(reason).then(() => undefined, () => undefined).finally(() => {
+      if (resolvedFile && this.terminatingResumes.get(resolvedFile) === termination) this.terminatingResumes.delete(resolvedFile);
+    });
+    if (resolvedFile) this.terminatingResumes.set(resolvedFile, termination);
     this.sessions.delete(id);
     this.broadcast({ type: 'live_session_closed', sessionId: id, reason });
-    await session.terminate(reason);
+    await termination;
     return true;
   }
   removeExited(id: string, reason: string) {

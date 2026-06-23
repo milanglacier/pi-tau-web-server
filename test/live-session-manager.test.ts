@@ -249,6 +249,41 @@ test('resume() coalesces concurrent and repeated resumes for the same file', asy
   assert.equal(mgr.sessions.size, 1);
 });
 
+test('resume() waits for a terminating session with the same file before spawning again', async (t: TestContext) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let call = 0;
+  _setSpawnPiForTest(() => { call++; return makeFakeChild(); });
+  t.after(() => _setSpawnPiForTest(null));
+
+  const mgr = new LiveSessionManager();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-resume-terminate-'));
+  const sessionFile = path.join(cwd, 'resume.jsonl');
+
+  const firstP = mgr.resume({ sessionFile, cwd });
+  t.mock.timers.tick(100);
+  const first = await firstP;
+  assert.equal(call, 1);
+
+  const deleteP = mgr.delete(first.id);
+  assert.equal(mgr.hasTerminatingResume(sessionFile), true);
+  assert.equal(mgr.sessions.size, 0);
+
+  const secondP = mgr.resume({ sessionFile, cwd });
+  assert.equal(call, 1, 'resume must not spawn while the old child is terminating');
+  assert.equal(mgr.hasPendingResume(sessionFile), true);
+
+  t.mock.timers.tick(1500);
+  for (let i = 0; i < 20 && call < 2; i++) await Promise.resolve();
+  assert.equal(call, 2, 'resume should spawn after termination completes');
+  t.mock.timers.tick(100);
+  const [second] = await Promise.all([secondP, deleteP]);
+
+  assert.notEqual(second.id, first.id);
+  assert.equal(call, 2);
+  assert.equal(mgr.sessions.size, 1);
+  assert.equal(mgr.hasTerminatingResume(sessionFile), false);
+});
+
 test('create() rejects when the cwd does not exist', async (t: TestContext) => {
   _setSpawnPiForTest(() => makeFakeChild());
   t.after(() => _setSpawnPiForTest(null));

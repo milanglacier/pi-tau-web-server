@@ -117,3 +117,35 @@ Implemented fixes for the review findings without changing the prior assessment 
 - Added regression coverage for concurrent resume coalescing, historical-title fallback during resume, and generic `session_name` events not preventing local title generation.
 
 Validation: `npm test` passes with 135 tests.
+
+## Code Review — 2026-06-23 (Round 2)
+
+### Findings
+
+1. **Keep resumed files reserved until termination finishes**
+
+   `LiveSessionManager.delete()` removes a resumed session from `sessions` and broadcasts `live_session_closed` before `await session.terminate(reason)` completes. Because duplicate prevention for resume only checks `findBySessionFile()` against `sessions`, a user can close a resumed tab and click the same historical session again while the old `pi --session <file>` process is still in its SIGTERM grace period, causing Tau to spawn a second Pi process for the same JSONL file. Keep a terminating session-file reservation until termination completes, or defer removing the session from the session-file index until the child is gone.
+
+   Location: `/home/milanglacier/Desktop/personal-projects/tau/src/server/sessions.ts:418-423`
+
+2. **Filter generic session names before updating client titles**
+
+   The server now ignores generic `session_name` values such as `chat`, but it still forwards the raw event, and the client applies any `session_name` event directly to both the live tab state and the active sidebar title. If Pi emits `session_name: "chat"` during a resumed session, `/home/milanglacier/Desktop/personal-projects/tau/src/public/app-main.ts:334` can briefly override the tab state and `/home/milanglacier/Desktop/personal-projects/tau/src/public/app-main.ts:725-729` leaves the sidebar title as `chat`; the following sanitized `live_session_updated` metadata does not restore the sidebar DOM text. Apply the same generic-name filter on the client path, or only broadcast sanitized title events from the server.
+
+   Location: `/home/milanglacier/Desktop/personal-projects/tau/src/public/app-main.ts:334`, `/home/milanglacier/Desktop/personal-projects/tau/src/public/app-main.ts:725-729`
+
+### Overall Assessment
+
+Verdict: **Needs revision.**
+
+Explanation: The earlier duplicate-click and streaming-tab issues are addressed, and `npm test` passes. Two edge cases still undermine the resume invariant and title cleanup: a close/reopen race can temporarily create two processes for one resumed file, and generic Pi title events can still leak into client-visible titles.
+
+## Fix Summary — 2026-06-23
+
+Addressed the round 2 review findings without changing the existing assessment text.
+
+- Resumed session files now remain reserved while their Pi child is terminating. If a user closes a resumed tab and immediately clicks the same historical session again, the new resume waits for the old termination to finish before spawning another `pi --session <file>` process.
+- Generic Pi `session_name` events such as `chat` are now suppressed before they are broadcast to clients, so they cannot overwrite the live tab or sidebar title while still allowing Tau to generate a meaningful title from the next user message.
+- Added regression coverage for resume-after-close waiting on termination and for generic `session_name` events not reaching clients.
+
+Validation: `npm test` passes with 136 tests.
