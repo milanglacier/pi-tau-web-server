@@ -67,3 +67,53 @@ Implementation plan:
      4. Send a follow-up message and verify it appends to the resumed session.
      5. Click the same sidebar session again and confirm focus switches to the same tab without increasing tab count.
      6. Close the tab and click the old session again; confirm a new live Pi process/tab is created for that same session file.
+
+## Code Review — 2026-06-22
+
+### Findings
+
+1. **Reserve resumed files before spawning Pi**
+
+   The duplicate prevention in `/api/live-sessions/resume` is not atomic. `src/server/server-main.ts` checks `liveManager.sessions` for an existing session at lines 351–354, but `LiveSessionManager.resume()` only inserts the new session after `await session.start()` at `/home/milanglacier/Desktop/personal-projects/tau/src/server/sessions.ts:383-384`. Two concurrent resume requests for the same historical file can both pass the check, then spawn two `pi --session <same file>` processes writing to the same JSONL. Add a per-session-file pending reservation/lock, or make manager-level resume idempotent before awaiting startup.
+
+   Location: `/home/milanglacier/Desktop/personal-projects/tau/src/server/server-main.ts:351-367` and `/home/milanglacier/Desktop/personal-projects/tau/src/server/sessions.ts:380-384`
+
+### Overall Assessment
+
+Verdict: **Needs revision.**
+
+Explanation: The main resume flow is implemented and tests pass, but the server-side idempotency guarantee can fail under concurrent clicks or multiple browser clients. That can create duplicate live sessions for one historical session file, which violates the feature invariant and risks two Pi processes appending to the same file.
+
+### Additional Finding — Streaming tab switching
+
+2. **Do not recreate live tabs during streaming events**
+
+   The live tab bar is fully rebuilt for every RPC event with a `sessionId`: `src/public/app-main.ts` updates the session and calls `renderLiveTabs()` at lines 328–336, and `renderLiveTabs()` clears `liveTabsList.innerHTML` before recreating each button at lines 479–494. While an assistant is streaming, the server broadcasts frequent events and updates from `/home/milanglacier/Desktop/personal-projects/tau/src/server/sessions.ts:282-283`, so the tab button can be replaced between mouse down and mouse up and the browser may never dispatch the click. This explains why clicking an actively streaming tab can fail to focus it while idle tabs switch smoothly; update existing tab DOM in place, skip tab rerenders for non-tab-visible stream events, or throttle/defer tab rerenders so tab buttons remain stable during clicks.
+
+   Location: `/home/milanglacier/Desktop/personal-projects/tau/src/public/app-main.ts:328-336`, `/home/milanglacier/Desktop/personal-projects/tau/src/public/app-main.ts:479-494`, and `/home/milanglacier/Desktop/personal-projects/tau/src/server/sessions.ts:282-283`
+
+### Additional Findings — Resumed tab names
+
+3. **Seed resumed tabs with the historical session title**
+
+   Resumed sessions only seed `sessionName` from a `session_info` record: `/home/milanglacier/Desktop/personal-projects/tau/src/server/server-main.ts:360-365` scans the JSONL entries and leaves `sessionName` null when that record is absent. The upper tab then renders `session.sessionName || basename(session.cwd || '')` at `/home/milanglacier/Desktop/personal-projects/tau/src/public/app-main.ts:490`, while the sidebar already has a better fallback using `session.name || session.firstMessage` in `/home/milanglacier/Desktop/personal-projects/tau/src/public/session-sidebar.ts:397`. A newly-created tab can reasonably default to the project cwd, but a resumed historical session already has history and should open with the same meaningful title the sidebar can derive; otherwise old sessions appear as generic project/chat tabs even though the selected session had an identifiable title.
+
+   Location: `/home/milanglacier/Desktop/personal-projects/tau/src/server/server-main.ts:360-365`, `/home/milanglacier/Desktop/personal-projects/tau/src/public/app-main.ts:490`, and `/home/milanglacier/Desktop/personal-projects/tau/src/public/session-sidebar.ts:397`
+
+4. **Do not let a generic resumed title block retitling**
+
+   `PiRpcSession.maybeTitle()` returns early whenever `this.sessionName` is truthy, so a resumed session seeded with a generic name such as `chat` will never be replaced by Tau's local title generation after the user sends a follow-up message. That makes the upper tab stay as `chat` even after new content provides a better title, unless Pi happens to emit a separate `session_name` event. Treat generic imported names as unset for local retitling, or seed resumed sessions with a meaningful historical fallback before setting `sessionName`.
+
+   Location: `/home/milanglacier/Desktop/personal-projects/tau/src/server/sessions.ts:304-314`
+
+## Fix Summary — 2026-06-22
+
+Implemented fixes for the review findings without changing the prior assessment text.
+
+- Resume creation is now idempotent at the live-session manager level. Concurrent or repeated resumes for the same resolved session file share the same pending/session result, so only one `pi --session <file>` process is spawned for that file.
+- Live tab rendering now preserves existing tab button DOM nodes instead of clearing and recreating the whole tab bar on every update. This keeps tab clicks stable while a session is streaming and avoids losing clicks during high-frequency stream events.
+- Resumed sessions now derive an initial tab name from historical content. The server prefers a meaningful `session_info.name`, but falls back to the first user message when the saved name is missing or generic.
+- Generic imported names such as `chat`, `new chat`, `untitled`, and `session` are treated as non-meaningful so they do not block Tau's local title generation after the user sends a follow-up message.
+- Added regression coverage for concurrent resume coalescing, historical-title fallback during resume, and generic `session_name` events not preventing local title generation.
+
+Validation: `npm test` passes with 135 tests.

@@ -37,6 +37,11 @@ export function makeId() {
   return `tau_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
 }
 
+export function isGenericSessionName(name: unknown) {
+  const normalized = String(name || '').trim().toLowerCase();
+  return normalized === 'chat' || normalized === 'new chat' || normalized === 'untitled' || normalized === 'untitled chat' || normalized === 'session';
+}
+
 export class PiRpcSession {
   manager: LiveSessionManager;
   id: string;
@@ -245,7 +250,7 @@ export class PiRpcSession {
     const data: PiRpcPayload = resp.data || resp.result || resp;
     const command = resp.command || data.command;
     if (data.sessionFile) this.sessionFile = data.sessionFile;
-    if (data.sessionName) this.sessionName = data.sessionName;
+    if (data.sessionName) this.setSessionName(data.sessionName);
     if (data.contextUsage) this.contextUsage = data.contextUsage;
     if (data.model) this.model = normalizeModel(data.model);
     if (data.thinkingLevel) this.thinkingLevel = data.thinkingLevel;
@@ -265,7 +270,7 @@ export class PiRpcSession {
     if (type === 'agent_end' || type === 'turn_end') this.isStreaming = false;
     if (event.contextUsage) this.contextUsage = event.contextUsage;
     if (event.sessionFile) this.sessionFile = event.sessionFile;
-    if (type === 'session_name' && event.name) this.sessionName = event.name;
+    if (type === 'session_name' && event.name) this.setSessionName(event.name);
 
     if ((type === 'message_start' || type === 'message_end') && event.message) {
       this.trackMessage(event.message, type);
@@ -300,8 +305,14 @@ export class PiRpcSession {
     return '';
   }
 
+  setSessionName(name: unknown) {
+    const trimmed = String(name || '').trim();
+    if (!trimmed || isGenericSessionName(trimmed)) return;
+    this.sessionName = trimmed;
+  }
+
   maybeTitle() {
-    if (this.titleSet || this.sessionName || this.userMessages.length < 1) return;
+    if (this.titleSet || (this.sessionName && !isGenericSessionName(this.sessionName)) || this.userMessages.length < 1) return;
     const msg = this.userMessages.find((m) => m.trim().length > 8) || this.userMessages[0];
     if (!msg) return;
     let title = msg.replace(/^(ok |okay |so |actually |hey |please |can you |could you |i want(ed)? to |i wanna |let'?s )/i, '').replace(/\n.*/s, '').trim();
@@ -350,10 +361,12 @@ export class PiRpcSession {
 export class LiveSessionManager {
   sessions: Map<string, PiRpcSession>;
   clients: Set<LiveClient>;
+  pendingResumes: Map<string, Promise<PiRpcSession>>;
 
   constructor() {
     this.sessions = new Map();
     this.clients = new Set();
+    this.pendingResumes = new Map();
   }
   addClient(ws: LiveClient) { this.clients.add(ws); }
   removeClient(ws: LiveClient) { this.clients.delete(ws); }
@@ -369,6 +382,11 @@ export class LiveSessionManager {
   }
   list() { return Array.from(this.sessions.values()).map((s) => s.metadata()); }
   get(id: string) { return this.sessions.get(id); }
+  findBySessionFile(sessionFile: string) {
+    const resolved = path.resolve(sessionFile);
+    return Array.from(this.sessions.values()).find((s) => s.sessionFile && path.resolve(s.sessionFile) === resolved);
+  }
+  hasPendingResume(sessionFile: string) { return this.pendingResumes.has(path.resolve(sessionFile)); }
   async create({ cwd, model }: { cwd?: string; model?: string }) {
     const resolved = path.resolve(expandHome(cwd || process.cwd()));
     const session = new PiRpcSession(this, { cwd: resolved, modelSpec: (model || '').trim() });
@@ -379,11 +397,23 @@ export class LiveSessionManager {
   }
   async resume({ sessionFile, cwd, model, entries, sessionName }: { sessionFile: string; cwd: string; model?: string; entries?: JsonRecord[]; sessionName?: string | null }) {
     const resolved = path.resolve(sessionFile);
+    const existing = this.findBySessionFile(resolved);
+    if (existing) return existing;
+    const pending = this.pendingResumes.get(resolved);
+    if (pending) return pending;
     const session = new PiRpcSession(this, { cwd, modelSpec: (model || '').trim(), sessionFile: resolved, entries, sessionName });
-    await session.start();
-    this.sessions.set(session.id, session);
-    this.broadcast({ type: 'live_session_created', session: session.metadata() });
-    return session;
+    const resumePromise = (async () => {
+      try {
+        await session.start();
+        this.sessions.set(session.id, session);
+        this.broadcast({ type: 'live_session_created', session: session.metadata() });
+        return session;
+      } finally {
+        this.pendingResumes.delete(resolved);
+      }
+    })();
+    this.pendingResumes.set(resolved, resumePromise);
+    return resumePromise;
   }
   async delete(id: string, reason = 'closed_by_user') {
     const session = this.sessions.get(id);

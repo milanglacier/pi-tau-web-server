@@ -454,10 +454,17 @@ function handleLiveSessionClosed(closedId: string) {
 function upsertLiveSession(session: LiveSession) {
   if (!session) return;
   const idx = liveSessions.findIndex(s => s.id === session.id);
-  if (idx >= 0) liveSessions[idx] = { ...liveSessions[idx], ...session };
-  else liveSessions.push(session);
+  let shouldRenderTabs = false;
+  if (idx >= 0) {
+    const before = liveTabSignature(liveSessions[idx]);
+    liveSessions[idx] = { ...liveSessions[idx], ...session };
+    shouldRenderTabs = before !== liveTabSignature(liveSessions[idx]);
+  } else {
+    liveSessions.push(session);
+    shouldRenderTabs = true;
+  }
   liveInstances = liveSessions.map(s => ({ sessionFile: s.sessionFile, cwd: s.cwd, port: location.port }));
-  renderLiveTabs();
+  if (shouldRenderTabs) renderLiveTabs();
   updateMirrorLiveIndicator();
 }
 
@@ -476,27 +483,56 @@ function compactModelLabel(session: LiveSession) {
   return String(raw).replace(/^.*\//, '').replace(/^claude-/, '').replace(/-\d{8}$/, '');
 }
 
+function liveTabSignature(session: LiveSession) {
+  return [
+    session.sessionName || basename(session.cwd || ''),
+    compactModelLabel(session),
+    session.cwd || '',
+    session.modelSpec || '',
+    session.isStreaming ? 'streaming' : 'idle',
+    hasPendingExtensionUIRequest(session.id) ? 'ui' : '',
+  ].join('\u001f');
+}
+
 function renderLiveTabs() {
   if (!liveTabsList) return;
-  liveTabsList.innerHTML = '';
-  for (const session of liveSessions) {
-    const tab = document.createElement('button');
-    tab.type = 'button';
-    tab.className = `live-tab${session.id === activeLiveSessionId ? ' active' : ''}`;
+  const existing = new Map<string, HTMLButtonElement>();
+  liveTabsList.querySelectorAll<HTMLButtonElement>('.live-tab').forEach((tab) => {
+    if (tab.dataset.sessionId) existing.set(tab.dataset.sessionId, tab);
+  });
+  const seen = new Set<string>();
+  liveSessions.forEach((session, index) => {
+    let tab = existing.get(session.id);
+    if (!tab) {
+      tab = document.createElement('button');
+      tab.type = 'button';
+      tab.className = 'live-tab';
+      tab.dataset.sessionId = session.id;
+      tab.addEventListener('click', () => selectLiveSession(session.id));
+    }
+    seen.add(session.id);
+    tab.classList.toggle('active', session.id === activeLiveSessionId);
     tab.title = `${session.cwd || ''}${session.modelSpec ? ` • ${session.modelSpec}` : ''}`;
-    tab.innerHTML = `
-      ${session.isStreaming ? '<span class="live-tab-streaming-dot"></span>' : ''}
-      ${hasPendingExtensionUIRequest(session.id) ? '<span class="live-tab-ui-dot" title="Waiting for response">?</span>' : ''}
-      <span class="live-tab-title">${escapeHtml(session.sessionName || basename(session.cwd || ''))}</span>
-      <span class="live-tab-model">${escapeHtml(compactModelLabel(session))}</span>
-      <span class="live-tab-close" title="Close Tau tab">×</span>
-    `;
-    tab.addEventListener('click', () => selectLiveSession(session.id));
-    tab.querySelector('.live-tab-close')?.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      closeLiveSession(session.id);
-    });
-    liveTabsList.appendChild(tab);
+    const signature = liveTabSignature(session);
+    if (tab.dataset.signature !== signature) {
+      tab.dataset.signature = signature;
+      tab.innerHTML = `
+        ${session.isStreaming ? '<span class="live-tab-streaming-dot"></span>' : ''}
+        ${hasPendingExtensionUIRequest(session.id) ? '<span class="live-tab-ui-dot" title="Waiting for response">?</span>' : ''}
+        <span class="live-tab-title">${escapeHtml(session.sessionName || basename(session.cwd || ''))}</span>
+        <span class="live-tab-model">${escapeHtml(compactModelLabel(session))}</span>
+        <span class="live-tab-close" title="Close Tau tab">×</span>
+      `;
+      tab.querySelector('.live-tab-close')?.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        closeLiveSession(session.id);
+      });
+    }
+    const currentAtIndex = liveTabsList.children[index];
+    if (currentAtIndex !== tab) liveTabsList.insertBefore(tab, currentAtIndex || null);
+  });
+  for (const [id, tab] of existing) {
+    if (!seen.has(id)) tab.remove();
   }
 }
 

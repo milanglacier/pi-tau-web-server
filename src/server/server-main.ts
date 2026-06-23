@@ -23,7 +23,7 @@ import type { WebSocket as WsType } from 'ws';
 import type { JsonRecord, RpcCommand, RpcResponse, StatusError } from './types.js';
 import { ARGS, AUTH_CONFIGURED, HOST, MIME_TYPES, PI_AGENT_DIR, PORT, SESSIONS_DIR, STATIC_DIR, TAU_SETTINGS, expandHome, loadTauSettings, parseArgs, saveTauSetting } from './config.js';
 import { getAvailableModels, modelLabel, normalizeModel, parseModelSpecToModel, parsePiListModels, _clearModelListCacheForTest, _setExecFileForTest } from './model-utils.js';
-import { LiveSessionManager, PiRpcSession, liveManager, makeId, _setSpawnPiForTest } from './sessions.js';
+import { LiveSessionManager, PiRpcSession, isGenericSessionName, liveManager, makeId, _setSpawnPiForTest } from './sessions.js';
 
 type TauWs = WsType & { isAlive?: boolean };
 
@@ -348,9 +348,7 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
       if (!body.filePath || typeof body.filePath !== 'string') return json(res, 400, { error: 'filePath required' });
       let resolvedFile: string;
       try { resolvedFile = resolveSessionFile(body.filePath); } catch (e) { return json(res, 400, { error: errorMessage(e) }); }
-      const existing = Array.from(liveManager.sessions.values()).find(
-        (s) => s.sessionFile && path.resolve(s.sessionFile) === resolvedFile,
-      );
+      const existing = liveManager.findBySessionFile(resolvedFile);
       if (existing) return json(res, 200, { session: existing.metadata(), reused: true });
       let cwd: string | null = normalizeSessionCwd(body.cwd);
       if (!cwd) cwd = readSessionHeaderCwd(resolvedFile);
@@ -358,14 +356,11 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
         return json(res, 400, { error: 'Cannot resume session because its project directory no longer exists' });
       }
       const entries = readSessionEntries(resolvedFile) as JsonRecord[];
-      let sessionName: string | null = null;
-      for (let i = entries.length - 1; i >= 0; i--) {
-        const e = entries[i] as { type?: string; name?: string };
-        if (e && e.type === 'session_info' && e.name) { sessionName = e.name; break; }
-      }
+      const sessionName = deriveSessionNameFromEntries(entries);
+      const reusedPending = liveManager.hasPendingResume(resolvedFile);
       try {
         const session = await liveManager.resume({ sessionFile: resolvedFile, cwd, model: body.model || '', entries, sessionName });
-        json(res, 200, { session: session.metadata() });
+        json(res, 200, { session: session.metadata(), ...(reusedPending ? { reused: true } : {}) });
       } catch (e) { json(res, 400, { error: errorMessage(e) }); }
     }).catch((e) => json(res, 400, { error: errorMessage(e) }));
     return;
@@ -470,6 +465,40 @@ function readSessionEntries(filePath: string): unknown[] {
     }
   } catch { /* file may not exist yet */ }
   return entries;
+}
+
+function deriveSessionNameFromEntries(entries: JsonRecord[]) {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i] as { type?: string; name?: unknown };
+    const name = typeof e?.name === 'string' ? e.name.trim() : '';
+    if (e?.type === 'session_info' && name && !isGenericSessionName(name)) return name;
+  }
+  for (const entry of entries) {
+    const e = entry as { type?: string; message?: { role?: string; content?: unknown } };
+    if (e?.type !== 'message' || e.message?.role !== 'user') continue;
+    const title = titleFromMessageContent(e.message.content);
+    if (title) return title;
+  }
+  return null;
+}
+
+function titleFromMessageContent(content: unknown) {
+  let text = '';
+  if (typeof content === 'string') text = content;
+  else if (Array.isArray(content)) {
+    text = content
+      .filter((b): b is { type?: unknown; text?: unknown } => !!b && typeof b === 'object')
+      .filter((b) => b.type === 'text')
+      .map((b) => typeof b.text === 'string' ? b.text : '')
+      .join('\n');
+  }
+  let title = text.replace(/^(ok |okay |so |actually |hey |please |can you |could you |i want(ed)? to |i wanna |let'?s )/i, '').replace(/\n.*/s, '').trim();
+  if (!title) return null;
+  const sentenceEnd = title.search(/[.!?]\s/);
+  if (sentenceEnd > 10 && sentenceEnd < 80) title = title.slice(0, sentenceEnd);
+  if (title.length > 60) title = title.slice(0, 57).replace(/\s+\S*$/, '') + '…';
+  title = title.charAt(0).toUpperCase() + title.slice(1);
+  return title || null;
 }
 
 function readSessionHeaderCwd(filePath: string) {

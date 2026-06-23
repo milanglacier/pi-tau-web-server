@@ -539,6 +539,30 @@ test('POST /api/live-sessions/resume creates a live session with matching sessio
   child.stdin.end();
 });
 
+test('POST /api/live-sessions/resume falls back to the first user message for generic or missing names', async (t: TestContext) => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-resume-title-'));
+  writeSessionFileAt(PROJ_DIR, 'resume-title.jsonl', [
+    { type: 'session', id: 'resume-title-sess', timestamp: '2026-01-01T00:00:00.000Z', cwd },
+    { type: 'message', message: { role: 'user', content: 'please investigate the flaky tab switching behavior\nwith details' } },
+    { type: 'session_info', name: 'chat' },
+  ]);
+  const sessionFile = path.join(PROJ_DIR, 'resume-title.jsonl');
+
+  const child = makeFakeChild();
+  _setSpawnPiForTest(() => child);
+  t.after(() => _setSpawnPiForTest(null));
+
+  const res = await fetch(`${base}/api/live-sessions/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base, Host: new URL(base).host },
+    body: JSON.stringify({ filePath: sessionFile }),
+  });
+  assert.equal(res.status, 200);
+  const body = await jsonBody(res);
+  assert.equal(body.session.sessionName, 'Investigate the flaky tab switching behavior');
+  child.stdin.end();
+});
+
 test('POST /api/live-sessions/resume returns reused:true when a live session already exists for the file', async (t: TestContext) => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-resume-reuse-'));
   writeSessionFileAt(PROJ_DIR, 'reuse.jsonl', [

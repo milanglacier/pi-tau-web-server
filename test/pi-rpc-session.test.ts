@@ -78,6 +78,14 @@ test('user message_start tracks an entry and derives a session title', () => {
   assert.ok(nameEvent, 'expected a session_name broadcast');
 });
 
+test('generic session_name events do not block local title generation', () => {
+  const { session } = makeSession();
+  session.handleEvent({ type: 'session_name', name: 'chat' });
+  assert.equal(session.sessionName, null);
+  session.handleEvent({ type: 'message_start', message: { role: 'user', content: 'fix the resumed tab title' } });
+  assert.equal(session.sessionName, 'Fix the resumed tab title');
+});
+
 test('title is truncated and trimmed for long user messages', () => {
   const { session } = makeSession();
   const long = 'Please generate a very detailed comprehensive plan for migrating the entire monolith into standalone rpc apps with tabs';

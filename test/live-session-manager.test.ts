@@ -219,12 +219,11 @@ test('resume() passes --session, seeds entries/name, stores, and broadcasts', as
   assert.equal(msg.session.sessionName, 'My Session');
 });
 
-test('resume() creates a second live session for the same file (idempotency is enforced at the route level)', async (t: TestContext) => {
+test('resume() coalesces concurrent and repeated resumes for the same file', async (t: TestContext) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const child1 = makeFakeChild();
-  const child2 = makeFakeChild();
+  const child = makeFakeChild();
   let call = 0;
-  _setSpawnPiForTest(() => call++ === 0 ? child1 : child2);
+  _setSpawnPiForTest(() => { call++; return child; });
   t.after(() => _setSpawnPiForTest(null));
 
   const mgr = new LiveSessionManager();
@@ -234,16 +233,20 @@ test('resume() creates a second live session for the same file (idempotency is e
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-resume2-'));
   const sessionFile = path.join(cwd, 'dup.jsonl');
 
-  const s1 = await (async () => { const p = mgr.resume({ sessionFile, cwd }); t.mock.timers.tick(100); return p; })();
-  // Second resume() at the manager level creates a new session — it is the
-  // http route's responsibility to check for existing sessions and return
-  // reused: true before calling resume(). The manager itself does not enforce
-  // idempotency so that tests and edge cases can explicitly create duplicates.
-  const s2 = await (async () => { const p = mgr.resume({ sessionFile, cwd }); t.mock.timers.tick(100); return p; })();
-  assert.notEqual(s1.id, s2.id);
-  assert.equal(mgr.sessions.size, 2);
-  // Both broadcasts were sent.
-  assert.equal(client.sent.length, 2);
+  const p1 = mgr.resume({ sessionFile, cwd });
+  const p2 = mgr.resume({ sessionFile, cwd });
+  assert.equal(mgr.hasPendingResume(sessionFile), true);
+  t.mock.timers.tick(100);
+  const [s1, s2] = await Promise.all([p1, p2]);
+  assert.equal(s1.id, s2.id);
+  assert.equal(call, 1);
+  assert.equal(mgr.sessions.size, 1);
+  assert.equal(client.sent.length, 1);
+
+  const s3 = await mgr.resume({ sessionFile, cwd });
+  assert.equal(s3.id, s1.id);
+  assert.equal(call, 1);
+  assert.equal(mgr.sessions.size, 1);
 });
 
 test('create() rejects when the cwd does not exist', async (t: TestContext) => {
