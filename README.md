@@ -21,13 +21,21 @@ work with multiple Pi sessions side by side in your browser.
 | **Auto-start** | Extension auto-started inside Pi unless `TAU_DISABLED=1` | Always explicit — the user runs `tau` when they want it |
 | **Multi-device** | Limited — HTTP server but only one session | Open from any device — all clients share the same live session pool |
 
-![Tau dark mode](docs/images/dark.png)
+![Tau light mode](docs/images/main-page.jpg)
 
-![Tau terracotta theme](docs/images/terracotta.png)
+![Tau dark mode](docs/images/main-page-dark.jpg)
+
+![New tab modal](docs/images/new-tab.jpg)
+
+![Commands](docs/images/commands.png)
+
+![Model completion](docs/images/model-completion.jpg)
 
 ![Settings](docs/images/settings.png)
 
-![Commands](docs/images/commands.png)
+![Mobile main page](docs/images/mobile-main-page.jpeg)
+
+![Mobile sidebar](docs/images/mobile-side-bar.jpeg)
 
 ## What it does
 
