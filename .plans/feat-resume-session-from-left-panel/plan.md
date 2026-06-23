@@ -175,3 +175,24 @@ Addressed the round 4 review finding without changing the existing assessment te
 - Renamed the misleading `isMirrorMode` client flag to `isStandaloneMode` and updated its definition comment to reflect the current architecture: Tau is connected to a standalone server that owns live Pi RPC sessions.
 
 Validation: `npm run typecheck` and `npm test` pass with 136 tests.
+
+## Code Review — 2026-06-23 (Round 5)
+
+### Findings
+
+None.
+
+### Overall Assessment
+
+Verdict: **Correct as-is.**
+
+Explanation: The latest client change now enters the standalone resume-or-focus path before the historical read-only loader, so the stale transcript fetch and flash called out in round 4 are gone. I did not find any new blocking issues in this round, and `npm test` passes with 136 tests.
+
+## Test Update — 2026-06-23
+
+Added backend HTTP integration coverage for resumed-session snapshots without changing the existing review assessments.
+
+- `POST /api/live-sessions/resume` is now followed by `GET /api/live-sessions/:id/snapshot` in `test/http-routes.test.ts` to verify the resumed live tab exposes the historical JSONL entries through the public snapshot API.
+- The test also checks the user-visible resume metadata returned by the snapshot, including the resolved `sessionFile` and seeded `sessionName`.
+
+Validation: `npm test` passes with 137 tests.

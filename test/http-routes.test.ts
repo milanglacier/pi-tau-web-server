@@ -539,6 +539,39 @@ test('POST /api/live-sessions/resume creates a live session with matching sessio
   child.stdin.end();
 });
 
+test('POST /api/live-sessions/resume exposes historical entries through the live snapshot', async (t: TestContext) => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-resume-snapshot-'));
+  const entries = [
+    { type: 'session', id: 'resume-snapshot-sess', timestamp: '2026-01-01T00:00:00.000Z', cwd },
+    { type: 'message', message: { role: 'user', content: 'resume this historical thread' } },
+    { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'historical reply' }] } },
+    { type: 'session_info', name: 'Snapshot Chat' },
+  ];
+  writeSessionFileAt(PROJ_DIR, 'resume-snapshot.jsonl', entries);
+  const sessionFile = path.join(PROJ_DIR, 'resume-snapshot.jsonl');
+
+  const child = makeFakeChild();
+  _setSpawnPiForTest(() => child);
+  t.after(() => _setSpawnPiForTest(null));
+
+  const resumeRes = await fetch(`${base}/api/live-sessions/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base, Host: new URL(base).host },
+    body: JSON.stringify({ filePath: sessionFile }),
+  });
+  assert.equal(resumeRes.status, 200);
+  const resumeBody = await jsonBody(resumeRes);
+
+  const snapshotRes = await fetch(`${base}/api/live-sessions/${encodeURIComponent(resumeBody.session.id)}/snapshot`);
+  assert.equal(snapshotRes.status, 200);
+  const snapshot = await jsonBody(snapshotRes);
+  assert.equal(snapshot.session.id, resumeBody.session.id);
+  assert.equal(snapshot.session.sessionFile, path.resolve(sessionFile));
+  assert.equal(snapshot.session.sessionName, 'Snapshot Chat');
+  assert.deepEqual(snapshot.entries, entries);
+  child.stdin.end();
+});
+
 test('POST /api/live-sessions/resume falls back to the first user message for generic or missing names', async (t: TestContext) => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-resume-title-'));
   writeSessionFileAt(PROJ_DIR, 'resume-title.jsonl', [
