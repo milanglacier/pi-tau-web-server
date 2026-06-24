@@ -63,7 +63,7 @@ function armNextMessage(ws: WsWebSocket, timeout = 2000): Promise<any> {
 
 test('set_auth { enabled: true } broadcasts auth_changed and closes clients with code 4001', async () => {
   const ws = connect();
-  await armNextMessage(ws); // swallow initial standalone state
+  await armNextMessage(ws); // swallow initial live-session state
   // arm the listener BEFORE the fetch so the auth_changed event is not lost
   const authMsgP = armNextMessage(ws);
   const closeP = new Promise((resolve, reject) => {
@@ -92,7 +92,7 @@ test('set_auth { enabled: true } broadcasts auth_changed and closes clients with
 
 test('set_auth { enabled: false } broadcasts auth_changed but does not close clients', async () => {
   const ws = connect();
-  await armNextMessage(ws); // swallow initial standalone state
+  await armNextMessage(ws); // swallow initial live-session state
   _setAuthForTest(true); // start enabled so the disable path is exercised
   const authMsgP = armNextMessage(ws);
   // auth is enabled for this request, so Basic credentials are required

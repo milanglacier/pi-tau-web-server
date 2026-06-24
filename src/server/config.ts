@@ -34,7 +34,7 @@ export function loadTauSettings(): TauSettings {
     settings = ((JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as TauSettingsFile).tau || {});
   } catch {}
   return {
-    port: parseInt(String(ARGS.port || process.env.TAU_MIRROR_PORT || process.env.TAU_PORT || settings.port || '3001'), 10),
+    port: parseInt(String(ARGS.port || process.env.TAU_PORT || settings.port || '3001'), 10),
     host: ARGS.host || process.env.TAU_HOST || settings.host || '0.0.0.0',
     user: process.env.TAU_USER || settings.user || '',
     pass: process.env.TAU_PASS || settings.pass || '',
@@ -55,10 +55,10 @@ function findPublicDir() {
   add(path.join(__dirname, '..', 'public'));
   add(path.join(process.cwd(), 'public'));
   try {
-    const pkgPath = require.resolve('tau-mirror/package.json');
+    const pkgPath = require.resolve('pi-tau-web-server/package.json');
     add(path.join(path.dirname(pkgPath), 'public'));
   } catch {}
-  add(path.join(process.cwd(), 'node_modules', 'tau-mirror', 'public'));
+  add(path.join(process.cwd(), 'node_modules', 'pi-tau-web-server', 'public'));
   return candidates.find((c) => fs.existsSync(path.join(c, 'index.html'))) || candidates[0];
 }
 

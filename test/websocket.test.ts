@@ -99,12 +99,11 @@ test('cross-origin WebSocket upgrade is rejected', async () => {
   try { ws.close(); } catch {}
 });
 
-test('same-origin WebSocket upgrade receives the initial standalone state', async () => {
+test('same-origin WebSocket upgrade receives the initial live-session state', async () => {
   liveManager.sessions.set('tau_1', fakeSession('tau_1'));
   const ws = connect();
   const msg = await nextMessage(ws);
   assert.equal(msg.type, 'state');
-  assert.equal(msg.mode, 'standalone');
   assert.equal(msg.liveSessions.length, 1);
   assert.equal(msg.liveSessions[0].id, 'tau_1');
   ws.close();

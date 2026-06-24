@@ -21,17 +21,15 @@
   "files": [
     "bin",
     "public",
-    "extensions",
     "src",
     "tsconfig.json",
     "tsconfig.server.json",
-    "tsconfig.public.json",
-    "tsconfig.extensions.json"
+    "tsconfig.public.json"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.public.json && tsc -p tsconfig.extensions.json",
+    "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.public.json",
     "prepare": "npm run build",
-    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.public.json --noEmit && tsc -p tsconfig.extensions.json --noEmit && tsc -p tsconfig.test.json",
+    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.public.json --noEmit && tsc -p tsconfig.test.json",
     "test": "npm run build && node --test"
   },
   "dependencies": {
