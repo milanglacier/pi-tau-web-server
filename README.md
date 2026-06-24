@@ -19,7 +19,6 @@ work with multiple Pi sessions side by side in your browser.
 | **Pi communication** | In-process Pi extension API | Out-of-process JSON line-delimited RPC over stdin/stdout |
 | **Test coverage** | No tests | Full test suite |
 | **Auto-start** | Extension auto-started inside Pi unless `TAU_DISABLED=1` | Always explicit — the user runs `pi-tau-web-server` when they want it |
-| **Multi-device** | Limited — HTTP server but only one session | Open from any device — all clients share the same live session pool |
 
 ![Tau light mode](docs/images/main-page.jpg)
 
