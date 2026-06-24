@@ -19,7 +19,7 @@ import type { AppEvent, AppMessage, ExtensionUIRequest, LiveInstance, LiveSessio
 
 type SessionHistoryEntry = { type?: string; message?: AppMessage };
 
-type MirrorSyncData = {
+type LiveSessionSnapshotData = {
   sessionId?: string;
   sessionFile?: string | null;
   session?: { sessionFile?: string | null };
@@ -173,10 +173,10 @@ let isScrolledUp = false;
 let hasNewWhileScrolled = false;
 let lastSentMessage: string | null = null; // Track to avoid duplicate rendering from backend echo events
 let lastUsage: UsageRecord | null = null; // Full usage object for context visualiser
-let mirrorActiveSessionFile: string | null = null; // The active live session file path
+let activeLiveSessionFile: string | null = null; // The active live session file path
 let viewingActiveSession = false; // Whether we're viewing a live backend Tau tab or historical read-only session
-let isStandaloneMode = false; // True once connected to the standalone server that owns live Pi RPC sessions
-let liveInstances: LiveInstance[] = []; // Legacy sidebar live indicators; now derived from backend live sessions
+let hasReceivedInitialServerState = false;
+let liveInstances: LiveInstance[] = []; // Sidebar live indicators derived from backend live sessions
 let liveSessions: LiveSession[] = [];
 let activeLiveSessionId = localStorage.getItem('tau-active-live-session-id') || null;
 let hasRestoredInitialLiveSession = false;
@@ -348,25 +348,23 @@ wsClient.addEventListener('serverError', (e: Event) => {
 });
 
 wsClient.addEventListener('stateUpdate', (e: Event) => {
-  const detail = (e as CustomEvent<{ mode?: string; liveSessions?: LiveSession[] }>).detail;
-  if (detail.mode === 'standalone') {
-    const wasViewingLive = viewingActiveSession;
-    const launcherVisible = launcherPanel.isVisible();
-    isStandaloneMode = true;
-    setLiveSessions(detail.liveSessions || []);
-    if (!hasRestoredInitialLiveSession || (wasViewingLive && !launcherVisible)) {
-      hasRestoredInitialLiveSession = true;
-      restoreActiveLiveSession();
-    } else {
-      if (activeLiveSessionId && !liveSessions.some(s => s.id === activeLiveSessionId)) {
-        activeLiveSessionId = null;
-        localStorage.removeItem('tau-active-live-session-id');
-        renderQueuedMessages();
-        renderLiveTabs();
-      }
-      updateMirrorInputState();
-      updateMirrorLiveIndicator();
+  const detail = (e as CustomEvent<{ liveSessions?: LiveSession[] }>).detail;
+  const wasViewingLive = viewingActiveSession;
+  const launcherVisible = launcherPanel.isVisible();
+  hasReceivedInitialServerState = true;
+  setLiveSessions(detail.liveSessions || []);
+  if (!hasRestoredInitialLiveSession || (wasViewingLive && !launcherVisible)) {
+    hasRestoredInitialLiveSession = true;
+    restoreActiveLiveSession();
+  } else {
+    if (activeLiveSessionId && !liveSessions.some(s => s.id === activeLiveSessionId)) {
+      activeLiveSessionId = null;
+      localStorage.removeItem('tau-active-live-session-id');
+      renderQueuedMessages();
+      renderLiveTabs();
     }
+    updateLiveSessionInputState();
+    updateLiveSessionIndicators();
   }
 });
 
@@ -384,13 +382,13 @@ wsClient.addEventListener('liveSessionClosed', (e: Event) => {
   handleLiveSessionClosed((e as CustomEvent<{ sessionId: string }>).detail.sessionId);
 });
 
-// Legacy mirrorSync payload: receive a full live-session state snapshot.
-wsClient.addEventListener('mirrorSync', (e: Event) => {
-  handleMirrorSync((e as CustomEvent<MirrorSyncData>).detail);
+// Receive a full live-session state snapshot.
+wsClient.addEventListener('liveSessionSnapshot', (e: Event) => {
+  applyLiveSessionSnapshot((e as CustomEvent<LiveSessionSnapshotData>).detail);
 });
 
 // ═══════════════════════════════════════
-// Standalone live-session tabs
+// Live-session tabs
 // ═══════════════════════════════════════
 
 const liveTabsList = document.getElementById('live-tabs-list');
@@ -407,7 +405,7 @@ function setLiveSessions(sessions: LiveSession[]) {
   liveSessions = sessions || [];
   liveInstances = liveSessions.map(s => ({ sessionFile: s.sessionFile, cwd: s.cwd, port: location.port }));
   renderLiveTabs();
-  updateMirrorLiveIndicator();
+  updateLiveSessionIndicators();
 }
 
 function handleLiveSessionClosed(closedId: string) {
@@ -424,7 +422,7 @@ function handleLiveSessionClosed(closedId: string) {
     const wasViewingActive = viewingActiveSession;
     activeLiveSessionId = null;
     localStorage.removeItem('tau-active-live-session-id');
-    mirrorActiveSessionFile = null;
+    activeLiveSessionFile = null;
     currentStreamingElement = null;
     currentStreamingThinking = '';
     currentStreamingText = '';
@@ -438,17 +436,17 @@ function handleLiveSessionClosed(closedId: string) {
       else {
         viewingActiveSession = false;
         messageRenderer.renderWelcome();
-        updateMirrorInputState();
+        updateLiveSessionInputState();
         updateUI();
       }
     } else {
-      updateMirrorInputState();
+      updateLiveSessionInputState();
       updateUI();
     }
   }
   liveInstances = liveSessions.map(s => ({ sessionFile: s.sessionFile, cwd: s.cwd, port: location.port }));
   renderLiveTabs();
-  updateMirrorLiveIndicator();
+  updateLiveSessionIndicators();
 }
 
 function upsertLiveSession(session: LiveSession) {
@@ -465,7 +463,7 @@ function upsertLiveSession(session: LiveSession) {
   }
   liveInstances = liveSessions.map(s => ({ sessionFile: s.sessionFile, cwd: s.cwd, port: location.port }));
   if (shouldRenderTabs) renderLiveTabs();
-  updateMirrorLiveIndicator();
+  updateLiveSessionIndicators();
 }
 
 function getMostRecentLiveSession() {
@@ -544,12 +542,12 @@ function restoreActiveLiveSession() {
   } else {
     activeLiveSessionId = null;
     viewingActiveSession = false;
-    mirrorActiveSessionFile = null;
+    activeLiveSessionFile = null;
     localStorage.removeItem('tau-active-live-session-id');
     state.reset();
     renderQueuedMessages();
     renderLiveTabs();
-    updateMirrorInputState();
+    updateLiveSessionInputState();
   }
 }
 
@@ -561,7 +559,7 @@ async function selectLiveSession(id: string) {
   activeLiveSessionId = id;
   localStorage.setItem('tau-active-live-session-id', id);
   viewingActiveSession = true;
-  mirrorActiveSessionFile = session.sessionFile || null;
+  activeLiveSessionFile = session.sessionFile || null;
   renderLiveTabs();
   renderQueuedMessages();
   applyActiveSessionMetadata(session);
@@ -579,13 +577,13 @@ async function selectLiveSession(id: string) {
       handleLiveSessionClosed(id);
       throw new Error(data.error || 'Live session not found');
     }
-    handleMirrorSync({ ...data, sessionId: id });
+    applyLiveSessionSnapshot({ ...data, sessionId: id });
   } catch (e) {
     messageRenderer.renderError((e instanceof Error ? e.message : '') || 'Failed to load live session snapshot');
     return;
   }
   if (!fileSidebar.classList.contains('collapsed')) fileBrowser.load();
-  updateMirrorInputState();
+  updateLiveSessionInputState();
   processQueuedExtensionUIRequest(id);
   flushQueue();
 }
@@ -1222,7 +1220,7 @@ function sendMessage() {
 
   if (!activeLiveSessionId) {
     messageRenderer.renderError('Create or select a Tau tab first.');
-    updateMirrorInputState();
+    updateLiveSessionInputState();
     return;
   }
 
@@ -1439,7 +1437,7 @@ refreshSessionsBtn.addEventListener('click', () => {
   refreshSessionsBtn.classList.add('spinning');
   sidebar.loadSessions().then(() => {
     setTimeout(() => refreshSessionsBtn.classList.remove('spinning'), 600);
-    if (isStandaloneMode) updateMirrorLiveIndicator();
+    updateLiveSessionIndicators();
   });
 });
 
@@ -1522,7 +1520,7 @@ async function switchSession(sessionFile: string | null | undefined, session: Si
     currentStreamingElement = null;
     currentStreamingThinking = '';
     currentStreamingText = '';
-    if (isStandaloneMode) viewingActiveSession = false;
+    viewingActiveSession = false;
     
     state.reset();
     showTypingIndicator(false);
@@ -1530,11 +1528,10 @@ async function switchSession(sessionFile: string | null | undefined, session: Si
     messageRenderer.clear();
     toolCardRenderer.clear();
 
-    // In standalone mode, clicking a historical session resumes it as a
-    // live backend Tau tab. Skip the old read-only history render here because
+    // Clicking a historical session resumes it as a live backend Tau tab.
     // selectLiveSession() will load the resumed tab snapshot with the same
     // historical entries after the backend has attached to the session file.
-    if (isStandaloneMode && sessionFile) {
+    if (sessionFile) {
       const live = liveSessions.find(s => s.sessionFile === sessionFile);
       if (live) {
         await selectLiveSession(live.id);
@@ -1555,7 +1552,7 @@ async function switchSession(sessionFile: string | null | undefined, session: Si
           messageRenderer.clear();
           messageRenderer.renderError(data.error || 'Failed to resume session');
           viewingActiveSession = false;
-          updateMirrorInputState();
+          updateLiveSessionInputState();
           updateUI();
           return;
         }
@@ -1571,50 +1568,13 @@ async function switchSession(sessionFile: string | null | undefined, session: Si
         messageRenderer.clear();
         messageRenderer.renderError('Failed to resume session');
         viewingActiveSession = false;
-        updateMirrorInputState();
+        updateLiveSessionInputState();
         updateUI();
       }
       return;
     }
 
-    if (sessionFile && session) {
-      messageRenderer.renderSystemMessage('Loading session...');
-
-      const dirName = project?.dirName;
-      const file = session.file;
-      console.log('[App] Loading history:', { dirName, file, sessionFile });
-
-      if (dirName && file) {
-        try {
-          const res = await fetch(`/api/sessions/${dirName}/${file}`);
-          console.log('[App] History fetch status:', res.status);
-          const data = await res.json();
-          console.log('[App] History entries:', data.entries?.length || 0);
-
-          messageRenderer.clear();
-          renderSessionHistory(data.entries || []);
-        } catch (e) {
-          console.error('[App] History fetch error:', e);
-        }
-      } else {
-        console.log('[App] Skipped history load: dirName or file missing');
-      }
-    } else {
-      messageRenderer.renderWelcome();
-    }
-
-    if (!isStandaloneMode) {
-      const res = await fetch('/api/sessions/switch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionFile }),
-      });
-
-      if (!res.ok) {
-        const err = await res.json();
-        messageRenderer.renderError(`Failed to switch session: ${err.error}`);
-      }
-    }
+    messageRenderer.renderWelcome();
   } catch (error) {
     console.error('[App] Failed to switch session:', error);
     messageRenderer.renderError('Failed to switch session');
@@ -1622,22 +1582,22 @@ async function switchSession(sessionFile: string | null | undefined, session: Si
 }
 
 // ═══════════════════════════════════════
-// Standalone live-session snapshot sync (legacy mirrorSync payload)
+// Live-session snapshot sync
 // ═══════════════════════════════════════
 
-function handleMirrorSync(data: MirrorSyncData) {
-  console.log('[Standalone] Received state snapshot:', data.entries?.length, 'entries');
+function applyLiveSessionSnapshot(data: LiveSessionSnapshotData) {
+  console.log('[LiveSession] Received state snapshot:', data.entries?.length, 'entries');
   if (data.sessionId && data.sessionId !== activeLiveSessionId) return;
-  isStandaloneMode = true;
+  hasReceivedInitialServerState = true;
 
   // Track the active session
-  mirrorActiveSessionFile = data.sessionFile || data.session?.sessionFile || null;
+  activeLiveSessionFile = data.sessionFile || data.session?.sessionFile || null;
   viewingActiveSession = !!activeLiveSessionId;
   state.setStreaming(!!data.isStreaming);
   showTypingIndicator(!!data.isStreaming);
-  updateMirrorInputState();
+  updateLiveSessionInputState();
   updateUI();
-  updateMirrorLiveIndicator();
+  updateLiveSessionIndicators();
 
   // Update model display — server is canonical, assign directly.
   if (data.model !== undefined) {
@@ -1671,13 +1631,13 @@ function handleMirrorSync(data: MirrorSyncData) {
 }
 
 // Mark all live sessions in the sidebar with a green dot
-function updateMirrorLiveIndicator() {
+function updateLiveSessionIndicators() {
   const liveFiles = new Set(liveInstances.map(i => i.sessionFile));
   // Also include the current active live session
-  if (mirrorActiveSessionFile) liveFiles.add(mirrorActiveSessionFile);
+  if (activeLiveSessionFile) liveFiles.add(activeLiveSessionFile);
 
   document.querySelectorAll('.session-item').forEach(el => {
-    el.classList.toggle('mirror-live', liveFiles.has(el.dataset.filePath));
+    el.classList.toggle('has-live-session', liveFiles.has(el.dataset.filePath));
   });
 }
 
@@ -1696,7 +1656,7 @@ async function pollInstances() {
         state.setStreaming(!!activeSession.isStreaming);
         showTypingIndicator(!!activeSession.isStreaming);
         applyActiveSessionMetadata(activeSession);
-        updateMirrorInputState();
+        updateLiveSessionInputState();
         updateUI();
       }
     }
@@ -1707,19 +1667,19 @@ async function pollInstances() {
 setInterval(pollInstances, 10000);
 
 // Enable/disable input based on whether we're viewing a live backend Tau tab
-function updateMirrorInputState() {
+function updateLiveSessionInputState() {
   const inputArea = document.querySelector('.input-area');
   const hasLiveSession = viewingActiveSession && !!activeLiveSessionId;
   if (hasLiveSession) {
     messageInput.disabled = false;
     sendBtn.disabled = false;
     messageInput.placeholder = 'Message...';
-    inputArea?.classList.remove('mirror-readonly');
+    inputArea?.classList.remove('no-active-live-session');
   } else {
     messageInput.disabled = true;
     sendBtn.disabled = true;
-    messageInput.placeholder = isStandaloneMode ? 'Create or select a Tau tab to chat' : 'Connecting...';
-    inputArea?.classList.add('mirror-readonly');
+    messageInput.placeholder = hasReceivedInitialServerState ? 'Create or select a Tau tab to chat' : 'Connecting...';
+    inputArea?.classList.add('no-active-live-session');
   }
   document.getElementById('command-btn')!.disabled = !hasLiveSession;
   modelPickerController.setEnabled(hasLiveSession);
@@ -2023,7 +1983,7 @@ async function openSettings() {
       // Thinking level
       btnThinkingLevel.textContent = s.thinkingLevel || 'off';
       modelPickerController.setThinkingLevel(s.thinkingLevel || 'off');
-      // Session name is managed by Pi session history; no editable field in standalone settings.
+      // Session name is managed by Pi session history; no editable field in Tau settings.
     }
   } catch (e) {
     // Silent
@@ -2223,9 +2183,9 @@ if (isMobile()) {
 
 wsClient.connect();
 messageRenderer.renderWelcome();
-updateMirrorInputState();
+updateLiveSessionInputState();
 sidebar.loadSessions().then(() => {
-  if (isStandaloneMode) updateMirrorLiveIndicator();
+  updateLiveSessionIndicators();
 });
 launcherPanel.init();
 

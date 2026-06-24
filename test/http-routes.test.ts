@@ -6,7 +6,7 @@ const os = require('node:os');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 
-// Loopback host so computeUrls() sets a localhost mirrorUrl; isolate settings.
+// Loopback host so computeUrls() sets a localhost lanUrl; isolate settings.
 process.env.TAU_HOST = '127.0.0.1';
 process.env.PI_CODING_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-http-'));
 process.env.PI_CODING_AGENT_SESSION_DIR = path.join(process.env.PI_CODING_AGENT_DIR, 'sessions');
@@ -98,14 +98,15 @@ async function jsonBody(res: Response) {
   return JSON.parse(await res.text());
 }
 
-test('GET /api/health reports standalone mode and live session count', async () => {
+test('GET /api/health reports server health and live session count', async () => {
   liveManager.sessions.set('tau_1', fakeSession('tau_1'));
   const res = await fetch(`${base}/api/health`);
   assert.equal(res.status, 200);
   const body = await jsonBody(res);
   assert.equal(body.status, 'ok');
-  assert.equal(body.mode, 'standalone');
+  assert.equal(body.role, 'rpc-session-manager');
   assert.equal(body.liveSessionCount, 1);
+  assert.match(body.lanUrl, /^http:\/\/localhost:\d+$/);
 });
 
 test('GET /api/live-sessions lists managed sessions', async () => {
@@ -295,16 +296,15 @@ test('POST /api/sessions/delete rejects a missing filePath with 400', async () =
   assert.match((await jsonBody(res)).error, /filePath required/);
 });
 
-test('POST /api/sessions/switch returns success in standalone mode', async () => {
+test('POST /api/sessions/switch is no longer a supported API', async () => {
   const res = await fetch(`${base}/api/sessions/switch`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Origin: base, Host: new URL(base).host },
     body: JSON.stringify({}),
   });
-  assert.equal(res.status, 200);
+  assert.equal(res.status, 404);
   const body = await jsonBody(res);
-  assert.equal(body.success, true);
-  assert.equal(body.standalone, true);
+  assert.equal(body.error, 'Not found');
 });
 
 test('GET /api/sessions/:project/:file streams the parsed session entries', async () => {

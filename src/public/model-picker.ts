@@ -298,7 +298,7 @@ function selectModelSuggestion(index: number) {
 }
 
 function openModelPicker() {
-  // The model button is disabled by updateMirrorInputState when there is no
+  // The model button is disabled by updateLiveSessionInputState when there is no
   // active live session, so this handler is only reachable via click when a
   // session exists.
   modelPickerInput.value = modelDisplayString();

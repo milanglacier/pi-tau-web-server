@@ -195,10 +195,10 @@ test('get_messages returns cached entries', async () => {
   assert.equal(resp.data.entries.length, 1);
 });
 
-test('mirror_sync_request returns a mirror_sync payload', async () => {
+test('live_session_snapshot_request returns a live_session_snapshot payload', async () => {
   const session = injectSession();
-  const resp = await handleRpcCommand({ type: 'mirror_sync_request', sessionId: session.id });
-  assert.equal(resp.type, 'mirror_sync');
+  const resp = await handleRpcCommand({ type: 'live_session_snapshot_request', sessionId: session.id });
+  assert.equal(resp.type, 'live_session_snapshot');
   assert.equal(resp.sessionId, session.id);
   assert.deepEqual(resp.entries, session.entries);
 });

@@ -735,8 +735,8 @@ body {
 
 .session-item.active .session-title { color: var(--accent-text); }
 
-/* Mirror mode: live session indicator */
-.session-item.mirror-live .session-title::before {
+/* Live session indicator */
+.session-item.has-live-session .session-title::before {
   content: '';
   display: inline-block;
   width: 6px;
@@ -749,8 +749,8 @@ body {
   animation: pulse 2s infinite;
 }
 
-/* Mirror mode: read-only input */
-.input-area.mirror-readonly {
+/* Live session read-only input */
+.input-area.no-active-live-session {
   opacity: 0.5;
   pointer-events: none;
 }
@@ -3612,7 +3612,7 @@ body.hide-thinking .thinking-block { display: none !important; }
 }
 .primary-btn { background: var(--accent, #b87a5c); color: white; }
 .secondary-btn { background: rgba(255,255,255,.55); color: inherit; }
-.input-area.mirror-readonly { opacity: .62; }
+.input-area.no-active-live-session { opacity: .62; }
 @media (max-width: 768px) {
   .live-tabs { margin-top: 58px; padding: 0 8px; min-height: 34px; }
   .live-tab { min-width: 100px; max-width: 170px; padding: 6px 7px; }

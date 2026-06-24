@@ -76,7 +76,7 @@ function readBody(req: IncomingMessage): Promise<RpcCommand> {
   });
 }
 
-let mirrorUrl = '';
+let lanUrl = '';
 let tailscaleUrl = '';
 
 function resolveSessionFile(filePath: string) {
@@ -229,7 +229,7 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
     });
   }
   if (cmd === 'get_messages') return success({ entries: session.entries });
-  if (cmd === 'mirror_sync_request') return { type: 'mirror_sync', sessionId: session.id, ...session.snapshot() };
+  if (cmd === 'live_session_snapshot_request') return { type: 'live_session_snapshot', sessionId: session.id, ...session.snapshot() };
   if (cmd === 'set_auto_compaction') return success({ enabled: !!command.enabled });
 
   const native = new Set(['prompt', 'steer', 'follow_up', 'abort', 'compact', 'set_model', 'cycle_model', 'set_thinking_level', 'cycle_thinking_level', 'get_session_stats', 'extension_ui_response']);
@@ -330,7 +330,7 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
   const parsed = new URL(`http://localhost${req.url}`);
   const cleanPath = parsed.pathname;
 
-  if (cleanPath === '/api/health') return json(res, 200, { status: 'ok', mode: 'standalone', liveSessionCount: liveManager.sessions.size, mirrorUrl, tailscaleUrl: tailscaleUrl || undefined, platform: process.platform });
+  if (cleanPath === '/api/health') return json(res, 200, { status: 'ok', role: 'rpc-session-manager', liveSessionCount: liveManager.sessions.size, lanUrl, tailscaleUrl: tailscaleUrl || undefined, platform: process.platform });
   if (cleanPath === '/api/qr') return serveQr(res);
   if (cleanPath === '/api/live-sessions' && req.method === 'GET') return json(res, 200, { sessions: liveManager.list() });
   if (cleanPath === '/api/live-sessions' && req.method === 'POST') {
@@ -421,7 +421,6 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
     readBody(req).then((body) => handleRpcCommand(body).then((resp) => json(res, 200, resp))).catch((e) => json(res, 400, { error: errorMessage(e) }));
     return;
   }
-  if (cleanPath === '/api/sessions/switch' && req.method === 'POST') return json(res, 200, { success: true, standalone: true, note: 'Historical sessions are read-only in standalone Tau' });
   if (cleanPath === '/api/sessions/delete' && req.method === 'POST') {
     readBody(req).then((body) => {
       if (!body.filePath || typeof body.filePath !== 'string') return json(res, 400, { error: 'filePath required' });
@@ -438,12 +437,12 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
 }
 
 function serveQr(res: ServerResponse) {
-  if (!mirrorUrl) return json(res, 503, { error: 'Server not ready' });
-  Promise.all([QRCode.toDataURL(mirrorUrl, { width: 256, margin: 2 }), tailscaleUrl ? QRCode.toDataURL(tailscaleUrl, { width: 256, margin: 2 }) : null])
+  if (!lanUrl) return json(res, 503, { error: 'Server not ready' });
+  Promise.all([QRCode.toDataURL(lanUrl, { width: 256, margin: 2 }), tailscaleUrl ? QRCode.toDataURL(tailscaleUrl, { width: 256, margin: 2 }) : null])
     .then(([lan, ts]) => {
       const tsSection = tailscaleUrl && ts ? `<p style="margin-top:24px;color:rgba(255,255,255,0.3);font-size:11px">TAILSCALE</p><img src="${ts}" width="256" height="256" alt="Tailscale QR"><a href="${tailscaleUrl}">${tailscaleUrl}</a>` : '';
       res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width"><title>Tau — Connect</title><style>body{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#131316;color:#fff;font-family:-apple-system,sans-serif}img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rgba(255,255,255,0.5);font-size:13px;margin-top:8px}</style></head><body><p style="color:rgba(255,255,255,0.3);font-size:11px">LAN</p><img src="${lan}" width="256" height="256" alt="QR Code"><a href="${mirrorUrl}">${mirrorUrl}</a>${tsSection}<p style="margin-top:16px">Scan to open Tau on your phone</p></body></html>`);
+      res.end(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width"><title>Tau — Connect</title><style>body{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#131316;color:#fff;font-family:-apple-system,sans-serif}img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rgba(255,255,255,0.5);font-size:13px;margin-top:8px}</style></head><body><p style="color:rgba(255,255,255,0.3);font-size:11px">LAN</p><img src="${lan}" width="256" height="256" alt="QR Code"><a href="${lanUrl}">${lanUrl}</a>${tsSection}<p style="margin-top:16px">Scan to open Tau on your phone</p></body></html>`);
     }).catch((e) => json(res, 500, { error: errorMessage(e) }));
 }
 
@@ -793,7 +792,7 @@ function computeUrls(port: number) {
     }
     for (const name of Object.keys(nets)) for (const net of nets[name] || []) if (net.family === 'IPv4' && !net.internal && net.address.startsWith('100.')) tailscaleIp = net.address;
   }
-  mirrorUrl = `http://${localIp}:${port}`;
+  lanUrl = `http://${localIp}:${port}`;
   tailscaleUrl = tailscaleIp ? `http://${tailscaleIp}:${port}` : '';
 }
 
@@ -819,7 +818,7 @@ wss.on('connection', (ws: TauWs) => {
   liveManager.addClient(ws);
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
-  ws.send(JSON.stringify({ type: 'state', mode: 'standalone', liveSessions: liveManager.list() }));
+  ws.send(JSON.stringify({ type: 'state', liveSessions: liveManager.list() }));
   ws.on('message', async (data: Buffer) => {
     try {
       const command = JSON.parse(data.toString());
@@ -855,9 +854,9 @@ function listen(port: number, attemptsLeft = 10) {
   });
   server.listen(port, HOST, () => {
     computeUrls(port);
-    console.log(`[Tau] Standalone server running on ${mirrorUrl}${tailscaleUrl ? `  •  Tailscale: ${tailscaleUrl}` : ''}`);
+    console.log(`[Tau] Server running on ${lanUrl}${tailscaleUrl ? `  •  Tailscale: ${tailscaleUrl}` : ''}`);
     console.log(`[Tau] Static assets: ${STATIC_DIR}`);
-    if (ARGS.open) openUrl(mirrorUrl).catch(() => {});
+    if (ARGS.open) openUrl(lanUrl).catch(() => {});
   });
 }
 

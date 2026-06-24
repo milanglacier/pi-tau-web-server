@@ -143,8 +143,8 @@ export class WebSocketClient extends EventTarget {
       case 'session_switch':
         this.dispatchEvent(new CustomEvent('sessionSwitch'));
         break;
-      case 'mirror_sync':
-        this.dispatchEvent(new CustomEvent('mirrorSync', { detail: message }));
+      case 'live_session_snapshot':
+        this.dispatchEvent(new CustomEvent('liveSessionSnapshot', { detail: message }));
         break;
       case 'response':
         this.dispatchEvent(new CustomEvent('rpcResponse', { detail: message }));
