@@ -1,3 +1,7 @@
+---
+status: COMPLETED
+---
+
 # Goal
 Refactor Tau’s outdated “mirror” and “standalone mode” vocabulary so the code describes the current architecture: a Tau web server that owns a pool of live Pi RPC subprocess sessions and sends live-session snapshots to browser clients. Eliminate the misleading `isStandaloneMode` concept because there is no non-standalone runtime mode in the current app.
 
