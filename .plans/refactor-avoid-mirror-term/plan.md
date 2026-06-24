@@ -157,3 +157,26 @@ Expected validation result:
 - Renaming WebSocket/RPC message types is a protocol-breaking change for any old browser bundle or external caller using `mirror_sync_request`. Since the current goal is to remove the stale concept, the plan intentionally does not preserve the old names.
 - Removing `TAU_MIRROR_PORT` is a config-breaking change for users still relying on the old environment variable.
 - Removing the deprecated extension entrypoint may affect users with an old Pi extension reference. This is acceptable because the repo no longer supports extension-mode startup.
+
+---
+
+## Review — 2026-06-24
+
+### Findings
+
+1. **Remove deleted extension entries from README**
+
+   **Body:** This branch deletes `extensions/` and `tsconfig.extensions.json` and removes the extensions build from `package.json`, but the README still lists `tsconfig.extensions.json` as a valid config and still shows `extensions/` in the project structure. A developer following the README guidance around `tsc -p <config>` will hit a missing config file and will be directed to a directory that no longer exists.
+
+   **Location:** `/home/milanglacier/Desktop/personal-projects/tau/README.md:199` (also `/home/milanglacier/Desktop/personal-projects/tau/README.md:231`)
+
+2. **Remove the remaining mirror wording from the README**
+
+   **Body:** The refactor removes the internal mirror vocabulary and the plan’s validation expects no `mirror` terms in source, tests, docs, or package metadata, but the README comparison table still uses “mirrors”, “mirror”, and “mirror died”. That leaves the retired term in user-facing docs and makes the requested validation command fail even though the code identifiers were renamed.
+
+   **Location:** `/home/milanglacier/Desktop/personal-projects/tau/README.md:16-18`
+
+### Overall assessment
+
+- **Verdict:** Needs revision.
+- **Explanation:** The runtime changes build, typecheck, and pass the test suite, but the documentation is left inconsistent with the deleted extension files and with the stated mirror-term cleanup goal.

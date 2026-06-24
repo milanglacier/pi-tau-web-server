@@ -13,9 +13,9 @@ work with multiple Pi sessions side by side in your browser.
 
 | Area                  | Upstream (`5e2bce39`)                                                               | This fork                                                                           |
 | --------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| **Architecture**      | Pi extension loaded inside the Pi TUI process; browser mirrors a single TUI session | Standalone Node.js server that spawns independent `pi --mode rpc` child processes   |
-| **Multiple sessions** | One browser page, one Pi session — the mirror of whatever the TUI was doing         | In-page tabs each backed by their own Pi RPC subprocess; run N sessions in parallel |
-| **Session lifecycle** | Tied to the Pi TUI session — close the TUI and the mirror died                      | Sessions are server-owned; closing/reloading the browser does not kill Pi children  |
+| **Architecture**      | Pi extension loaded inside the Pi TUI process; browser displayed a single running TUI session | Standalone Node.js server that spawns independent `pi --mode rpc` child processes   |
+| **Multiple sessions** | One browser page, one Pi session — the browser showed whatever the TUI was doing             | In-page tabs each backed by their own Pi RPC subprocess; run N sessions in parallel |
+| **Session lifecycle** | Tied to the Pi TUI session — close the TUI and the browser view died                         | Sessions are server-owned; closing/reloading the browser does not kill Pi children  |
 | **Pi communication**  | In-process Pi extension API                                                         | Out-of-process JSON line-delimited RPC over stdin/stdout                            |
 | **Test coverage**     | No tests                                                                            | Full test suite                                                                     |
 | **Auto-start**        | Extension auto-started inside Pi unless `TAU_DISABLED=1`                            | Always explicit — the user runs `pi-tau-web-server` when they want it               |
@@ -196,7 +196,6 @@ The project is written in TypeScript, with separate `tsconfig.json` files:
 | -------------------------- | --------------------------------------------: |
 | `tsconfig.server.json`     |     Server-side code (`src/server/` → `bin/`) |
 | `tsconfig.public.json`     | Browser-side code (`src/public/` → `public/`) |
-| `tsconfig.extensions.json` |                 Pi extensions (`extensions/`) |
 | `tsconfig.test.json`       |                          Test files (`test/`) |
 
 Compiled JS is not committed to git (see `.gitignore`). Always run `npm run build` (or `tsc -p <config>`) after editing TypeScript source.
@@ -228,7 +227,6 @@ Each test file points `PI_CODING_AGENT_DIR` at an isolated temp tree so real Pi 
 │   └── public/     # Browser TypeScript source
 │       ├── app.ts, app-main.ts, state.ts, themes.ts, ...
 │       └── websocket-client.ts
-├── extensions/     # Pi extensions (deprecated — no-ops)
 ├── test/           # Node.js test files
 ├── docs/           # Screenshots and documentation
 └── extras/         # Extra utilities
