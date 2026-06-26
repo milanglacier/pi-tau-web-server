@@ -1,3 +1,7 @@
+---
+status: COMPLETED
+---
+
 # Plan: Fix the webui so multiple images can be uploaded in one go
 
 ## Goal
@@ -109,3 +113,13 @@ npm run build
   adding a DOM shim dependency, which is a separate decision.
 - The server side and the `PendingImage[]` types already handle arrays, so no
   server changes are needed.
+
+---
+
+## Review
+
+No findings.
+
+**Verdict:** The change is correct as-is.
+
+**Explanation:** `addAttachments()` now snapshots the incoming `FileList` synchronously before any `await`, so clearing the file input or the browser invalidating drag-and-drop data cannot truncate multi-image uploads. `npm run typecheck` passes.
