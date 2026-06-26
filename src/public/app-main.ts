@@ -1078,7 +1078,8 @@ function processImageFile(file: File): Promise<PendingImage> {
 }
 
 async function addAttachments(files: FileList | File[]) {
-  for (const file of files) {
+  const list = Array.from(files);            // snapshot before any await
+  for (const file of list) {
     if (!file.type.startsWith('image/')) continue;
     try {
       pendingImages.push(await processImageFile(file));
