@@ -59,12 +59,22 @@ function isForwardedHttps(req: IncomingMessage): boolean {
   return String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
 }
 
-// Mint on Basic-authed requests (covers the page load right after the native
-// prompt) and refresh cookie-authed ones nearing expiry; never mint while auth
-// is disabled so toggling it back on grants nothing to bystanders.
+// Mint when the request carries no valid session cookie (covers the page load
+// right after the native prompt) and refresh one nearing expiry; never mint
+// while auth is disabled so toggling it back on grants nothing to bystanders.
+// Desktop browsers resend the Basic header on every request, so Basic-authed
+// requests usually also carry a fresh cookie — don't re-mint on every response.
 function maybeSetSessionCookie(req: IncomingMessage, res: ServerResponse, auth: AuthResult) {
   if (!authEnabled || !auth.ok || auth.via === 'disabled') return;
-  if (auth.via === 'cookie' && (auth.expiresAt ?? 0) - Math.floor(Date.now() / 1000) >= SESSION_REFRESH_THRESHOLD_SECONDS) return;
+  let expiresAt = auth.expiresAt;
+  if (expiresAt === undefined) {
+    const token = parseCookies(req.headers.cookie)[SESSION_COOKIE_NAME];
+    if (token) {
+      const verdict = verifySessionToken(token);
+      if (verdict.valid) expiresAt = verdict.expiresAt;
+    }
+  }
+  if (expiresAt !== undefined && expiresAt - Math.floor(Date.now() / 1000) >= SESSION_REFRESH_THRESHOLD_SECONDS) return;
   res.setHeader('Set-Cookie', buildSessionCookie(issueSessionToken(), { secure: isForwardedHttps(req) }));
 }
 

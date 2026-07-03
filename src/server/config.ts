@@ -71,7 +71,7 @@ export const MIME_TYPES = {
   '.woff2': 'font/woff2',
 };
 
-export function saveTauSetting(key: string, value: unknown) {
+export function saveTauSetting(key: string, value: unknown): boolean {
   const settingsPath = path.join(PI_AGENT_DIR, 'settings.json');
   try {
     let settings: TauSettingsFile = {};
@@ -80,6 +80,9 @@ export function saveTauSetting(key: string, value: unknown) {
     settings.tau[key] = value;
     fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
     fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
-  } catch {}
+    return true;
+  } catch {
+    return false;
+  }
 }
 

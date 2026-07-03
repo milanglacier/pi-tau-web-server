@@ -87,6 +87,50 @@ test('cookie-only HTTP request succeeds without Authorization', async () => {
   assert.equal(res.headers.get('set-cookie'), null);
 });
 
+test('a stale Basic header with a valid cookie still succeeds', async () => {
+  // checkAuth must not short-circuit on a wrong Basic header: browsers cache
+  // and resend Basic credentials, and a stale cached header must not lock the
+  // user out of an otherwise live cookie session.
+  const token = _issueSessionTokenForTest();
+  const staleBasic = 'Basic ' + Buffer.from('admin:oldpass').toString('base64');
+  const res = await fetch(`${base}/api/live-sessions`, {
+    headers: { Authorization: staleBasic, Cookie: `${SESSION_COOKIE_NAME}=${token}` },
+  });
+  assert.equal(res.status, 200);
+});
+
+test('Basic request carrying a fresh cookie does not re-mint it', async () => {
+  // Desktop browsers resend the Authorization header on every request, so the
+  // Basic path must respect the same freshness check as the cookie path.
+  const token = _issueSessionTokenForTest();
+  const res = await fetch(`${base}/api/live-sessions`, {
+    headers: { Authorization: BASIC, Cookie: `${SESSION_COOKIE_NAME}=${token}` },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('set-cookie'), null);
+});
+
+test('Basic request carrying a near-expiry cookie refreshes it', async () => {
+  const token = _issueSessionTokenForTest(nowSec() + 3600); // under the 6h refresh threshold
+  const res = await fetch(`${base}/api/live-sessions`, {
+    headers: { Authorization: BASIC, Cookie: `${SESSION_COOKIE_NAME}=${token}` },
+  });
+  assert.equal(res.status, 200);
+  const fresh = extractToken(res.headers.get('set-cookie'));
+  assert.notEqual(fresh, token);
+  const freshExpiry = parseInt(fresh.split('.')[1], 10);
+  assert.ok(freshExpiry > nowSec() + 3600, 'refreshed token must expire later than the old one');
+});
+
+test('Basic request carrying an invalid cookie mints a replacement', async () => {
+  const res = await fetch(`${base}/api/live-sessions`, {
+    headers: { Authorization: BASIC, Cookie: `${SESSION_COOKIE_NAME}=junk` },
+  });
+  assert.equal(res.status, 200);
+  const token = extractToken(res.headers.get('set-cookie'));
+  assert.ok(token.startsWith('v1.'), 'replacement must be a v1 signed token');
+});
+
 test('cookie-only WebSocket upgrade succeeds and receives initial state', async () => {
   const token = _issueSessionTokenForTest();
   const ws = new WebSocket(wsUrl, {

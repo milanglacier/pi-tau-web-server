@@ -27,7 +27,9 @@ function getCookieSecret(): string {
     return cachedSecret;
   }
   cachedSecret = crypto.randomBytes(32).toString('hex');
-  saveTauSetting('cookieSecret', cachedSecret);
+  if (!saveTauSetting('cookieSecret', cachedSecret)) {
+    console.warn('tau: could not persist tau.cookieSecret to settings.json; session cookies will not survive a server restart (every restart will log all devices out). Set TAU_COOKIE_SECRET to work around this.');
+  }
   return cachedSecret;
 }
 
