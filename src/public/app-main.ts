@@ -12,6 +12,7 @@ import { themes, applyTheme, getCurrentTheme } from './themes.js';
 import { FileBrowser, getFileIcon } from './file-browser.js';
 import { setupLauncherPanel } from './launcher-panel.js';
 import { setupModelPicker } from './model-picker.js';
+import { setupTreeView } from './tree-view.js';
 import { setupVoiceInput } from './voice-input.js';
 import { setupCommandPalette } from './command-palette.js';
 import { setupSessionStatsCard, type SessionStats } from './session-stats-card.js';
@@ -331,6 +332,11 @@ wsClient.addEventListener('rpcEvent', (e: Event) => {
       session.lastActiveAt = new Date().toISOString();
       if (event.type === 'agent_start' || event.type === 'turn_start') session.isStreaming = true;
       if (event.type === 'agent_end' || event.type === 'turn_end') session.isStreaming = false;
+      if (event.type === 'agent_start' || event.type === 'turn_start' || event.type === 'agent_end' || event.type === 'turn_end') {
+        // Keep an open tree modal honest: disable its rows while the turn
+        // runs, and refetch the tree (re-enabling the rows) when it ends.
+        treeViewController.notifyStreamingChanged(sessionId, !!session.isStreaming);
+      }
       if (event.type === 'session_name' && event.name) session.sessionName = event.name;
       if ((event.message as AppMessage)?.usage) session.contextUsage = { ...(session.contextUsage || {}), usage: (event.message as AppMessage).usage };
       renderLiveTabs();
@@ -1301,6 +1307,7 @@ abortBtn.addEventListener('click', () => {
 
 // Command Palette
 const commandPaletteController = setupCommandPalette([
+  { icon: '🌳', label: 'Session tree', desc: 'Jump to any earlier point in the session tree', action: () => { void treeViewController.open(); } },
   { icon: '🗜️', label: 'Compact', desc: 'Compact context to save tokens', action: () => rpcCommand({ type: 'compact' }, 'Compacting...') },
   { icon: '📋', label: 'Export HTML', desc: 'Export session as HTML file', action: () => rpcExportHtml() },
   { icon: '📊', label: 'Session Stats', desc: 'Show session statistics', action: () => showSessionStats() },
@@ -1370,6 +1377,21 @@ const modelPickerController = setupModelPicker({
   updateContextPill,
 });
 
+// Session tree view (modal opened from the header git-branch button, or the
+// command palette). Selecting an entry moves the session leaf server-side;
+// the conversation re-renders when the server broadcasts a fresh snapshot.
+const treeViewController = setupTreeView({
+  getActiveLiveSessionId: () => (viewingActiveSession && activeLiveSessionId ? activeLiveSessionId : null),
+  isStreaming: () => state.isStreaming,
+  setComposerText(text) {
+    messageInput.value = text;
+    // Trigger the textarea auto-resize handler.
+    messageInput.dispatchEvent(new Event('input'));
+    if (!isMobile()) messageInput.focus();
+  },
+  flashStatusError,
+});
+
 // ═══════════════════════════════════════
 // Keyboard shortcuts
 // ═══════════════════════════════════════
@@ -1379,6 +1401,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     // Close palettes/panels first
     if (modelPickerController.closeIfOpen()) return;
+    if (treeViewController.closeIfOpen()) return;
     if (!settingsPanel.classList.contains('hidden')) {
       closeSettings();
       return;
@@ -1636,6 +1659,9 @@ function applyLiveSessionSnapshot(data: LiveSessionSnapshotData) {
   }
 
   updateContextPill();
+  // A snapshot means the session's entries/leaf may have moved (e.g. another
+  // client ran navigate_tree) — refresh an open tree modal so it is not stale.
+  treeViewController.notifyTreeChanged(data.sessionId || activeLiveSessionId);
   // A live session just loaded — fetch its authoritative stats from pi.
   void sessionStatsCard.refresh();
 }
@@ -1693,6 +1719,7 @@ function updateLiveSessionInputState() {
   }
   document.getElementById('command-btn')!.disabled = !hasLiveSession;
   modelPickerController.setEnabled(hasLiveSession);
+  treeViewController.setVisible(hasLiveSession);
 }
 
 // ═══════════════════════════════════════

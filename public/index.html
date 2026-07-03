@@ -46,6 +46,9 @@
                   aria-label="Choose model and thinking level"><span class="model-input-label" id="model-input-label">Model</span></button>
         </div>
         <div class="header-right">
+          <button class="icon-btn hidden" id="tree-btn" title="Session tree" aria-label="Session tree">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
+          </button>
           <div class="stats-anchor">
             <button class="pill context-pill" id="context-pill" type="button" title="Context usage — click for session stats" aria-haspopup="true" aria-expanded="false"></button>
             <div class="stats-card hidden" id="session-stats-card"></div>
@@ -213,6 +216,18 @@
       <button type="button" class="secondary-btn" id="model-picker-cancel">Cancel</button>
       <button type="button" class="primary-btn" id="model-picker-save">Save</button>
     </div>
+  </div>
+
+  <!-- Session Tree -->
+  <div class="tree-view-overlay hidden" id="tree-view-overlay"></div>
+  <div class="tree-view hidden" id="tree-view" role="dialog" aria-modal="true" aria-labelledby="tree-view-title">
+    <div class="tree-view-header">
+      <h3 id="tree-view-title">Session tree</h3>
+      <button class="tree-view-filter" id="tree-view-filter" type="button" aria-pressed="false" title="Toggle tool results and housekeeping entries">Messages only</button>
+      <button class="model-picker-close" id="tree-view-close" type="button" aria-label="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="tree-view-message" id="tree-view-message"></div>
+    <div class="tree-view-list" id="tree-view-list" role="listbox" aria-label="Session entries"></div>
   </div>
 
   <!-- New live session modal -->

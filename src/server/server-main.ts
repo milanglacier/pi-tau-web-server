@@ -24,6 +24,7 @@ import { ARGS, AUTH_CONFIGURED, HOST, MIME_TYPES, PI_AGENT_DIR, PORT, SESSIONS_D
 import { SESSION_COOKIE_NAME, SESSION_REFRESH_THRESHOLD_SECONDS, buildSessionCookie, issueSessionToken, parseCookies, verifySessionToken } from './auth.js';
 import { getAvailableModels, modelLabel, normalizeModel, parseModelSpecToModel, parsePiListModels, _clearModelListCacheForTest, _setExecFileForTest } from './model-utils.js';
 import { LiveSessionManager, PiRpcSession, isGenericSessionName, liveManager, makeId, _setSpawnPiForTest } from './sessions.js';
+import { NAVIGATION_MARKER_TYPE, applyTreeNavigation, flattenTree, isTreeNavigationInProgress, leafDescendsFrom, navigateTree, pathFromRoot, rollbackTreeNavigation, selectNavigationTarget } from './tree.js';
 
 type TauWs = WsType & { isAlive?: boolean };
 
@@ -241,6 +242,18 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
   }
 
   const session = command.sessionId ? liveManager.get(command.sessionId) : null;
+  // Backend-local: move the session-tree leaf to an earlier entry (pi's RPC
+  // protocol has no leaf-move command, so tau branches the file with the pi
+  // SDK and reloads the child — see src/server/tree.ts).
+  if (cmd === 'navigate_tree') {
+    if (!session) return error('Live session not found');
+    const entryId = typeof command.entryId === 'string' ? command.entryId.trim() : '';
+    if (!entryId) return error('entryId required');
+    try {
+      const result = await navigateTree(session, entryId);
+      return success({ editorText: result.editorText });
+    } catch (e) { return error(errorMessage(e)); }
+  }
   if (cmd === 'export_html') {
     try {
       if (command.sessionId && !session) throw new Error('Live session not found');
@@ -276,8 +289,16 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
   if (cmd === 'live_session_snapshot_request') return { type: 'live_session_snapshot', sessionId: session.id, ...session.snapshot() };
   if (cmd === 'set_auto_compaction') return success({ enabled: !!command.enabled });
 
-  const native = new Set(['prompt', 'steer', 'follow_up', 'abort', 'compact', 'set_model', 'cycle_model', 'set_thinking_level', 'cycle_thinking_level', 'get_session_stats', 'extension_ui_response']);
+  const native = new Set(['prompt', 'steer', 'follow_up', 'abort', 'compact', 'set_model', 'cycle_model', 'set_thinking_level', 'cycle_thinking_level', 'get_session_stats', 'get_tree', 'get_entries', 'extension_ui_response']);
   if (!native.has(cmd ?? '')) return error(`Unknown command: ${cmd}`);
+
+  // While navigate_tree is rewriting the session file and reloading the pi
+  // child, a prompt racing into that window would be silently aborted by the
+  // reload (and its entries stranded on the old branch). Refuse it up front so
+  // the user's turn is never dropped without them knowing.
+  if ((cmd === 'prompt' || cmd === 'steer' || cmd === 'follow_up') && isTreeNavigationInProgress(session.id)) {
+    return error('A session-tree navigation is in progress for this session; wait a moment and send again');
+  }
 
   // `set_thinking_level` is forwarded to pi but pi's response carries no
   // level/thinkingLevel field, so updateStateFromResponse would never update
@@ -952,6 +973,15 @@ module.exports = {
   resolveOpenPath,
   openUrl,
   handleRpcCommand,
+  NAVIGATION_MARKER_TYPE,
+  applyTreeNavigation,
+  flattenTree,
+  isTreeNavigationInProgress,
+  leafDescendsFrom,
+  navigateTree,
+  pathFromRoot,
+  rollbackTreeNavigation,
+  selectNavigationTarget,
   isAllowedApiOrigin,
   setCorsForAllowedOrigin,
   handleApiRoute,
