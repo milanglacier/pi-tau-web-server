@@ -17,11 +17,11 @@ type ModelPickerOptions = {
   flashStatusError(message: string, ms?: number): void;
   escapeHtml(text: string): string;
   setContextWindowSize(value: number): void;
-  updateTokenUsage(): void;
+  updateContextPill(): void;
 };
 
 export function setupModelPicker(options: ModelPickerOptions) {
-  const { getActiveLiveSessionId, isViewingActiveSession, rpcCommand, flashStatusError, escapeHtml, setContextWindowSize, updateTokenUsage } = options;
+  const { getActiveLiveSessionId, isViewingActiveSession, rpcCommand, flashStatusError, escapeHtml, setContextWindowSize, updateContextPill } = options;
 
 // ═══════════════════════════════════════
 // Model Picker
@@ -359,7 +359,7 @@ async function applyModelSpec(rawSpec: string) {
     const responseContextWindow = responseModel.contextWindow || data.contextWindow;
     if (responseContextWindow) {
       setContextWindowSize(Number(responseContextWindow) || 0);
-      updateTokenUsage();
+      updateContextPill();
     }
     if (parsed.thinking !== null) {
       const t = await rpcCommand({ type: 'set_thinking_level', level: parsed.thinking }, 'Setting thinking...');
@@ -460,7 +460,7 @@ async function fetchModelInfo() {
       currentModelId = stateData.data.model || '';
       if (stateData.data.model?.contextWindow) {
         setContextWindowSize(Number(stateData.data.model.contextWindow) || 0);
-        updateTokenUsage();
+        updateContextPill();
       }
     }
     if (stateData.success && stateData.data?.thinkingLevel) {

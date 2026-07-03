@@ -46,18 +46,9 @@
                   aria-label="Choose model and thinking level">Model</button>
         </div>
         <div class="header-right">
-          <div class="pill session-cost" id="session-cost" title="Session cost"></div>
-          <div style="position: relative;">
-            <div class="pill token-usage" id="token-usage" title="Click for context breakdown"></div>
-            <div class="context-viz hidden" id="context-viz">
-              <div class="context-viz-title">Context Window</div>
-              <div class="context-bar" id="context-bar"></div>
-              <div class="context-legend" id="context-legend"></div>
-              <div class="context-viz-footer">
-                <span id="context-viz-used"></span>
-                <span id="context-viz-total"></span>
-              </div>
-            </div>
+          <div class="stats-anchor">
+            <button class="pill context-pill" id="context-pill" type="button" title="Context usage — click for session stats" aria-haspopup="true" aria-expanded="false"></button>
+            <div class="stats-card hidden" id="session-stats-card"></div>
           </div>
           <div class="status">
             <span class="status-indicator" id="status-indicator"></span>
@@ -105,10 +96,6 @@
 
       <!-- Input Area -->
       <div class="input-area">
-        <button class="mobile-context-toggle" id="mobile-context-toggle">
-          <svg width="10" height="6" viewBox="0 0 10 6" fill="none"><path d="M1 5L5 1L9 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
-        <div class="mobile-model-bar" id="mobile-model-bar"></div>
         <div class="queued-messages hidden" id="queued-messages"></div>
         <div class="image-previews hidden" id="image-previews"></div>
         <form id="chat-form">

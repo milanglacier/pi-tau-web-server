@@ -911,150 +911,115 @@ body {
   transition: all var(--duration) var(--ease);
 }
 
-/* Session cost pill */
-.session-cost {
-  color: var(--header-pill-text, var(--text-dim));
-  display: none;
+/* Anchor for the context pill + its stats-card popover */
+.stats-anchor {
+  position: relative;
+  display: flex;
+  align-items: center;
 }
 
-.session-cost.visible { display: block; }
-
-/* Token usage pill */
-.token-usage {
+/* Context pill — merged context % / session cost pill. It is a real
+   <button> so it is keyboard-focusable; strip the UA button chrome and let
+   the shared .pill styling take over. */
+.context-pill {
+  appearance: none;
+  -webkit-appearance: none;
   color: var(--header-pill-text, var(--text-dim));
   display: none;
   transition: all 0.3s var(--ease);
   cursor: pointer;
 }
 
-.token-usage:hover {
+.context-pill:hover {
   border-color: var(--border-hover);
   background: var(--bg-glass-hover);
 }
 
-.token-usage.visible { display: block; }
+.context-pill.visible { display: block; }
 
-.token-usage.warning {
+.context-pill.warning {
   color: var(--warning);
   border-color: rgba(251, 191, 36, 0.25);
 }
 
-.token-usage.critical {
+.context-pill.critical {
   color: var(--error);
   border-color: rgba(248, 113, 113, 0.25);
   animation: pulse 2s infinite;
 }
 
-/* Context window visualiser popover */
-.context-viz {
+/* Session stats card popover */
+.stats-card {
   position: absolute;
   top: calc(100% + 8px);
   right: 0;
-  width: 320px;
+  width: 236px;
+  max-width: calc(100vw - 24px);
   z-index: 1001;
   background: var(--bg-frosted);
   backdrop-filter: blur(var(--blur-heavy)) saturate(1.6);
   -webkit-backdrop-filter: blur(var(--blur-heavy)) saturate(1.6);
   border: 1px solid var(--border-hover);
   border-radius: var(--radius);
-  padding: 16px;
+  padding: 12px 14px;
   box-shadow: var(--shadow-lg);
-  z-index: 1001;
   animation: dropdownIn 0.15s var(--ease);
 }
 
-.context-viz.hidden { display: none; }
+.stats-card.hidden { display: none; }
 
-.context-viz-title {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-bottom: 12px;
+@keyframes dropdownIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
-/* The stacked bar */
-.context-bar {
+.stats-row {
   display: flex;
-  height: 24px;
-  border-radius: var(--radius-md);
-  overflow: hidden;
-  background: var(--bg-glass);
-  border: 1px solid var(--border);
-  margin-bottom: 12px;
-}
-
-.context-bar-segment {
-  height: 100%;
-  min-width: 2px;
-  transition: width 0.4s var(--ease);
-  position: relative;
-}
-
-.context-bar-segment:first-child {
-  border-radius: 7px 0 0 7px;
-}
-
-.context-bar-segment:last-child {
-  border-radius: 0 7px 7px 0;
-}
-
-.context-bar-segment.system { background: var(--thinking-accent); }
-.context-bar-segment.messages { background: var(--accent); }
-.context-bar-segment.tools { background: var(--tool-accent); }
-.context-bar-segment.cache { background: var(--success); opacity: 0.7; }
-.context-bar-segment.free { background: transparent; }
-
-/* Legend */
-.context-legend {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.context-legend-item {
-  display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: space-between;
+  gap: 16px;
+  padding: 3px 0;
   font-size: 11px;
   color: var(--text-secondary);
 }
 
-.context-legend-left {
+.stats-label {
   display: flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
 }
 
-.context-legend-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 3px;
-  flex-shrink: 0;
-}
-
-.context-legend-dot.system { background: var(--thinking-accent); }
-.context-legend-dot.messages { background: var(--accent); }
-.context-legend-dot.tools { background: var(--tool-accent); }
-.context-legend-dot.cache { background: var(--success); opacity: 0.7; }
-.context-legend-dot.free { background: var(--bg-glass-strong); border: 1px solid var(--border); }
-
-.context-legend-value {
-  font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
-  font-size: 10px;
+.stats-icon {
+  display: inline-flex;
   color: var(--text-dim);
 }
 
-.context-viz-footer {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-  display: flex;
-  justify-content: space-between;
-  font-size: 10px;
+.stats-value {
   font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+  font-size: 11px;
+  color: var(--text-primary);
+  text-align: right;
+}
+
+.stats-context-detail {
+  display: block;
+  font-size: 10px;
   color: var(--text-dim);
+  margin-top: 2px;
+}
+
+.stats-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 6px 0;
+}
+
+.stats-empty {
+  padding: 4px 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: center;
 }
 
 /* Compact button — appears at 80% context */
@@ -2189,19 +2154,6 @@ body.hide-thinking .thinking-block { display: none !important; }
    Input Area — floating glass field
    ═══════════════════════════════════════════════════════ */
 
-/* Mobile context bar above input */
-.mobile-context-toggle {
-  display: none;
-}
-
-.mobile-model-bar {
-  display: none;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 0 4px 8px;
-}
-
 .input-area {
   padding: 10px 20px 12px;
   background: var(--header-bg);
@@ -3169,13 +3121,27 @@ body.hide-thinking .thinking-block { display: none !important; }
     opacity: 0.4 !important;
   }
 
-  /* Hide context bar on mobile */
-  .mobile-context-toggle {
-    display: none !important;
+  /* Context pill stays in the header on mobile — enlarge its hit target */
+  .context-pill.visible {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    padding: 0 12px;
   }
 
-  .mobile-model-bar {
-    display: none !important;
+  /* Stats card: right-anchoring can clip on narrow screens, so pin it
+     centered under the header instead (clamped to the viewport). The mobile
+     header renders ~56-58px tall (44px touch targets + 6px padding — see the
+     .live-tabs margin-top below), so offset 64px to clear it with a gap.
+     Centering uses auto margins rather than translateX so the dropdownIn
+     animation's transform doesn't fight the anchoring. */
+  .stats-card {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + 64px);
+    left: 12px;
+    right: 12px;
+    margin-inline: auto;
+    width: min(280px, calc(100vw - 24px));
   }
 
   /* Slim down header */

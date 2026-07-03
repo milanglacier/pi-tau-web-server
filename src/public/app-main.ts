@@ -14,6 +14,7 @@ import { setupLauncherPanel } from './launcher-panel.js';
 import { setupModelPicker } from './model-picker.js';
 import { setupVoiceInput } from './voice-input.js';
 import { setupCommandPalette } from './command-palette.js';
+import { setupSessionStatsCard, type SessionStats } from './session-stats-card.js';
 
 import type { AppEvent, AppMessage, ExtensionUIRequest, LiveInstance, LiveSession, MessageContentBlock, ModelRecord, PendingFilePath, PendingImage, QueuedCommand, RpcCommand, UsageRecord } from './app-types.js';
 
@@ -134,8 +135,7 @@ const refreshSessionsBtn = document.getElementById('refresh-sessions-btn')!;
 const sessionSearchInput = document.getElementById('session-search-input')!;
 const typingIndicator = document.getElementById('typing-indicator')!;
 
-const sessionCostEl = document.getElementById('session-cost')!;
-const tokenUsageEl = document.getElementById('token-usage')!;
+const contextPillEl = document.getElementById('context-pill')!;
 const scrollBottomBtn = document.getElementById('scroll-bottom-btn')!;
 const scrollBottomBadge = document.getElementById('scroll-bottom-badge')!;
 const messagesContainer = document.getElementById('messages')!;
@@ -746,10 +746,12 @@ function handleCompactionEnd(event: AppEvent) {
     indicator.innerHTML = `✓ Context compacted${summary}`;
     indicator.classList.add('compaction-done');
   }
-  // Reset token tracking — next message will update
+  // Reset token tracking — the stats refresh below and the next message
+  // bring in fresh post-compaction numbers.
   lastInputTokens = 0;
-  updateTokenUsage();
+  updateContextPill();
   hideCompactButton();
+  void sessionStatsCard.refresh();
 }
 
 function handleAgentStart() {
@@ -765,6 +767,12 @@ function handleAgentEnd() {
   currentStreamingElement = null;
   currentStreamingText = '';
   updateUI();
+
+  // A turn just finished — pull authoritative post-turn stats from pi so the
+  // context pill and stats card stop relying on incremental usage events.
+  // Guard with wasStreaming so paired turn_end/agent_end events do not
+  // double-fetch for the same completed turn.
+  if (wasStreaming) void sessionStatsCard.refresh();
 
   // Notify via tab title if unfocused. Guard with wasStreaming so paired
   // turn_end/agent_end events do not double-count the same completed turn.
@@ -878,8 +886,7 @@ function handleMessageEnd(message: AppMessage) {
       lastInputTokens = usage.input + (usage.cacheRead || 0);
       lastUsage = usage;
     }
-    updateCostDisplay();
-    updateTokenUsage();
+    updateContextPill();
     showNewMessageBadge();
   }
 }
@@ -1360,7 +1367,7 @@ const modelPickerController = setupModelPicker({
   flashStatusError,
   escapeHtml,
   setContextWindowSize(value) { contextWindowSize = value; },
-  updateTokenUsage,
+  updateContextPill,
 });
 
 // ═══════════════════════════════════════
@@ -1489,8 +1496,8 @@ sessionSearchInput.addEventListener('input', () => {
 async function newSession() {
   sessionTotalCost = 0;
   lastInputTokens = 0;
-  updateCostDisplay();
-  updateTokenUsage();
+  lastUsage = null;
+  updateContextPill();
   await switchSession(null);
   sidebar.clearActive();
   if (isMobile()) {
@@ -1504,8 +1511,8 @@ async function handleSessionSelect(session: SidebarSession | null, project: Side
   if (session) sidebar.setActive(session.filePath);
   sessionTotalCost = 0;
   lastInputTokens = 0;
-  updateCostDisplay();
-  updateTokenUsage();
+  lastUsage = null;
+  updateContextPill();
   if (session) await switchSession(session.filePath, session, project);
 
   // Close sidebar on mobile after selecting
@@ -1620,6 +1627,7 @@ function applyLiveSessionSnapshot(data: LiveSessionSnapshotData) {
   messageRenderer.clear();
   sessionTotalCost = 0;
   lastInputTokens = 0;
+  lastUsage = null;
 
   if (data.entries && data.entries.length > 0) {
     renderSessionHistory(data.entries);
@@ -1627,8 +1635,9 @@ function applyLiveSessionSnapshot(data: LiveSessionSnapshotData) {
     messageRenderer.renderWelcome();
   }
 
-  updateCostDisplay();
-  updateTokenUsage();
+  updateContextPill();
+  // A live session just loaded — fetch its authoritative stats from pi.
+  void sessionStatsCard.refresh();
 }
 
 // Mark all live sessions in the sidebar with a green dot
@@ -1778,8 +1787,7 @@ function renderSessionHistory(entries: SessionHistoryEntry[]) {
   console.log(`[History] DOM tool-card count:`, document.querySelectorAll('.tool-card').length);
   console.log(`[History] DOM thinking-block count:`, document.querySelectorAll('.thinking-block').length);
 
-  updateCostDisplay();
-  updateTokenUsage();
+  updateContextPill();
   fetchContextWindow();
 
   // Jump to bottom instantly (no smooth scroll animation)
@@ -1801,27 +1809,21 @@ function showTypingIndicator(show: boolean) {
   typingIndicator.classList.toggle('hidden', !show);
 }
 
-function updateCostDisplay() {
-  if (sessionTotalCost > 0) {
-    sessionCostEl.textContent = `$${sessionTotalCost.toFixed(4)} (sub)`;
-    sessionCostEl.classList.add('visible');
-  } else {
-    sessionCostEl.classList.remove('visible');
-  }
-}
-
-function updateTokenUsage() {
+// The single header pill: shows context usage %, falling back to raw tokens
+// (no context window info yet) or session cost (no context data yet).
+// Clicking it opens the session stats card.
+function updateContextPill() {
   if (lastInputTokens > 0 && contextWindowSize > 0) {
     const pct = Math.round((lastInputTokens / contextWindowSize) * 100);
-    tokenUsageEl.textContent = pct === 0 ? '<1%' : `${pct}%`;
-    tokenUsageEl.classList.add('visible');
-    tokenUsageEl.classList.remove('warning', 'critical');
+    contextPillEl.textContent = pct === 0 ? '<1%' : `${pct}%`;
+    contextPillEl.classList.add('visible');
+    contextPillEl.classList.remove('warning', 'critical');
     if (pct >= 80) {
-      tokenUsageEl.classList.add('critical');
+      contextPillEl.classList.add('critical');
     } else if (pct >= 60) {
-      tokenUsageEl.classList.add('warning');
+      contextPillEl.classList.add('warning');
     }
-    tokenUsageEl.title = `Context: ${(lastInputTokens / 1000).toFixed(1)}k / ${(contextWindowSize / 1000).toFixed(0)}k tokens`;
+    contextPillEl.title = `Context: ${(lastInputTokens / 1000).toFixed(1)}k / ${(contextWindowSize / 1000).toFixed(0)}k tokens — click for session stats`;
     if (pct >= 80) {
       showCompactButton();
     } else {
@@ -1829,9 +1831,18 @@ function updateTokenUsage() {
     }
   } else if (lastInputTokens > 0) {
     // No context window info yet, just show raw tokens
-    tokenUsageEl.textContent = `${(lastInputTokens / 1000).toFixed(1)}k`;
-    tokenUsageEl.classList.add('visible');
-    tokenUsageEl.classList.remove('warning', 'critical');
+    contextPillEl.textContent = `${(lastInputTokens / 1000).toFixed(1)}k`;
+    contextPillEl.classList.add('visible');
+    contextPillEl.classList.remove('warning', 'critical');
+    contextPillEl.title = 'Context tokens — click for session stats';
+  } else if (sessionTotalCost > 0) {
+    // No context data yet — show the session cost as a fallback.
+    contextPillEl.textContent = `$${sessionTotalCost.toFixed(3)} (sub)`;
+    contextPillEl.classList.add('visible');
+    contextPillEl.classList.remove('warning', 'critical');
+    contextPillEl.title = 'Session cost — click for session stats';
+  } else {
+    contextPillEl.classList.remove('visible', 'warning', 'critical');
   }
 }
 
@@ -1846,9 +1857,9 @@ function showCompactButton() {
     rpcCommand({ type: 'compact' }, 'Compacting...');
     hideCompactButton();
   });
-  // Insert next to token usage in header
-  const tokenParent = tokenUsageEl.parentElement;
-  if (tokenParent) tokenParent.insertBefore(btn, tokenUsageEl.nextSibling);
+  // Insert next to the context pill in the header
+  const pillParent = contextPillEl.parentElement;
+  if (pillParent) pillParent.insertBefore(btn, contextPillEl.nextSibling);
 }
 
 function hideCompactButton() {
@@ -2062,94 +2073,56 @@ const savedTheme = getCurrentTheme();
 applyTheme(savedTheme);
 
 // ═══════════════════════════════════════
-// Context Window Visualiser
+// Session stats card (opened from the context pill)
 // ═══════════════════════════════════════
 
-const contextViz = document.getElementById('context-viz')!;
-const contextBar = document.getElementById('context-bar')!;
-const contextLegend = document.getElementById('context-legend')!;
-const contextVizUsed = document.getElementById('context-viz-used')!;
-const contextVizTotal = document.getElementById('context-viz-total')!;
+// Fetch authoritative session stats from pi's get_session_stats RPC. Uses a
+// plain fetch (not rpcCommand) so it never flashes status-bar messages.
+// Resolves null when there is no live session or the fetch fails; a stale
+// response for a session we already switched away from is discarded, and any
+// authoritative numbers are synced into the pill's local state.
+async function fetchSessionStats(): Promise<SessionStats | null> {
+  if (!viewingActiveSession || !activeLiveSessionId) return null;
+  const requestSessionId = activeLiveSessionId;
+  try {
+    const resp = await fetch('/api/rpc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'get_session_stats', sessionId: requestSessionId }),
+    });
+    const data = await resp.json();
+    if (!data?.success || !data.data) return null;
+    if (activeLiveSessionId !== requestSessionId || !viewingActiveSession) return null;
+    const stats = data.data as SessionStats;
 
-
-function formatTokens(n: number) {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return String(n);
+    // Sync authoritative numbers into the locally-tracked pill state so the
+    // pill never drifts from what pi reports. contextUsage (and its fields)
+    // may be null right after compaction — keep the last known values then.
+    if (typeof stats.cost === 'number') sessionTotalCost = stats.cost;
+    const cu = stats.contextUsage;
+    if (cu && typeof cu.contextWindow === 'number' && cu.contextWindow > 0) {
+      contextWindowSize = cu.contextWindow;
+    }
+    if (cu && typeof cu.tokens === 'number') {
+      lastInputTokens = cu.tokens;
+    }
+    updateContextPill();
+    return stats;
+  } catch {
+    return null;
+  }
 }
 
-function updateContextViz() {
-  if (!lastUsage || !contextWindowSize) return;
-
-  const input = lastUsage.input || 0;
-  const cacheRead = lastUsage.cacheRead || 0;
-  const cacheWrite = lastUsage.cacheWrite || 0;
-  const output = lastUsage.output || 0;
-  const total = contextWindowSize;
-
-  // Input tokens include cache — break it down
-  // "input" from API = fresh (uncached) input tokens
-  // "cacheRead" = tokens served from cache (system prompt, earlier messages)
-  const freshInput = input;
-  const totalUsed = freshInput + cacheRead;
-  const free = Math.max(0, total - totalUsed);
-
-  const segments = [
-    { key: 'cache', label: 'Cached', tokens: cacheRead, color: 'cache' },
-    { key: 'messages', label: 'Input', tokens: freshInput, color: 'messages' },
-    { key: 'free', label: 'Available', tokens: free, color: 'free' },
-  ];
-
-  // Build bar
-  contextBar.innerHTML = '';
-  for (const seg of segments) {
-    if (seg.tokens <= 0) continue;
-    const pct = (seg.tokens / total) * 100;
-    const el = document.createElement('div');
-    el.className = `context-bar-segment ${seg.color}`;
-    el.style.width = `${pct}%`;
-    el.title = `${seg.label}: ${formatTokens(seg.tokens)}`;
-    contextBar.appendChild(el);
-  }
-
-  // Build legend
-  contextLegend.innerHTML = '';
-  for (const seg of segments) {
-    const item = document.createElement('div');
-    item.className = 'context-legend-item';
-    item.innerHTML = `
-      <span class="context-legend-left">
-        <span class="context-legend-dot ${seg.color}"></span>
-        ${seg.label}
-      </span>
-      <span class="context-legend-value">${formatTokens(seg.tokens)}</span>
-    `;
-    contextLegend.appendChild(item);
-  }
-
-  // Footer
-  const pct = Math.round((totalUsed / total) * 100);
-  contextVizUsed.textContent = `${pct}% used`;
-  contextVizTotal.textContent = `${formatTokens(totalUsed)} / ${formatTokens(total)}`;
-}
-
-// Toggle on click
-tokenUsageEl.addEventListener('click', (e) => {
-  e.stopPropagation();
-  const isHidden = contextViz.classList.contains('hidden');
-  if (isHidden) {
-    updateContextViz();
-    contextViz.classList.remove('hidden');
-  } else {
-    contextViz.classList.add('hidden');
-  }
-});
-
-// Close on click outside
-document.addEventListener('click', (e) => {
-  if (!contextViz.contains(e.target as Node) && e.target !== tokenUsageEl) {
-    contextViz.classList.add('hidden');
-  }
+const sessionStatsCard = setupSessionStatsCard({
+  pillEl: contextPillEl,
+  cardEl: document.getElementById('session-stats-card')!,
+  fetchStats: fetchSessionStats,
+  getFallback: () => ({
+    usage: lastUsage,
+    cost: sessionTotalCost,
+    contextTokens: lastInputTokens,
+    contextWindow: contextWindowSize,
+  }),
 });
 
 // Voice Input
@@ -2159,27 +2132,10 @@ setupVoiceInput(document.getElementById('mic-btn')!, messageInput);
 // Initialize
 // ═══════════════════════════════════════
 
-// On mobile, move cost + token usage above input
+// On mobile, start with the sidebar collapsed. The context pill stays in the
+// header on all screen sizes.
 if (isMobile()) {
   sidebarEl.classList.add('collapsed');
-
-  const mobileBar = document.getElementById('mobile-model-bar')!;
-  const sessionCost = document.getElementById('session-cost');
-  const tokenUsage = document.getElementById('token-usage');
-  if (mobileBar && sessionCost && tokenUsage) {
-    mobileBar.appendChild(sessionCost);
-    mobileBar.appendChild(tokenUsage);
-  }
-
-  // Start collapsed
-  mobileBar.classList.add('collapsed');
-
-  // Toggle via chevron
-  const contextToggle = document.getElementById('mobile-context-toggle')!;
-  contextToggle.addEventListener('click', () => {
-    mobileBar.classList.toggle('collapsed');
-    contextToggle.classList.toggle('flipped', !mobileBar.classList.contains('collapsed'));
-  });
 }
 
 wsClient.connect();
