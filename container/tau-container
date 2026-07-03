@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPOSITORY_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+IMAGE="${TAU_CONTAINER_IMAGE:-pi-tau-web-server:local}"
+STATE_ROOT="${TAU_CONTAINER_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/pi-tau-web-server/instances}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  container/tau-container build
+  container/tau-container run <instance> [--port <port>] [--bind <address>] [--foreground]
+  container/tau-container stop <instance>
+  container/tau-container logs <instance>
+  container/tau-container status
+
+Environment:
+  TAU_USER                 Basic Auth username; prompted when unset
+  TAU_PASS                 Basic Auth password; prompted when unset
+  PI_CODING_AGENT_DIR      Host Pi profile to copy on first launch
+  TAU_CONTAINER_RUNTIME    docker or podman (auto-detected by default)
+  TAU_CONTAINER_IMAGE      Image name (default: pi-tau-web-server:local)
+  TAU_CONTAINER_STATE_DIR  Per-instance state root
+EOF
+}
+
+die() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+container_runtime() {
+  if [[ -n "${TAU_CONTAINER_RUNTIME:-}" ]]; then
+    command -v "$TAU_CONTAINER_RUNTIME" >/dev/null 2>&1 \
+      || die "container runtime not found: $TAU_CONTAINER_RUNTIME"
+    printf '%s\n' "$TAU_CONTAINER_RUNTIME"
+    return
+  fi
+  if command -v docker >/dev/null 2>&1; then
+    printf 'docker\n'
+  elif command -v podman >/dev/null 2>&1; then
+    printf 'podman\n'
+  else
+    die 'docker or podman is required'
+  fi
+}
+
+runtime_is_podman() {
+  local runtime="$1" oci_runtime
+  [[ "$(basename -- "$runtime")" == 'podman' ]] && return 0
+  oci_runtime="$("$runtime" info --format '{{.Host.OCIRuntime.Name}}' 2>/dev/null || true)"
+  [[ -n "$oci_runtime" && "$oci_runtime" != '<no value>' ]]
+}
+
+validate_instance() {
+  local instance="$1"
+  [[ "$instance" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] \
+    || die 'instance names may contain only letters, numbers, dots, underscores, and hyphens'
+}
+
+container_name() {
+  printf 'pi-tau-%s\n' "$1"
+}
+
+instance_state_dir() {
+  printf '%s/%s\n' "$STATE_ROOT" "$1"
+}
+
+seed_configuration() {
+  local instance="$1"
+  local state_dir source_dir staging_dir
+  state_dir="$(instance_state_dir "$instance")"
+  source_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+
+  mkdir -p \
+    "$state_dir/home" \
+    "$state_dir/projects/chat"
+  chmod 0700 \
+    "$state_dir" \
+    "$state_dir/home" \
+    "$state_dir/projects"
+
+  if [[ -e "$state_dir/.pi-profile-initialized" ]]; then
+    mkdir -p "$state_dir/agent/sessions"
+    chmod 0700 "$state_dir/agent/sessions"
+    return
+  fi
+  [[ -d "$source_dir" ]] || die "Pi profile not found: $source_dir"
+
+  staging_dir="$(mktemp -d "$state_dir/.agent-staging.XXXXXX")"
+
+  if ! (
+    cd -- "$source_dir"
+    tar --dereference \
+      --exclude='./sessions' \
+      --exclude='./sessions/**' \
+      --exclude='./npm' \
+      --exclude='./npm/**' \
+      --exclude='./git' \
+      --exclude='./git/**' \
+      -cf - .
+  ) | tar -xf - -C "$staging_dir"; then
+    rm -rf -- "$staging_dir"
+    die "failed to copy Pi profile from $source_dir"
+  fi
+
+  # Defend against tar implementation differences and make Nix-store-backed
+  # files writable after their symlinks have been dereferenced.
+  rm -rf -- "$staging_dir/sessions" "$staging_dir/npm" "$staging_dir/git"
+  chmod -R u+rwX "$staging_dir"
+
+  mv -- "$staging_dir" "$state_dir/agent"
+  mkdir -p "$state_dir/agent/sessions"
+  chmod 0700 "$state_dir/agent/sessions"
+  touch "$state_dir/.pi-profile-initialized"
+}
+
+build_image_with_runtime() {
+  local runtime="$1"
+  local -a build_args=(
+    build
+    --file "$SCRIPT_DIR/Dockerfile"
+    --tag "$IMAGE"
+  )
+  if runtime_is_podman "$runtime"; then
+    build_args+=(--format docker)
+  fi
+  build_args+=("$REPOSITORY_ROOT")
+  "$runtime" "${build_args[@]}"
+}
+
+build_image() {
+  local runtime
+  runtime="$(container_runtime)"
+  build_image_with_runtime "$runtime"
+}
+
+ensure_image() {
+  local runtime="$1"
+  if ! "$runtime" image inspect "$IMAGE" >/dev/null 2>&1; then
+    printf 'Image %s is missing; building it now.\n' "$IMAGE"
+    build_image_with_runtime "$runtime"
+  fi
+}
+
+read_credentials() {
+  if [[ -z "${TAU_USER:-}" ]]; then
+    read -r -p 'Tau username: ' TAU_USER
+  fi
+  [[ -n "$TAU_USER" ]] || die 'Tau username cannot be empty'
+  [[ "$TAU_USER" != *:* ]] || die 'Tau username cannot contain a colon'
+
+  if [[ -z "${TAU_PASS:-}" ]]; then
+    read -r -s -p 'Tau password: ' TAU_PASS
+    printf '\n'
+  fi
+  [[ -n "$TAU_PASS" ]] || die 'Tau password cannot be empty'
+  export TAU_USER TAU_PASS
+}
+
+run_instance() {
+  local instance="${1:-}"
+  shift || true
+  [[ -n "$instance" ]] || die 'run requires an instance name'
+  validate_instance "$instance"
+
+  local port=3001 bind_address=0.0.0.0 detached=1
+  while (($#)); do
+    case "$1" in
+      --port)
+        (($# >= 2)) || die '--port requires a value'
+        port="$2"
+        shift 2
+        ;;
+      --bind)
+        (($# >= 2)) || die '--bind requires a value'
+        bind_address="$2"
+        shift 2
+        ;;
+      --foreground)
+        detached=0
+        shift
+        ;;
+      *)
+        die "unknown run option: $1"
+        ;;
+    esac
+  done
+  if [[ ! "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
+    die 'port must be an integer between 1 and 65535'
+  fi
+  [[ -n "$bind_address" ]] || die 'bind address cannot be empty'
+
+  local runtime name state_dir projects_dir existing_status
+  runtime="$(container_runtime)"
+  name="$(container_name "$instance")"
+  state_dir="$(instance_state_dir "$instance")"
+  projects_dir="$state_dir/projects"
+
+  existing_status="$("$runtime" inspect --format '{{.State.Status}}' "$name" 2>/dev/null || true)"
+  if [[ "$existing_status" == 'running' ]]; then
+    die "instance is already running: $instance"
+  elif [[ -n "$existing_status" ]]; then
+    "$runtime" rm "$name" >/dev/null
+  fi
+
+  seed_configuration "$instance"
+  read_credentials
+  ensure_image "$runtime"
+
+  local -a run_args=(
+    run
+    --name "$name"
+    --label "org.pi-tau.instance=$instance"
+    --init
+    --user "$(id -u):$(id -g)"
+    --read-only
+    --tmpfs "/tmp:rw,nosuid,nodev,mode=1777"
+    --cap-drop ALL
+    --security-opt no-new-privileges
+    --publish "${bind_address}:${port}:3001"
+    --env TAU_USER
+    --env TAU_PASS
+    --env HOME=/state/home
+    --env PI_CODING_AGENT_DIR=/state/agent
+    --env TAU_HOST=0.0.0.0
+    --env TAU_PORT=3001
+    --env TAU_PROJECTS_DIR=/state/home/projects
+    --volume "$state_dir:/state:rw"
+    --volume "$projects_dir:/state/home/projects:rw"
+  )
+  if runtime_is_podman "$runtime"; then
+    run_args+=(--userns keep-id)
+  fi
+  if ((detached)); then
+    run_args+=(--restart unless-stopped --detach)
+  else
+    run_args+=(--rm)
+  fi
+  run_args+=("$IMAGE")
+
+  if [[ "$bind_address" == '0.0.0.0' || "$bind_address" == '::' ]]; then
+    printf 'Warning: port %s will be exposed on every host interface. Use HTTPS for remote access.\n' "$port" >&2
+  fi
+
+  "$runtime" "${run_args[@]}"
+
+  if ((detached)); then
+    printf 'Tau instance %s is running at http://localhost:%s\n' "$instance" "$port"
+    printf 'Writable instance state: %s\n' "$state_dir"
+  fi
+}
+
+stop_instance() {
+  local instance="${1:-}"
+  [[ -n "$instance" ]] || die 'stop requires an instance name'
+  validate_instance "$instance"
+  "$(container_runtime)" stop "$(container_name "$instance")"
+}
+
+logs_instance() {
+  local instance="${1:-}"
+  [[ -n "$instance" ]] || die 'logs requires an instance name'
+  validate_instance "$instance"
+  "$(container_runtime)" logs --follow "$(container_name "$instance")"
+}
+
+show_status() {
+  "$(container_runtime)" ps --all --filter label=org.pi-tau.instance \
+    --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+}
+
+main() {
+  local command="${1:-}"
+  shift || true
+  case "$command" in
+    build) build_image "$@" ;;
+    run) run_instance "$@" ;;
+    stop) stop_instance "$@" ;;
+    logs) logs_instance "$@" ;;
+    status) show_status "$@" ;;
+    help|-h|--help|'') usage ;;
+    *) die "unknown command: $command" ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

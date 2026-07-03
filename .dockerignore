@@ -1,0 +1,14 @@
+.git
+.agents
+.codex
+.plans
+.tags
+node_modules
+bin
+public/*.js
+public/*.js.map
+public/*.d.ts
+references
+*.tsbuildinfo
+pi-session-*.html
+
