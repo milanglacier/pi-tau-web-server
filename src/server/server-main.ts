@@ -21,6 +21,7 @@ import type { Socket } from 'node:net';
 import type { WebSocket as WsType } from 'ws';
 import type { JsonRecord, RpcCommand, RpcResponse, StatusError } from './types.js';
 import { ARGS, AUTH_CONFIGURED, HOST, MIME_TYPES, PI_AGENT_DIR, PORT, SESSIONS_DIR, STATIC_DIR, TAU_SETTINGS, expandHome, loadTauSettings, parseArgs, saveTauSetting } from './config.js';
+import { SESSION_COOKIE_NAME, SESSION_REFRESH_THRESHOLD_SECONDS, buildSessionCookie, issueSessionToken, parseCookies, verifySessionToken } from './auth.js';
 import { getAvailableModels, modelLabel, normalizeModel, parseModelSpecToModel, parsePiListModels, _clearModelListCacheForTest, _setExecFileForTest } from './model-utils.js';
 import { LiveSessionManager, PiRpcSession, isGenericSessionName, liveManager, makeId, _setSpawnPiForTest } from './sessions.js';
 
@@ -38,6 +39,35 @@ function checkBasicAuth(req: IncomingMessage) {
   return decoded.slice(0, colon) === TAU_SETTINGS.user && decoded.slice(colon + 1) === TAU_SETTINGS.pass;
 }
 
+type AuthResult = { ok: boolean; via: 'disabled' | 'basic' | 'cookie' | 'none'; expiresAt?: number };
+
+// A wrong Basic header does not short-circuit: a valid session cookie still
+// wins, so a browser resending a stale cached Basic header cannot lock the
+// user out of an otherwise live session.
+function checkAuth(req: IncomingMessage): AuthResult {
+  if (!authEnabled) return { ok: true, via: 'disabled' };
+  if (checkBasicAuth(req)) return { ok: true, via: 'basic' };
+  const token = parseCookies(req.headers.cookie)[SESSION_COOKIE_NAME];
+  if (token) {
+    const verdict = verifySessionToken(token);
+    if (verdict.valid) return { ok: true, via: 'cookie', expiresAt: verdict.expiresAt };
+  }
+  return { ok: false, via: 'none' };
+}
+
+function isForwardedHttps(req: IncomingMessage): boolean {
+  return String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+}
+
+// Mint on Basic-authed requests (covers the page load right after the native
+// prompt) and refresh cookie-authed ones nearing expiry; never mint while auth
+// is disabled so toggling it back on grants nothing to bystanders.
+function maybeSetSessionCookie(req: IncomingMessage, res: ServerResponse, auth: AuthResult) {
+  if (!authEnabled || !auth.ok || auth.via === 'disabled') return;
+  if (auth.via === 'cookie' && (auth.expiresAt ?? 0) - Math.floor(Date.now() / 1000) >= SESSION_REFRESH_THRESHOLD_SECONDS) return;
+  res.setHeader('Set-Cookie', buildSessionCookie(issueSessionToken(), { secure: isForwardedHttps(req) }));
+}
+
 function errorMessage(e: unknown): string {
   if (e instanceof Error) return e.message;
   return String(e);
@@ -51,7 +81,12 @@ function errorStatus(e: unknown): number {
   return 400;
 }
 
-function sendAuthRequired(res: ServerResponse) {
+function sendAuthRequired(res: ServerResponse, req?: IncomingMessage) {
+  // Clear a presented-but-invalid session cookie so the browser stops
+  // resending it and falls back to the Basic prompt.
+  if (req && parseCookies(req.headers.cookie)[SESSION_COOKIE_NAME]) {
+    res.setHeader('Set-Cookie', buildSessionCookie('', { secure: isForwardedHttps(req), clear: true }));
+  }
   res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Tau"', 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ error: 'Unauthorized' }));
 }
@@ -273,7 +308,9 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
 
 function serveStaticFile(req: IncomingMessage, res: ServerResponse) {
   let urlPath = req.url || '/';
-  if (authEnabled && !urlPath.startsWith('/api/health') && !checkBasicAuth(req)) return sendAuthRequired(res);
+  const auth = checkAuth(req);
+  if (authEnabled && !urlPath.startsWith('/api/health') && !auth.ok) return sendAuthRequired(res, req);
+  maybeSetSessionCookie(req, res, auth);
   if (urlPath.startsWith('/api/')) return handleApiRoute(req, res, urlPath);
   urlPath = urlPath.split('?')[0];
   if (urlPath === '/') urlPath = '/index.html';
@@ -793,7 +830,7 @@ server.on('upgrade', (request: IncomingMessage, socket: Socket, head: Buffer) =>
     socket.destroy();
     return;
   }
-  if (authEnabled && !checkBasicAuth(request)) {
+  if (authEnabled && !checkAuth(request).ok) {
     socket.write('HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm="Tau"\r\n\r\n');
     socket.destroy();
     return;
@@ -874,6 +911,11 @@ function startCli() {
 // Test-only helper to reset module-level auth state between cases.
 function _setAuthForTest(enabled: boolean) { authEnabled = !!enabled; }
 
+// Test-only helpers for the session-cookie flow: mutate the live credentials
+// (tokens embed a credential fingerprint) and mint tokens at chosen expiries.
+function _setCredentialsForTest(user: string, pass: string) { TAU_SETTINGS.user = user; TAU_SETTINGS.pass = pass; }
+function _issueSessionTokenForTest(expiresAtSeconds?: number) { return issueSessionToken(expiresAtSeconds); }
+
 // Test-only hook to substitute the `pi` spawn so LiveSessionManager.create()
 // can be exercised without launching a real Pi process.
 
@@ -911,7 +953,11 @@ module.exports = {
   startCli,
   SESSIONS_DIR,
   PI_AGENT_DIR,
+  checkAuth,
+  SESSION_COOKIE_NAME,
   _setAuthForTest,
+  _setCredentialsForTest,
+  _issueSessionTokenForTest,
   _setSpawnPiForTest,
   _setExecFileForTest,
   _clearModelListCacheForTest,

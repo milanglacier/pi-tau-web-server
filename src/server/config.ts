@@ -39,6 +39,7 @@ export function loadTauSettings(): TauSettings {
     user: process.env.TAU_USER || settings.user || '',
     pass: process.env.TAU_PASS || settings.pass || '',
     authEnabled: settings.authEnabled,
+    cookieSecret: process.env.TAU_COOKIE_SECRET || settings.cookieSecret || '',
     projectsDir: expandHome(ARGS['projects-dir'] || process.env.TAU_PROJECTS_DIR || settings.projectsDir || ''),
   };
 }

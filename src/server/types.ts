@@ -12,6 +12,7 @@ export type TauSettingsFile = {
     user?: string;
     pass?: string;
     authEnabled?: boolean;
+    cookieSecret?: string;
     projectsDir?: string;
     [key: string]: unknown;
   };
@@ -22,6 +23,7 @@ export type TauSettings = {
   user: string;
   pass: string;
   authEnabled?: boolean;
+  cookieSecret?: string;
   projectsDir: string;
 };
 export type ModelIdentity = {

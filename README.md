@@ -192,8 +192,9 @@ Six built-in themes: Dusk (clean neutral dark, default), Dawn (warm blue dark), 
 | `TAU_STATIC_DIR`   | _(bundled)_ |                               Override static files path |
 | `TAU_USER`         |    _(none)_ |                                 HTTP Basic Auth username |
 | `TAU_PASS`         |    _(none)_ |                                 HTTP Basic Auth password |
+| `TAU_COOKIE_SECRET`| _(generated)_ |            Secret that signs session cookies (optional) |
 
-Tau also reads matching values from `~/.pi/agent/settings.json` under the `tau` key (`host`, `port`, `projectsDir`, `user`, `pass`, `authEnabled`).
+Tau also reads matching values from `~/.pi/agent/settings.json` under the `tau` key (`host`, `port`, `projectsDir`, `user`, `pass`, `authEnabled`, `cookieSecret`).
 
 ### Authentication
 
@@ -209,6 +210,8 @@ Tau Web Server supports optional HTTP Basic Auth. Set credentials in `~/.pi/agen
 ```
 
 Both HTTP and WebSocket connections are gated when enabled. `/api/health` remains open for monitoring.
+
+After the first successful Basic login, the server sets a signed `HttpOnly` session cookie and accepts it in place of the Authorization header. This keeps mobile browsers (notably iOS Safari and the installed PWA, which evict cached Basic credentials whenever you switch apps) from re-prompting for the password every time you return to the app. The cookie is scoped to the browser session — killing the browser ends it and the Basic prompt appears again — and the token inside it expires after 12 hours of inactivity, renewing itself while the app is in use. Changing the password invalidates every outstanding cookie on all devices, and deleting the auto-generated `cookieSecret` from `~/.pi/agent/settings.json` force-logs-out all devices at once.
 
 ## How it works
 
