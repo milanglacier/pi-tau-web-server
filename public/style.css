@@ -1078,15 +1078,22 @@ body {
   font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
   color: var(--text-primary);
   transition: all var(--duration) var(--ease);
-  white-space: nowrap;
   flex: 1 1 auto;
   max-width: 360px;
   min-width: 120px;
   outline: none;
   cursor: pointer;
   overflow: hidden;
-  text-overflow: ellipsis;
   text-align: left;
+}
+
+/* The label span is the text container: ellipsized on desktop, a swipeable
+   scroll container on mobile (buttons themselves are unreliable scrollers). */
+.model-input-label {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .model-input:hover {
@@ -3152,10 +3159,19 @@ body.hide-thinking .thinking-block { display: none !important; }
 
   .header-left {
     gap: 6px;
+    flex: 1 1 auto; /* take the leftover width for the model button */
+    min-width: 0; /* allow shrinking below the unbreakable model string */
   }
 
+  /* Pin the right-side widgets: context pill, status, and settings must
+     never be pushed off-screen by a long model name. */
   .header-right {
     gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .header-right .status {
+    white-space: nowrap; /* "Connected • TS" must not wrap once space is tight */
   }
 
   /* Let the model input use all remaining header space on small screens
@@ -3165,6 +3181,20 @@ body.hide-thinking .thinking-block { display: none !important; }
     min-width: 0;
     max-width: none;
     width: 100%;
+  }
+
+  /* The full model string stays reachable by swiping the label instead of
+     being ellipsized. Same hidden-scrollbar pattern as .live-tabs-list. */
+  .model-input-label {
+    overflow-x: auto;
+    overflow-y: hidden; /* overflow-x:auto alone would compute overflow-y to auto */
+    text-overflow: clip;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .model-input-label::-webkit-scrollbar {
+    display: none;
   }
 
   .model-picker {

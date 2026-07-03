@@ -30,6 +30,9 @@ export function setupModelPicker(options: ModelPickerOptions) {
 // All element lookups below query the app's static index.html shell, which is
 // present before this setup function runs; assert non-null at the query site.
 const modelInput = document.getElementById('model-input')!;
+// Inner label span: the scrollable text container on mobile (buttons are
+// unreliable scroll containers, so the text lives in its own element).
+const modelInputLabel = document.getElementById('model-input-label')!;
 const modelPickerOverlay = document.getElementById('model-picker-overlay')!;
 const modelPicker = document.getElementById('model-picker')!;
 const modelPickerInput = document.getElementById('model-picker-input')!;
@@ -76,7 +79,7 @@ function modelDisplayString() {
 
 function updateModelDisplay() {
   const display = modelDisplayString() || 'Model';
-  modelInput.textContent = display;
+  modelInputLabel.textContent = display;
   modelInput.title = display === 'Model' ? 'Choose model and (optionally) thinking level for this session' : display;
   modelInput.classList.remove('invalid');
 }
