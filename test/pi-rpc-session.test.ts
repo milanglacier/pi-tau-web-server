@@ -274,6 +274,9 @@ test('parseModelSpecToModel parses provider/id[:level]', () => {
   assert.deepEqual(parseModelSpecToModel('openai/gpt-4o'), {
     model: { provider: 'openai', id: 'gpt-4o' }, level: null,
   });
+  assert.deepEqual(parseModelSpecToModel('openai/gpt-4o:max'), {
+    model: { provider: 'openai', id: 'gpt-4o' }, level: 'max',
+  });
   assert.deepEqual(parseModelSpecToModel(''), { model: null, level: null });
   // A colon followed by a non-level token is treated as part of the id, not a level.
   const r = parseModelSpecToModel('anthropic/claude-3.5:sonnet');

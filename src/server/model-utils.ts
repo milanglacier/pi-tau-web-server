@@ -46,7 +46,7 @@ export function parseModelSpecToModel(spec: unknown): ParsedModelSpec {
   const colonIdx = trimmed.lastIndexOf(':');
   if (colonIdx !== -1) {
     const candidate = trimmed.slice(colonIdx + 1).toLowerCase();
-    if (['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(candidate)) {
+    if (['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(candidate)) {
       level = candidate;
     }
   }
