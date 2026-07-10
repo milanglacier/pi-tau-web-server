@@ -25,6 +25,12 @@ ln -s "$TMP/external-config" "$PI_CODING_AGENT_DIR/external-config"
 # shellcheck disable=SC1091
 source "$ROOT/container/tau-container"
 
+# Every Pi RPC child is started with Tau's bundled session-tree extension.
+# Keep it in the runtime image at the path resolved by bin/sessions.js.
+grep -Fq \
+  'COPY --from=builder /app/src/pi-extension ./src/pi-extension' \
+  "$ROOT/container/Dockerfile"
+
 seed_configuration alpha
 
 alpha="$TAU_CONTAINER_STATE_DIR/alpha"

@@ -31,6 +31,7 @@ RUN npm ci --omit=dev --ignore-scripts \
 
 COPY --from=builder /app/bin ./bin
 COPY --from=builder /app/public ./public
+COPY --from=builder /app/src/pi-extension ./src/pi-extension
 COPY container/entrypoint.sh /usr/local/bin/tau-entrypoint
 
 RUN chmod 0755 /usr/local/bin/tau-entrypoint
