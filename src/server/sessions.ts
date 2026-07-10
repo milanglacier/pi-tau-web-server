@@ -7,6 +7,7 @@ import type { ChildProcess } from 'node:child_process';
 import type { JsonRecord, LiveClient, ModelIdentity, PendingCommand, RpcCommand, RpcResponse } from './types.js';
 import { expandHome } from './config.js';
 import { modelLabel, normalizeModel, parseModelSpecToModel } from './model-utils.js';
+import { NAVIGATE_COMMAND } from './tree.js';
 
 type SpawnFn = (cmd: string, args: string[], opts: JsonRecord) => ChildProcess;
 type PiMessageContent = string | Array<{ type: string; text?: string }>;
@@ -285,7 +286,12 @@ export class PiRpcSession {
     // events while the triggering prompt still acks with success. Keep the
     // last one so navigate_tree can explain WHY a leaf verification failed
     // (stdout is ordered, so the event lands before the prompt's response).
-    if (type === 'extension_error' && event.error) this.lastExtensionError = String(event.error);
+    // Only tau's own command qualifies — pi tags command errors with
+    // extensionPath `command:<name>` — so a failure is never blamed on an
+    // unrelated extension that happened to error in the same window.
+    if (type === 'extension_error' && event.error && event.extensionPath === `command:${NAVIGATE_COMMAND}`) {
+      this.lastExtensionError = String(event.error);
+    }
     if (event.contextUsage) this.contextUsage = event.contextUsage;
     if (event.sessionFile) this.sessionFile = event.sessionFile;
     if (type === 'session_name' && event.name) {

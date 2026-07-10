@@ -7,7 +7,7 @@ const fs = require('node:fs');
 process.env.PI_CODING_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-pirs-'));
 process.env.PI_CODING_AGENT_SESSION_DIR = path.join(process.env.PI_CODING_AGENT_DIR, 'sessions');
 
-const { PiRpcSession, normalizeModel, parseModelSpecToModel, handleRpcCommand, liveManager, _setSpawnPiForTest } = require('../bin/tau.js');
+const { PiRpcSession, normalizeModel, parseModelSpecToModel, handleRpcCommand, liveManager, _setSpawnPiForTest, NAVIGATE_COMMAND } = require('../bin/tau.js');
 import type { TestContext } from 'node:test';
 
 interface BroadcastMsg {
@@ -58,6 +58,18 @@ test('agent_start/turn_start set isStreaming; agent_end/turn_end clear it', () =
     assert.equal(b.type, 'event');
     assert.equal(b.sessionId, session.id);
   }
+});
+
+test('only tau-tree-navigate extension_error events are kept for navigate_tree diagnostics', () => {
+  const { session } = makeSession();
+  // Errors from other extensions (or other events from tau's command) must
+  // never be blamed for a failed tree navigation.
+  session.handleEvent({ type: 'extension_error', extensionPath: 'command:some-other-command', error: 'unrelated failure' });
+  assert.equal(session.lastExtensionError, null);
+  session.handleEvent({ type: 'extension_error', extensionPath: '/home/user/.pi/extensions/foo.ts', event: 'session_tree', error: 'hook exploded' });
+  assert.equal(session.lastExtensionError, null);
+  session.handleEvent({ type: 'extension_error', extensionPath: `command:${NAVIGATE_COMMAND}`, error: 'Entry x not found in the session tree' });
+  assert.equal(session.lastExtensionError, 'Entry x not found in the session tree');
 });
 
 test('user message_start tracks an entry and derives a session title', () => {
