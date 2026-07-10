@@ -37,6 +37,12 @@ export function makeId() {
   return `tau_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
 }
 
+// tau's bundled pi extension (registers the /tau-tree-navigate command used
+// by navigate_tree — see src/server/tree.ts). The compiled server runs from
+// bin/, while the extension ships as source under src/pi-extension/ because
+// pi loads extension .ts files directly.
+const TAU_TREE_EXTENSION = path.resolve(__dirname, '..', 'src', 'pi-extension', 'tau-tree.ts');
+
 export function isGenericSessionName(name: unknown) {
   const normalized = String(name || '').trim().toLowerCase();
   return normalized === 'chat' || normalized === 'new chat' || normalized === 'untitled' || normalized === 'untitled chat' || normalized === 'session';
@@ -64,6 +70,10 @@ export class PiRpcSession {
   exitCode: number | null;
   titleSet: boolean;
   userMessages: string[];
+  /** Last extension_error event from the child; navigate_tree reads this to explain a failed leaf move. */
+  lastExtensionError: string | null;
+  /** Whether navigateTree has confirmed this child loaded tau's tree extension (reset per spawn). */
+  navigateCommandChecked: boolean;
 
   constructor(manager: LiveSessionManager, opts: { id?: string; cwd: string; modelSpec?: string; sessionFile?: string | null; entries?: JsonRecord[]; sessionName?: string | null }) {
     this.manager = manager;
@@ -89,6 +99,8 @@ export class PiRpcSession {
     this.exitCode = null;
     this.titleSet = false;
     this.userMessages = [];
+    this.lastExtensionError = null;
+    this.navigateCommandChecked = false;
   }
 
   metadata() {
@@ -126,9 +138,10 @@ export class PiRpcSession {
     if (!fs.existsSync(this.cwd) || !fs.statSync(this.cwd).isDirectory()) {
       throw new Error(`Directory not found: ${this.cwd}`);
     }
-    const args = ['--mode', 'rpc'];
+    const args = ['--mode', 'rpc', '--extension', TAU_TREE_EXTENSION];
     if (this.sessionFile) args.push('--session', this.sessionFile);
     if (this.modelSpec) args.push('--model', this.modelSpec);
+    this.navigateCommandChecked = false;
     const spawnFn: SpawnFn = _spawnPiForTest || spawn;
     const child = spawnFn('pi', args, {
       cwd: this.cwd,
@@ -268,6 +281,11 @@ export class PiRpcSession {
     const type = event.type;
     if (type === 'agent_start' || type === 'turn_start') this.isStreaming = true;
     if (type === 'agent_end' || type === 'turn_end') this.isStreaming = false;
+    // Extension command handlers report their errors as extension_error
+    // events while the triggering prompt still acks with success. Keep the
+    // last one so navigate_tree can explain WHY a leaf verification failed
+    // (stdout is ordered, so the event lands before the prompt's response).
+    if (type === 'extension_error' && event.error) this.lastExtensionError = String(event.error);
     if (event.contextUsage) this.contextUsage = event.contextUsage;
     if (event.sessionFile) this.sessionFile = event.sessionFile;
     if (type === 'session_name' && event.name) {
