@@ -21,6 +21,10 @@ work with multiple Pi sessions side by side in your browser.
 | **Test coverage**     | Javascript and No tests                                                                       | Typescript + Full test suite                                                                                   |
 | **Auto-start**        | Extension auto-started inside Pi unless `TAU_DISABLED=1`                                      | Always explicit — the user runs `pi-tau-web-server` when they want it                                          |
 
+### Enhancements in this branch compared with `main`
+
+This branch also includes various enhancements over `main`, including a session-tree and branching interface that mirrors Pi TUI's `/tree` command. Open **Session tree** from the header or command palette to inspect every branch and continue from any earlier point; selecting a user message restores it to the composer so it can be edited and submitted as a new branch.
+
 ![Tau light mode](docs/images/main-page.jpg)
 
 ![Tau dark mode](docs/images/main-page-dark.jpg)
@@ -138,6 +142,7 @@ machine. Pass `--bind 127.0.0.1` to restrict an instance to local access.
 - Browser reload or reconnect restores live Tau tabs from the backend
 - Multiple browser clients see the same live session list
 - Historical sessions remain read-only
+- **Session tree and branching** — inspect the active session's full tree and jump to any earlier entry, mirroring Pi TUI's `/tree` behavior; choose a user message to restore it to the composer and create a new branch
 
 ### Model & Thinking
 
