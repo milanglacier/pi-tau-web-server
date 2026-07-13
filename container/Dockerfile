@@ -8,6 +8,7 @@ RUN npm ci --ignore-scripts
 COPY tsconfig.json tsconfig.server.json tsconfig.public.json ./
 COPY src ./src
 COPY public ./public
+COPY scripts ./scripts
 RUN npm run build
 
 FROM node:22-bookworm-slim AS runtime

@@ -12,6 +12,7 @@
   <meta name="apple-mobile-web-app-title" content="Tau">
   <meta name="theme-color" content="#f5f3ef">
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="vendor/katex/katex.min.css">
 </head>
 <body>
   <div class="app-layout">
@@ -255,6 +256,9 @@
   <div id="dialog-container" class="hidden"></div>
 
   <!-- Scripts -->
+  <!-- Deferred classic scripts run before module scripts in document order,
+       so window.katex is available by the time app.js executes. -->
+  <script defer src="vendor/katex/katex.min.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

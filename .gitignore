@@ -11,6 +11,9 @@ node_modules/
 /public/*.js.map
 /public/*.d.ts
 
+# Vendored KaTeX assets copied from node_modules by scripts/copy-katex.mjs
+/public/vendor/
+
 .DS_Store
 .idea
 .claude/settings.local.json

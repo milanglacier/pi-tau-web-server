@@ -21,13 +21,14 @@
   "files": [
     "bin",
     "public",
+    "scripts",
     "src",
     "tsconfig.json",
     "tsconfig.server.json",
     "tsconfig.public.json"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.public.json",
+    "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.public.json && node scripts/copy-katex.mjs",
     "prepare": "npm run build",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.public.json --noEmit && tsc -p tsconfig.test.json",
     "test": "npm run build && node --test"
@@ -39,6 +40,7 @@
     "@earendil-works/pi-coding-agent": "0.80.6",
     "@types/node": "^26.1.1",
     "@types/ws": "^8.18.1",
+    "katex": "^0.17.0",
     "typescript": "^7.0.2"
   }
 }

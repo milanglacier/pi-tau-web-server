@@ -19,6 +19,11 @@ export function renderMarkdown(text: string) {
     return `%%CODEBLOCK_${idx}%%`;
   });
 
+  // Extract display math after code fences (so $$ inside fences stays literal)
+  // but before the line split, since $$...$$ may span multiple lines.
+  const mathBlocks: string[] = [];
+  text = extractDisplayMath(text, mathBlocks);
+
   // Split into lines and process block-level elements
   const lines = text.split('\n');
   let html = '';
@@ -72,6 +77,15 @@ export function renderMarkdown(text: string) {
       html += `<div class="code-block-wrapper">`;
       html += `<div class="code-block-header"><span>${escapeHtml(langLabel)}</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>`;
       html += `<pre><code>${escapeHtml(block.code)}</code></pre></div>`;
+      continue;
+    }
+
+    // Display math placeholder
+    const mathMatch = line.match(/^%%MATHBLOCK(\d+)%%$/);
+    if (mathMatch) {
+      flushList();
+      flushBlockquote();
+      html += `<div class="math-block">${mathBlocks[parseInt(mathMatch[1])]}</div>`;
       continue;
     }
 
@@ -217,6 +231,9 @@ export function renderUserMarkdown(text: string) {
   if (!text) return '';
   text = text.replace(/\r\n/g, '\n');
 
+  const mathBlocks: string[] = [];
+  text = extractDisplayMath(text, mathBlocks);
+
   const lines = text.split('\n');
   let html = '';
   let inBlockquote = false;
@@ -231,6 +248,12 @@ export function renderUserMarkdown(text: string) {
   }
 
   for (const line of lines) {
+    const mathMatch = line.match(/^%%MATHBLOCK(\d+)%%$/);
+    if (mathMatch) {
+      flushBq();
+      html += `<div class="math-block">${mathBlocks[parseInt(mathMatch[1])]}</div>`;
+      continue;
+    }
     if (/^>\s?/.test(line)) {
       if (!inBlockquote) { inBlockquote = true; bqLines = []; }
       bqLines.push(line.replace(/^>\s?/, ''));
@@ -252,6 +275,16 @@ function renderInline(text: string) {
     codeSpans.push(`<code>${escapeHtml(code)}</code>`);
     return `%%ICODE${idx}%%`;
   });
+
+  // Inline math — after inline code (so `$x$` stays code) but before the
+  // emphasis regexes, which would otherwise mangle math like $a_i * b_i$.
+  const mathSpans: string[] = [];
+  const putMath = (src: string) => `%%IMATH${mathSpans.push(renderMath(src.trim(), false)) - 1}%%`;
+  text = text.replace(/\\\((.+?)\\\)/g, (_, src: string) => putMath(src));
+  // Single-$ form with currency heuristics: opening $ not escaped/doubled and
+  // not followed by whitespace; closing $ not escaped, not preceded by
+  // whitespace, not followed by a digit ("$5 and $10" stays text).
+  text = text.replace(/(?<![\\$])\$(?!\s)((?:\\.|[^$])+?)(?<![\s\\])\$(?!\d)/g, (_, src: string) => putMath(src));
 
   // Images (before links so ![...](...) isn't caught by link regex)
   text = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" class="inline-image">');
@@ -276,9 +309,37 @@ function renderInline(text: string) {
   // Auto-link bare URLs
   text = text.replace(/(^|[^"'])(https?:\/\/[^\s<]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
 
-  // Restore inline code
+  // Restore inline math and inline code last so the regexes above never see
+  // the generated HTML.
+  text = text.replace(/%%IMATH(\d+)%%/g, (_, idx: string) => mathSpans[parseInt(idx)]);
   text = text.replace(/%%ICODE(\d+)%%/g, (_, idx: string) => codeSpans[parseInt(idx)]);
 
+  return text;
+}
+
+type Katex = {
+  renderToString(tex: string, opts: { displayMode: boolean; throwOnError: boolean }): string;
+};
+
+function renderMath(src: string, displayMode: boolean) {
+  const katex = (globalThis as { katex?: Katex }).katex;
+  if (!katex) return `<code class="math-fallback">${escapeHtml(src)}</code>`;
+  try {
+    return katex.renderToString(src, { displayMode, throwOnError: false });
+  } catch {
+    return `<code class="math-fallback">${escapeHtml(src)}</code>`;
+  }
+}
+
+// Replaces $$...$$ and \[...\] segments with %%MATHBLOCK<N>%% placeholders on
+// their own lines, pushing the KaTeX-rendered HTML into `blocks`. The
+// placeholder deliberately has no underscore (matching %%ICODE0%%) so the
+// italic regex can never split it.
+function extractDisplayMath(text: string, blocks: string[]) {
+  const put = (_: string, src: string) =>
+    `\n%%MATHBLOCK${blocks.push(renderMath(src.trim(), true)) - 1}%%\n`;
+  text = text.replace(/\$\$([\s\S]+?)\$\$/g, put);
+  text = text.replace(/\\\[([\s\S]+?)\\\]/g, put);
   return text;
 }
 
@@ -290,19 +351,22 @@ function escapeHtml(text: string) {
     .replace(/"/g, '&quot;');
 }
 
-// Global copy function for code blocks
-window.copyCode = function(btn) {
-  const wrapper = btn.closest('.code-block-wrapper');
-  if (!wrapper) return;
-  const codeBlock = wrapper.querySelector('code');
-  if (!codeBlock) return;
-  const text = codeBlock.textContent || '';
-  navigator.clipboard.writeText(text).then(() => {
-    btn.textContent = 'Copied!';
-    btn.classList.add('copied');
-    setTimeout(() => {
-      btn.textContent = 'Copy';
-      btn.classList.remove('copied');
-    }, 2000);
-  });
-};
+// Global copy function for code blocks. Guarded so the module can be imported
+// under node --test, where there is no window.
+if (typeof window !== 'undefined') {
+  window.copyCode = function(btn) {
+    const wrapper = btn.closest('.code-block-wrapper');
+    if (!wrapper) return;
+    const codeBlock = wrapper.querySelector('code');
+    if (!codeBlock) return;
+    const text = codeBlock.textContent || '';
+    navigator.clipboard.writeText(text).then(() => {
+      btn.textContent = 'Copied!';
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.textContent = 'Copy';
+        btn.classList.remove('copied');
+      }, 2000);
+    });
+  };
+}
