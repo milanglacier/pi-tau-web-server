@@ -34,13 +34,13 @@
     "test": "npm run build && node --test"
   },
   "dependencies": {
-    "ws": "^8.21.0"
+    "ws": "^8.21.1"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.80.6",
+    "@earendil-works/pi-coding-agent": "0.80.10",
     "@types/node": "^26.1.1",
     "@types/ws": "^8.18.1",
-    "katex": "^0.17.0",
+    "katex": "^0.18.0",
     "typescript": "^7.0.2"
   }
 }
