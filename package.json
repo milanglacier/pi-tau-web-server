@@ -1,6 +1,6 @@
 {
   "name": "pi-tau-web-server",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Web browser workspace for Pi — a standalone web server that manages multiple live Pi RPC sessions in parallel.",
   "keywords": [
     "pi",
