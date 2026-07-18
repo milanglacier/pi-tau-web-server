@@ -1,6 +1,6 @@
 # Pi Tau Web Server
 
-**Browser workspace for [Pi](https://github.com/milanglacier/pi-tau-web-server) — a standalone web server that manages multiple live Pi RPC sessions in parallel.**
+**Browser workspace for [Pi](https://github.com/earendil-works/pi) — a standalone web server that manages multiple live Pi RPC sessions in parallel.**
 
 Pi Tau Web Server is a fork of [deflating/tau](https://github.com/deflating/tau), forked at
 [`5e2bce39`](https://github.com/deflating/tau/tree/5e2bce39) and rewritten from
@@ -52,8 +52,11 @@ This branch also includes various enhancements over `main`, including a session-
 
 ## Install
 
+Requires Node.js 22.19 or newer and [Pi](https://github.com/earendil-works/pi)
+installed as the `pi` command on your `PATH`.
+
 ```bash
-npm install -g git+https://github.com/milanglacier/pi-tau-web-server.git#main
+npm install --global pi-tau-web-server
 ```
 
 ## Usage
@@ -239,7 +242,7 @@ The browser connects to Tau Web Server over WebSocket (and HTTP for history and 
 
 ### Prerequisites
 
-- [Pi](https://github.com/badlogic/pi-mono) must be installed (`pi` on `PATH`)
+- [Pi](https://github.com/earendil-works/pi) must be installed (`pi` on `PATH`)
 - Node.js and npm
 
 ### Setup

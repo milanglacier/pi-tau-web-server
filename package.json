@@ -1,22 +1,50 @@
 {
   "name": "pi-tau-web-server",
   "version": "1.0.8",
-  "description": "Standalone web server for managing multiple Pi RPC sessions in the browser",
+  "description": "Web browser workspace for Pi — a standalone web server that manages multiple live Pi RPC sessions in parallel.",
   "keywords": [
     "pi",
+    "pi-coding-agent",
+    "ai-agent",
+    "ai-coding-agent",
     "coding-agent",
+    "harness",
     "web-ui",
+    "web-server",
     "rpc",
-    "standalone"
+    "standalone",
+    "multi-session"
   ],
-  "author": "deflating",
+  "author": {
+    "name": "Milan Glacier",
+    "email": "dev@milanglacier.com",
+    "url": "https://github.com/milanglacier"
+  },
+  "contributors": [
+    {
+      "name": "deflating",
+      "url": "https://github.com/deflating"
+    }
+  ],
   "license": "MIT",
+  "homepage": "https://github.com/milanglacier/pi-tau-web-server#readme",
+  "bugs": {
+    "url": "https://github.com/milanglacier/pi-tau-web-server/issues"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/milanglacier/pi-tau-web-server.git"
   },
+  "main": "./bin/tau.js",
   "bin": {
     "pi-tau-web-server": "./bin/tau.js"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "files": [
     "bin",
