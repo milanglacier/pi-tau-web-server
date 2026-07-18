@@ -19,11 +19,8 @@ work with multiple Pi sessions side by side in your browser.
 | **Pi communication**  | In-process Pi extension API                                                                   | Out-of-process JSON line-delimited RPC over stdin/stdout                                                       |
 | **UI dialogs**        | `ctx.ui.confirm/input/select` shown in TUI only; not forwarded to the browser                 | All forwarded to the browser — extensions that use these built-in UI interfaces work seamlessly in the browser |
 | **Test coverage**     | Javascript and No tests                                                                       | Typescript + Full test suite                                                                                   |
-| **Auto-start**        | Extension auto-started inside Pi unless `TAU_DISABLED=1`                                      | Always explicit — the user runs `pi-tau-web-server` when they want it                                          |
-
-### Enhancements in this branch compared with `main`
-
-This branch also includes various enhancements over `main`, including a session-tree and branching interface that mirrors Pi TUI's `/tree` command. Open **Session tree** from the header or command palette to inspect every branch and continue from any earlier point; selecting a user message restores it to the composer so it can be edited and submitted as a new branch.
+| **Auto-start**           | Extension auto-started inside Pi unless `TAU_DISABLED=1`                                      | Always explicit — the user runs `pi-tau-web-server` when they want it                                          |
+| **Various enhancements** | N/A                                                                                           | Session tree and branching, mirroring Pi TUI's `/tree` command                                                  |
 
 ![Tau light mode](docs/images/main-page.jpg)
 
