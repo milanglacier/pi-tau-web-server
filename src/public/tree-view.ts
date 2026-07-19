@@ -356,6 +356,9 @@ export function setupTreeView(options: TreeViewOptions) {
 
   function onKeyDown(e: KeyboardEvent) {
     if (!isOpen()) return;
+    // Capture-phase document listener: never swallow keys that belong to an
+    // active IME composition.
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();

@@ -330,6 +330,8 @@ export class SessionSidebar {
 
     input.addEventListener('blur', commit);
     input.addEventListener('keydown', (ke) => {
+      // Don't commit the rename on the Enter that confirms an IME composition.
+      if (ke.isComposing || ke.keyCode === 229) return;
       if (ke.key === 'Enter') { ke.preventDefault(); input.blur(); }
       if (ke.key === 'Escape') { input.value = currentName; input.blur(); }
     });

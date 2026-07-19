@@ -119,7 +119,9 @@ export class DialogHandler {
       this.respond(id, value ? { value } : { cancelled: true }, sessionId);
     };
 
-    input.addEventListener('keypress', (e: KeyboardEvent) => {
+    input.addEventListener('keydown', (e: KeyboardEvent) => {
+      // Ignore the Enter that confirms an IME composition.
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === 'Enter') submit();
     });
 

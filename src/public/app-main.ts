@@ -1023,8 +1023,11 @@ chatForm.addEventListener('submit', (e) => {
 });
 
 messageInput.addEventListener('keydown', (e) => {
-  // Enter sends, Shift+Enter inserts newline
+  // Enter sends, Shift+Enter inserts newline. An Enter that confirms an IME
+  // composition belongs to the input method, not us (keyCode 229 covers
+  // Safari, which fires it after compositionend with isComposing false).
   if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
     sendMessage();
   }
