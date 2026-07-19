@@ -16,6 +16,7 @@ import { setupTreeView } from './tree-view.js';
 import { setupVoiceInput } from './voice-input.js';
 import { setupCommandPalette } from './command-palette.js';
 import { setupSessionStatsCard, type SessionStats } from './session-stats-card.js';
+import { isImeComposition } from './keyboard.js';
 
 import type { AppEvent, AppMessage, ExtensionUIRequest, LiveInstance, LiveSession, MessageContentBlock, ModelRecord, PendingFilePath, PendingImage, QueuedCommand, RpcCommand, UsageRecord } from './app-types.js';
 
@@ -1023,11 +1024,9 @@ chatForm.addEventListener('submit', (e) => {
 });
 
 messageInput.addEventListener('keydown', (e) => {
-  // Enter sends, Shift+Enter inserts newline. An Enter that confirms an IME
-  // composition belongs to the input method, not us (keyCode 229 covers
-  // Safari, which fires it after compositionend with isComposing false).
+  if (isImeComposition(e)) return;
+  // Enter sends, Shift+Enter inserts newline
   if (e.key === 'Enter' && !e.shiftKey) {
-    if (e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
     sendMessage();
   }
@@ -1400,6 +1399,7 @@ const treeViewController = setupTreeView({
 // ═══════════════════════════════════════
 
 document.addEventListener('keydown', (e) => {
+  if (isImeComposition(e)) return;
   // Escape — Abort streaming, or close sidebar on mobile
   if (e.key === 'Escape') {
     // Close palettes/panels first

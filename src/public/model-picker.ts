@@ -1,4 +1,5 @@
 import type { ModelRecord, RpcCommand } from './app-types.js';
+import { isImeComposition } from './keyboard.js';
 
 type NormalizedModel = {
   provider: string;
@@ -408,9 +409,7 @@ modelPickerInput.addEventListener('input', () => {
   renderModelPickerSuggestions();
 });
 modelPickerInput.addEventListener('keydown', (e) => {
-  // Keys pressed while an IME composition is active (Enter to confirm,
-  // arrows to pick candidates) belong to the input method, not the picker.
-  if (e.isComposing || e.keyCode === 229) return;
+  if (isImeComposition(e)) return;
   if (e.key === 'Escape') {
     e.preventDefault();
     e.stopPropagation();

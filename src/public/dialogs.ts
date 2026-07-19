@@ -2,6 +2,8 @@
  * Dialogs - Handles extension UI dialogs
  */
 
+import { isImeComposition } from './keyboard.js';
+
 export type DialogRequest = {
   id?: string;
   title?: string;
@@ -120,8 +122,7 @@ export class DialogHandler {
     };
 
     input.addEventListener('keydown', (e: KeyboardEvent) => {
-      // Ignore the Enter that confirms an IME composition.
-      if (e.isComposing || e.keyCode === 229) return;
+      if (isImeComposition(e)) return;
       if (e.key === 'Enter') submit();
     });
 
