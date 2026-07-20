@@ -319,6 +319,14 @@ test('updateStateFromResponse stores a full {provider,id} object, never a bare s
     data: { model: 'anthropic/claude-3.5' },
   });
   assert.deepEqual(session.model, { provider: 'anthropic', id: 'claude-3.5' });
+
+  // A null model (e.g. get_state before pi has a model) keeps the known model.
+  session.handleResponse({
+    type: 'response', id: 'z', success: true,
+    command: 'get_state',
+    data: { model: null },
+  });
+  assert.deepEqual(session.model, { provider: 'anthropic', id: 'claude-3.5' });
 });
 
 test('set_thinking_level echo: session.thinkingLevel updates even when pi returns no level', async () => {
@@ -412,6 +420,50 @@ test('start() passes --session <file> to spawned pi when sessionFile is set', as
   assert.equal(args[sessionIdx + 1], '/tmp/some-session.jsonl');
   assert.ok(args.includes('--model'));
   assert.equal(args[args.indexOf('--model') + 1], 'openai/gpt-4o');
+});
+
+test('startup get_state response populates model and broadcasts live_session_updated', async (t: TestContext) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const writes: string[] = [];
+  const { EventEmitter } = require('node:events');
+  const { PassThrough } = require('node:stream');
+  const child = new EventEmitter();
+  child.stdin = { writable: true, write: ((data: string, cb?: (err?: Error | null) => void) => { writes.push(data); cb && cb(); }) as FakeWrite };
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.pid = 55556;
+  child.kill = () => {};
+  _setSpawnPiForTest(() => child);
+  t.after(() => _setSpawnPiForTest(null));
+  const mgr = new (require('../bin/tau.js').LiveSessionManager)();
+  const broadcasts: BroadcastMsg[] = [];
+  mgr.broadcast = (msg: BroadcastMsg) => { broadcasts.push(msg); };
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-startup-state-'));
+  // Create without a model spec — the common case where the tab would show a
+  // placeholder because pi's default model is unknown to the server.
+  const createP = mgr.create({ cwd });
+  t.mock.timers.tick(100);
+  const session = await createP;
+  assert.equal(session.model, null);
+  // The 250ms startup probe must ask for state (model) and stats.
+  t.mock.timers.tick(250);
+  const sent = writes.map((w) => JSON.parse(w));
+  const getState = sent.find((c) => c.type === 'get_state');
+  assert.ok(getState, 'expected a startup get_state probe');
+  assert.ok(sent.some((c) => c.type === 'get_session_stats'), 'expected the startup get_session_stats probe');
+  // Pi answers get_state with its current (default) model.
+  child.stdout.write(JSON.stringify({
+    type: 'response', id: getState.id, command: 'get_state', success: true,
+    data: { model: { provider: 'anthropic', id: 'claude-opus' }, thinkingLevel: 'medium' },
+  }) + '\n');
+  // Stream data events are nextTick-driven, not setTimeout-driven; flush them.
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(session.model, { provider: 'anthropic', id: 'claude-opus' });
+  assert.equal(session.thinkingLevel, 'medium');
+  const updated = broadcasts.find((b) => b.type === 'live_session_updated' && b.session?.id === session.id);
+  assert.ok(updated, 'expected a live_session_updated broadcast after the get_state response');
+  assert.deepEqual(updated?.session?.model, { provider: 'anthropic', id: 'claude-opus' });
+  assert.ok(updated?.session?.modelLabel, 'expected a non-empty modelLabel in the broadcast metadata');
 });
 
 test('extension-refresh: prompt ack triggers get_state refresh and broadcast', async () => {

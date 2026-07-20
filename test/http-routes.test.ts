@@ -476,8 +476,8 @@ test('POST /api/live-sessions creates a live session and returns 200', async (t:
   assert.equal(body.session.id.startsWith('tau_'), true);
   assert.equal(body.session.cwd, path.resolve(cwd));
   assert.equal(body.session.modelSpec, 'openai/gpt-5.5');
-  // end the fake stdin so start()'s 250ms get_session_stats probe rejects
-  // immediately instead of scheduling a long pending timer.
+  // end the fake stdin so start()'s 250ms get_state/get_session_stats probes
+  // reject immediately instead of scheduling long pending timers.
   child.stdin.end();
 });
 

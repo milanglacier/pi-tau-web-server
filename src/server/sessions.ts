@@ -189,9 +189,16 @@ export class PiRpcSession {
       }, 100);
     });
 
-    // Give Pi a moment to enter RPC mode, then ask for stats. Do not fail session
-    // creation if this convenience command is unavailable.
+    // Give Pi a moment to enter RPC mode, then probe its state. get_state
+    // populates model/thinkingLevel (and sessionFile/sessionName) via
+    // updateStateFromResponse so the tab shows the real model immediately on
+    // create/resume instead of a placeholder until the first message.
+    // get_session_stats fills in context usage. Both are fire-and-forget: do
+    // not fail session creation if unavailable, and a response landing after
+    // the 5s ack timeout is still applied (handleResponse processes every
+    // response regardless of pending state).
     setTimeout(() => {
+      this.send({ type: 'get_state' }, { timeoutMs: 5000 }).catch(() => {});
       this.send({ type: 'get_session_stats' }, { timeoutMs: 5000 }).catch(() => {});
     }, 250);
   }
