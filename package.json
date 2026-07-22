@@ -65,10 +65,10 @@
     "ws": "^8.21.1"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.80.10",
+    "@earendil-works/pi-coding-agent": "0.81.x",
     "@types/node": "^26.1.1",
     "@types/ws": "^8.18.1",
-    "katex": "^0.18.0",
+    "katex": "^0.18.1",
     "typescript": "^7.0.2"
   }
 }
