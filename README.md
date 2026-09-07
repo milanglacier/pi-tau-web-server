@@ -198,6 +198,7 @@ Six built-in themes: Dusk (clean neutral dark, default), Dawn (warm blue dark), 
 | `TAU_USER`         |    _(none)_ |                                 HTTP Basic Auth username |
 | `TAU_PASS`         |    _(none)_ |                                 HTTP Basic Auth password |
 | `TAU_COOKIE_SECRET`| _(generated)_ |            Secret that signs session cookies (optional) |
+| `TAU_INTERACTION_DIAGNOSTICS` | _(off)_ | Set to `1` to log dialog/Abort lifecycle IDs, reasons, and timestamps to stderr |
 
 Tau also reads matching values from `~/.pi/agent/settings.json` under the `tau` key (`host`, `port`, `projectsDir`, `user`, `pass`, `authEnabled`, `cookieSecret`).
 
@@ -234,6 +235,10 @@ After the first successful Basic login, the server sets a signed `HttpOnly` sess
 ```
 
 The browser connects to Tau Web Server over WebSocket (and HTTP for history and API calls). Tau manages a pool of `PiRpcSession` instances, each of which spawns a `pi --mode rpc` subprocess. Communication with Pi is over JSON line-delimited RPC via stdin/stdout. Closing an in-page Tau tab sends a DELETE request that terminates the corresponding Pi child. Shutting down Tau terminates all managed children.
+
+Permission dialogs remain on the server while browsers disconnect, and reconnecting or refreshing recovers them without extending their deadlines. The first accepted reply dismisses the dialog in every browser. Abort sends Pi's native cancellation before cancelling outstanding dialogs; Tau displays completion only after Pi confirms it, not when an acknowledgement times out. Tau targets the current Pi protocol and uses `agent_settled`, rather than intermediate turn or agent-end events, to establish completion.
+
+For diagnosis, `TAU_INTERACTION_DIAGNOSTICS=1` logs dialog creation/resolution and Abort sent/acknowledged/timed-out events. These opt-in records exclude command arguments, dialog text, credentials, and conversation content. Live request IDs are never stored in the conversation history or restored after a Pi process restart.
 
 ## Development
 

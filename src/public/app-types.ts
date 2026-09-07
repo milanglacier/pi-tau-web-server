@@ -1,3 +1,18 @@
+import type { DialogRequest } from './dialogs.js';
+
+export type PendingDialog = DialogRequest & {
+  id: string;
+  method: 'confirm' | 'select' | 'input' | 'editor';
+  createdAt: number;
+  expiresAt?: number;
+};
+
+export type InteractionState = {
+  sessionId: string;
+  pendingDialogs: PendingDialog[];
+  interactionRevision: number;
+};
+
 export type ModelRecord = {
   provider?: string;
   id?: string;
@@ -25,6 +40,8 @@ export type LiveSession = {
   model?: ModelRecord | string | null;
   thinkingLevel?: string;
   isStreaming?: boolean;
+  pendingInteractionCount?: number;
+  abortState?: 'idle' | 'stopping' | 'timed_out' | 'failed';
   createdAt?: string;
   lastActiveAt?: string;
   contextUsage?: UsageRecord;
@@ -91,6 +108,6 @@ export type AppEvent = {
 
 export type PendingImage = { data: string; mimeType: string };
 export type PendingFilePath = { path: string; name: string; ext: string; sessionId?: string | null };
-export type QueuedCommand = { type: string; message?: string; images?: PendingImage[]; sessionId?: string };
+export type QueuedCommand = { type: string; message?: string; images?: PendingImage[]; sessionId?: string; error?: string };
 export type ExtensionUIRequest = { sessionId: string; event: AppEvent };
 export type RpcCommand = { type: string; sessionId?: string; filePath?: string; [key: string]: unknown };

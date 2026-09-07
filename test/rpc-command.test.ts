@@ -16,6 +16,7 @@ process.env.TAU_PASS = 's3cret';
 // them at load time, and ESM hoists static imports ahead of this body.
 const {
   handleRpcCommand,
+  PiRpcSession,
   liveManager,
   appendSessionName,
   parsePiListModels,
@@ -190,6 +191,30 @@ test('get_state returns cached backend state for the session', async () => {
   assert.equal(resp.data.sessionFile, SESSION_FILE);
 });
 
+test('a fresh state probe asks Pi rather than mistaking cached idle for prompt completion', async () => {
+  const calls: Record<string, unknown>[] = [];
+  const session = injectSession({
+    isStreaming: false,
+    send: async command => {
+      calls.push(command);
+      return { type: 'response', success: true, data: { isStreaming: true, isCompacting: false, model: { provider: 'openrouter', id: 'z-ai/glm-5.2' } } };
+    },
+  });
+  const response = await handleRpcCommand({ type: 'get_state', sessionId: session.id, refresh: true });
+  assert.equal(response.success, true);
+  assert.equal(response.data.isStreaming, true);
+  assert.equal(response.data.isCompacting, false);
+  assert.deepEqual(response.data.model, { provider: 'openrouter', id: 'z-ai/glm-5.2' });
+  assert.deepEqual(calls, [{ type: 'get_state' }]);
+});
+
+test('a failed fresh state probe never falls back to cached idle', async () => {
+  const session = injectSession({ send: async () => { throw new Error('RPC command timed out: get_state'); } });
+  const response = await handleRpcCommand({ type: 'get_state', sessionId: session.id, refresh: true });
+  assert.equal(response.success, false);
+  assert.match(response.error, /timed out/);
+});
+
 test('get_messages returns cached entries', async () => {
   const session = injectSession();
   const resp = await handleRpcCommand({ type: 'get_messages', sessionId: session.id });
@@ -238,14 +263,39 @@ test('native commands are proxied to the child and success is preserved', async 
   assert.equal(resp.data.ok, 1);
 });
 
-test('ack timeouts for prompt/abort/extension_ui_response are converted to success', async () => {
-  const session = injectSession({
-    send: async () => { const e = new Error('RPC command timed out: prompt'); throw e; },
-  });
-  for (const type of ['prompt', 'abort', 'extension_ui_response']) {
-    const resp = await handleRpcCommand({ type, sessionId: session.id });
-    assert.equal(resp.success, true, `${type} timeout should be treated as success`);
-  }
+test('Abort acknowledgement timeout reports failure and preserves the running state', async () => {
+  const session = new PiRpcSession(liveManager, { cwd: '/tmp' });
+  session.isStreaming = true;
+  session.send = async () => { throw new Error('RPC command timed out: abort'); };
+  liveManager.sessions.set(session.id, session);
+  const resp = await handleRpcCommand({ type: 'abort', sessionId: session.id });
+  assert.equal(resp.success, false);
+  assert.match(resp.error, /timed out/);
+  assert.equal(session.isStreaming, true);
+  assert.equal(session.metadata().abortState, 'timed_out');
+});
+
+test('UI reply acknowledges stdin delivery immediately without a Pi response or timer', async () => {
+  const session = new PiRpcSession(liveManager, { cwd: '/tmp' });
+  const writes: Record<string, unknown>[] = [];
+  session.child = { stdin: { writable: true, write(data: string, cb: () => void) { writes.push(JSON.parse(data)); cb(); } } };
+  liveManager.sessions.set(session.id, session);
+  session.handleEvent({ type: 'extension_ui_request', id: 'confirm-1', method: 'confirm' });
+  const resp = await handleRpcCommand({ type: 'extension_ui_response', id: 'confirm-1', sessionId: session.id, confirmed: false });
+  assert.equal(resp.success, true);
+  assert.deepEqual(resp.data, { delivered: true });
+  assert.equal(session.pending.size, 0);
+  assert.deepEqual(writes, [{ type: 'extension_ui_response', id: 'confirm-1', confirmed: false }]);
+  const stale = await handleRpcCommand({ type: 'extension_ui_response', id: 'confirm-1', sessionId: session.id, confirmed: true });
+  assert.equal(stale.success, false);
+  assert.equal(writes.length, 1);
+});
+
+test('prompt acknowledgement timeout is not treated as acceptance', async () => {
+  const session = injectSession({ send: async () => { throw new Error('RPC command timed out: prompt'); } });
+  const resp = await handleRpcCommand({ type: 'prompt', sessionId: session.id, message: 'hi' });
+  assert.equal(resp.success, false);
+  assert.match(resp.error, /timed out/);
 });
 
 test('immediate send failures are reported as errors, not swallowed', async () => {

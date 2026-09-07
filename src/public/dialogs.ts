@@ -12,6 +12,8 @@ export type DialogRequest = {
   placeholder?: string;
   prefill?: string;
   timeout?: number;
+  createdAt?: number;
+  expiresAt?: number;
   sessionId?: string;
   method?: string;
   [key: string]: unknown;
@@ -19,16 +21,19 @@ export type DialogRequest = {
 
 export class DialogHandler {
   container: HTMLElement;
-  wsClient: { send(data: unknown): void };
+  transport: { send(data: unknown): void | Promise<void> };
   getSessionId: (() => string | null) | null;
   currentDialog: HTMLElement | null;
-  currentRequest: ({ sessionId?: string | null; request?: DialogRequest | null } & Record<string, unknown>) | null;
+  currentRequest: { id?: string; sessionId: string | null; request: DialogRequest | null; responding?: boolean } | null;
   timeoutId: ReturnType<typeof setTimeout> | null;
   onIdle: (() => void) | null;
 
-  constructor(container: HTMLElement, wsClient: { send(data: unknown): void }, getSessionId: (() => string | null) | null = null) {
+  constructor(container: HTMLElement, transport: { send(data: unknown): void | Promise<void> }, getSessionId: (() => string | null) | null = null) {
     this.container = container;
-    this.wsClient = wsClient;
+    // Approval must not make the session's Abort button or other tabs
+    // unreachable. Only the dialog sheet intercepts pointer events.
+    this.container.style.pointerEvents = 'none';
+    this.transport = transport;
     this.getSessionId = getSessionId;
     this.currentDialog = null;
     this.currentRequest = null;
@@ -37,7 +42,7 @@ export class DialogHandler {
   }
 
   showSelect(request: DialogRequest) {
-    this.cancelCurrentDialog(true);
+    this.clearCurrentDialog();
 
     const { id, title, options, timeout, sessionId } = request;
 
@@ -71,7 +76,7 @@ export class DialogHandler {
   }
 
   showConfirm(request: DialogRequest) {
-    this.cancelCurrentDialog(true);
+    this.clearCurrentDialog();
 
     const { id, title, message, timeout, sessionId } = request;
 
@@ -98,7 +103,7 @@ export class DialogHandler {
   }
 
   showInput(request: DialogRequest) {
-    this.cancelCurrentDialog(true);
+    this.clearCurrentDialog();
 
     const { id, title, placeholder, timeout, sessionId } = request;
 
@@ -138,7 +143,7 @@ export class DialogHandler {
   }
 
   showEditor(request: DialogRequest) {
-    this.cancelCurrentDialog(true);
+    this.clearCurrentDialog();
 
     const { id, title, prefill, timeout, sessionId } = request;
 
@@ -193,34 +198,23 @@ export class DialogHandler {
   }
 
   showDialog(dialogElement: HTMLElement, timeout: number | undefined, requestId: string | undefined, sessionId: string | null = null, request: DialogRequest | null = null) {
+    dialogElement.style.pointerEvents = 'auto';
+    dialogElement.setAttribute('role', 'dialog');
     this.currentDialog = dialogElement;
     this.currentRequest = { id: requestId, sessionId, request };
     this.container.innerHTML = '';
     this.container.appendChild(dialogElement);
     this.container.classList.remove('hidden');
 
-    // Set up timeout if specified
-    if (timeout) {
+    // Pi and Tau own expiry. Use the original absolute deadline, never a
+    // fresh timeout when a snapshot or tab switch renders the request again.
+    const expiresAt = request?.expiresAt;
+    if (expiresAt !== undefined) {
       this.timeoutId = setTimeout(() => {
-        this.respond(requestId, { cancelled: true }, sessionId);
-      }, timeout);
+        this.clearCurrentDialog();
+        this.onIdle?.();
+      }, Math.max(0, expiresAt - Date.now()));
     }
-  }
-
-  cancelCurrentDialog(suppressIdle = false) {
-    if (!this.currentRequest?.id) {
-      this.clearCurrentDialog();
-      return;
-    }
-    const { id, sessionId } = this.currentRequest;
-    this.clearCurrentDialog();
-    this.wsClient.send({
-      type: 'extension_ui_response',
-      id,
-      sessionId: sessionId || this.getSessionId?.(),
-      cancelled: true,
-    });
-    if (!suppressIdle) this.onIdle?.();
   }
 
   clearCurrentDialog() {
@@ -235,15 +229,36 @@ export class DialogHandler {
     this.currentRequest = null;
   }
 
-  respond(id: string | undefined, response: Record<string, unknown>, sessionId: string | null = null) {
-    this.clearCurrentDialog();
-    this.wsClient.send({
-      type: 'extension_ui_response',
-      id,
-      sessionId: sessionId || this.getSessionId?.(),
-      ...response
-    });
-    this.onIdle?.();
+  async respond(id: string | undefined, response: Record<string, unknown>, sessionId: string | null = null) {
+    const current = this.currentRequest;
+    if (!current || current.id !== id || current.responding) return;
+    current.responding = true;
+    const dialog = this.currentDialog!;
+    const controls = dialog.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLTextAreaElement>('button, input, textarea');
+    controls.forEach(control => { control.disabled = true; });
+    dialog.setAttribute('aria-busy', 'true');
+    try {
+      await this.transport.send({
+        type: 'extension_ui_response', id,
+        sessionId: sessionId || this.getSessionId?.(),
+        ...response,
+      });
+      // A successful write is not operation completion. The full server
+      // registry, not this transport acknowledgement, dismisses the dialog.
+    } catch (error) {
+      if (this.currentRequest !== current) return;
+      current.responding = false;
+      controls.forEach(control => { control.disabled = false; });
+      dialog.removeAttribute('aria-busy');
+      let notice = dialog.querySelector('.dialog-response-error');
+      if (!notice) {
+        notice = document.createElement('div');
+        notice.className = 'dialog-response-error';
+        notice.setAttribute('role', 'alert');
+        dialog.appendChild(notice);
+      }
+      notice.textContent = error instanceof Error ? error.message : 'Could not send response. Please retry.';
+    }
   }
 
   escapeHtml(text: string) {

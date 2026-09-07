@@ -276,6 +276,15 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
   if (!session) return error('No active Tau session. Create or select an in-page Tau tab first.');
 
   if (cmd === 'get_state') {
+    if (command.refresh === true) {
+      // Prompt acceptance precedes agent_start. Queue reconciliation needs a
+      // fresh Pi probe, not the possibly still-idle event cache below.
+      try {
+        const response = await session.send({ type: 'get_state' }, { timeoutMs: 5000 });
+        if (response.success !== true) return error(String(response.error || 'Pi state probe failed'));
+        return success(response.data);
+      } catch (e) { return error(errorMessage(e)); }
+    }
     return success({
       model: session.model,
       thinkingLevel: session.thinkingLevel,
@@ -314,7 +323,11 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
   }
 
   try {
-    const resp = await session.send(command, { timeoutMs: cmd === 'prompt' ? 10000 : 60000 });
+    const resp = cmd === 'extension_ui_response'
+      ? await session.respondToDialog(command)
+      : cmd === 'abort'
+        ? await session.abort(command)
+        : await session.send(command, { timeoutMs: cmd === 'prompt' ? 10000 : 60000 });
     if (isSetThinkingLevel && resp.success === false && prevThinkingLevel !== null) {
       session.thinkingLevel = prevThinkingLevel;
     }
@@ -330,10 +343,6 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
     return { ...resp, success: resp.success !== false };
   } catch (e) {
     if (isSetThinkingLevel && prevThinkingLevel !== null) session.thinkingLevel = prevThinkingLevel;
-    // Some commands are ack-less fire-and-forget in practice; keep UX moving
-    // only when the write succeeded and the child simply did not acknowledge.
-    const isAckTimeout = /^RPC command timed out:/.test(errorMessage(e));
-    if (isAckTimeout && (cmd === 'prompt' || cmd === 'abort' || cmd === 'extension_ui_response')) return success();
     return error(errorMessage(e));
   }
 }

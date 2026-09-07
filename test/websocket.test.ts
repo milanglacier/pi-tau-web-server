@@ -6,6 +6,7 @@ import os from 'node:os';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { TestContext } from 'node:test';
 import type { WebSocket as WsWebSocket } from 'ws';
+import { WebSocketClient } from '../public/websocket-client.js';
 
 // Loopback + isolated settings tree.
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-ws-'));
@@ -16,7 +17,7 @@ fs.mkdirSync(process.env.PI_CODING_AGENT_SESSION_DIR, { recursive: true });
 
 // Load the server after the env + settings are in place: the module reads
 // them at load time, and ESM hoists static imports ahead of this body.
-const { server, computeUrls, liveManager, _setAuthForTest } = (await import('../bin/tau.js')) as any;
+const { server, computeUrls, liveManager, PiRpcSession, _setAuthForTest } = (await import('../bin/tau.js')) as any;
 
 let base = '';
 let wsUrl = '';
@@ -90,6 +91,18 @@ function nextMessage(ws: WsWebSocket, timeout = 2000): Promise<any> {
   });
 }
 
+test('the browser transport dispatches authoritative interaction state without treating it as an RPC event', () => {
+  const client = new WebSocketClient('ws://127.0.0.1/unused');
+  const message = { type: 'interaction_state', sessionId: 'live', interactionRevision: 3, pendingDialogs: [] };
+  let received: unknown;
+  let rpcEvents = 0;
+  client.addEventListener('interactionState', event => { received = (event as CustomEvent).detail; });
+  client.addEventListener('rpcEvent', () => { rpcEvents++; });
+  client.handleMessage(message);
+  assert.deepEqual(received, message);
+  assert.equal(rpcEvents, 0);
+});
+
 test('cross-origin WebSocket upgrade is rejected', async () => {
   const ws = connect({ origin: 'http://evil.example' });
   // ws client does not surface the HTTP status on the error event, so we
@@ -141,6 +154,47 @@ test('WebSocket disconnect does not terminate backend live sessions', async () =
   assert.equal(terminated, false, 'disconnecting a client must not terminate child sessions');
   assert.equal(liveManager.sessions.has('tau_1'), true);
   assert.equal(liveManager.clients.size, 0);
+});
+
+test('a new browser recovers an unanswered dialog and both clients observe its first resolution', async (t) => {
+  const session = new PiRpcSession(liveManager, { cwd: '/tmp' });
+  const writes: Record<string, unknown>[] = [];
+  session.child = { stdin: { writable: true, write(data: string, cb: () => void) { writes.push(JSON.parse(data)); cb(); } } };
+  liveManager.sessions.set(session.id, session);
+  session.handleEvent({ type: 'extension_ui_request', id: 'offline-request', method: 'confirm', title: 'Permission Required', timeout: 10000 });
+  const ws1 = connect();
+  const seen1: any[] = [];
+  ws1.on('message', data => seen1.push(JSON.parse(data.toString())));
+  const initial1 = await nextMessage(ws1);
+  assert.equal(initial1.liveSessions[0].pendingInteractionCount, 1);
+  const ws2 = connect();
+  const seen2: any[] = [];
+  ws2.on('message', data => seen2.push(JSON.parse(data.toString())));
+  await nextMessage(ws2);
+  t.after(() => { ws1.close(); ws2.close(); session.handleExit(0, null); });
+  async function waitFor(messages: any[], predicate: (message: any) => boolean) {
+    const deadline = Date.now() + 2000;
+    while (!messages.some(predicate)) {
+      assert.ok(Date.now() < deadline, 'timed out waiting for dialog state');
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    return messages.find(predicate);
+  }
+  for (const ws of [ws1, ws2]) ws.send(JSON.stringify({ type: 'live_session_snapshot_request', sessionId: session.id }));
+  const snap1 = await waitFor(seen1, msg => msg.type === 'live_session_snapshot');
+  const snap2 = await waitFor(seen2, msg => msg.type === 'live_session_snapshot');
+  assert.deepEqual(snap1.pendingDialogs, snap2.pendingDialogs);
+  assert.equal(snap1.pendingDialogs[0].id, 'offline-request');
+  ws1.send(JSON.stringify({ type: 'extension_ui_response', sessionId: session.id, id: 'offline-request', confirmed: false }));
+  const resolved = (msg: any) => msg.type === 'interaction_state' && msg.pendingDialogs.length === 0;
+  const state1 = await waitFor(seen1, resolved);
+  const state2 = await waitFor(seen2, resolved);
+  assert.equal(state1.interactionRevision, state2.interactionRevision);
+  assert.ok(state1.interactionRevision > snap1.interactionRevision);
+  ws2.send(JSON.stringify({ type: 'extension_ui_response', sessionId: session.id, id: 'offline-request', confirmed: true }));
+  await waitFor(seen2, msg => msg.type === 'response' && msg.success === false && msg.id === 'offline-request');
+  assert.deepEqual(writes, [{ type: 'extension_ui_response', id: 'offline-request', confirmed: false }]);
+  assert.equal(session.pending.size, 0);
 });
 
 test('manager broadcasts are delivered to connected WS clients', async () => {

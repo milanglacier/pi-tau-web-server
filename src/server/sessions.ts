@@ -4,10 +4,12 @@ import { spawn } from 'node:child_process';
 import { WebSocket } from 'ws';
 
 import type { ChildProcess } from 'node:child_process';
-import type { JsonRecord, LiveClient, ModelIdentity, PendingCommand, RpcCommand, RpcResponse } from './types.js';
+import type { AbortState, JsonRecord, LiveClient, ModelIdentity, PendingCommand, PendingDialog, RpcCommand, RpcResponse } from './types.js';
 import { expandHome } from './config.js';
 import { modelLabel, normalizeModel, parseModelSpecToModel } from './model-utils.js';
 import { NAVIGATE_COMMAND } from './tree.js';
+
+type DialogEntry = { request: PendingDialog; timer?: ReturnType<typeof setTimeout>; duringTurn: boolean; responding?: boolean };
 
 type SpawnFn = (cmd: string, args: string[], opts: JsonRecord) => ChildProcess;
 type PiMessageContent = string | Array<{ type: string; text?: string }>;
@@ -75,6 +77,13 @@ export class PiRpcSession {
   lastExtensionError: string | null;
   /** Whether navigateTree has confirmed this child loaded tau's tree extension (reset per spawn). */
   navigateCommandChecked: boolean;
+  pendingDialogs = new Map<string, DialogEntry>();
+  interactionRevision = 0;
+  abortState: AbortState = 'idle';
+  private abortPromise: Promise<RpcResponse> | null = null;
+  private abortCommandId: string | null = null;
+  private operationRevision = 0;
+  private abortOperationRevision = 0;
 
   constructor(manager: LiveSessionManager, opts: { id?: string; cwd: string; modelSpec?: string; sessionFile?: string | null; entries?: JsonRecord[]; sessionName?: string | null }) {
     this.manager = manager;
@@ -119,12 +128,16 @@ export class PiRpcSession {
       createdAt: this.createdAt,
       lastActiveAt: this.lastActiveAt,
       contextUsage: this.contextUsage,
+      pendingInteractionCount: this.pendingDialogs.size,
+      abortState: this.abortState,
     };
   }
 
   snapshot() {
     return {
       session: this.metadata(),
+      pendingDialogs: this.dialogSnapshot(),
+      interactionRevision: this.interactionRevision,
       entries: this.entries,
       model: this.model,
       thinkingLevel: this.thinkingLevel,
@@ -133,6 +146,53 @@ export class PiRpcSession {
       sessionName: this.sessionName,
       contextUsage: this.contextUsage,
     };
+  }
+
+  dialogSnapshot() {
+    return Array.from(this.pendingDialogs.values(), ({ request }) => request);
+  }
+
+  private diagnostic(action: string, requestId?: string, reason?: string) {
+    if (process.env.TAU_INTERACTION_DIAGNOSTICS !== '1') return;
+    console.error(JSON.stringify({ scope: 'tau_interaction', sessionId: this.id, requestId, action, reason, timestamp: new Date().toISOString() }));
+  }
+
+  private broadcastDialogs() {
+    this.interactionRevision++;
+    this.manager.broadcast({ type: 'interaction_state', sessionId: this.id, pendingDialogs: this.dialogSnapshot(), interactionRevision: this.interactionRevision });
+    this.manager.broadcastUpdated(this.id);
+  }
+
+  private removeDialog(id: string, reason: string) {
+    const pending = this.pendingDialogs.get(id);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingDialogs.delete(id);
+    this.diagnostic('resolved', id, reason);
+    this.broadcastDialogs();
+  }
+
+  private clearDialogs(reason: string, duringTurnOnly = false) {
+    for (const [id, pending] of this.pendingDialogs) {
+      if (!duringTurnOnly || pending.duringTurn) this.removeDialog(id, reason);
+    }
+  }
+
+  private retainDialog(event: PiRpcMessage) {
+    if (!event.id || this.pendingDialogs.has(event.id)) return;
+    const createdAt = Date.now();
+    const timeout = typeof event.timeout === 'number' && Number.isFinite(event.timeout) && event.timeout > 0 ? event.timeout : undefined;
+    const request = { ...event, id: event.id, method: event.method, createdAt, ...(timeout ? { expiresAt: createdAt + timeout } : {}) } as PendingDialog;
+    const pending: DialogEntry = { request, duringTurn: this.isStreaming };
+    this.pendingDialogs.set(request.id, pending);
+    if (timeout) {
+      // Pi owns the actual timeout; this timer only expires Tau's live UI state.
+      pending.timer = setTimeout(() => this.removeDialog(request.id, 'timeout'), timeout);
+      pending.timer.unref?.();
+    }
+    this.diagnostic('created', request.id);
+    this.broadcastDialogs();
+    if (this.abortState !== 'idle') this.cancelPendingDialogs();
   }
 
   async start() {
@@ -234,6 +294,98 @@ export class PiRpcSession {
     });
   }
 
+  /** Pi never acknowledges UI replies. Success means stdin delivery only. */
+  private writeDialogResponse(command: RpcCommand) {
+    const child = this.child;
+    if (!child?.stdin?.writable || this.terminating) return Promise.reject(new Error('Pi RPC session is not running'));
+    return new Promise<void>((resolve, reject) => {
+      try {
+        child.stdin!.write(JSON.stringify(command) + '\n', (err) => err ? reject(err) : resolve());
+      } catch (error) { reject(error); }
+    });
+  }
+
+  async respondToDialog(command: RpcCommand): Promise<RpcResponse> {
+    const id = command.id;
+    const pending = id ? this.pendingDialogs.get(id) : undefined;
+    if (!id || !pending) throw new Error('No pending dialog with that ID in this session');
+    if (command.sessionId && command.sessionId !== this.id) throw new Error('Dialog belongs to another session');
+    if (pending.responding) throw new Error('Dialog response is already being delivered');
+    if (pending.request.expiresAt && pending.request.expiresAt <= Date.now()) {
+      this.removeDialog(id, 'timeout');
+      throw new Error('Dialog has expired');
+    }
+    const outbound: RpcCommand = { type: 'extension_ui_response', id };
+    if (command.cancelled === true || this.abortState !== 'idle') outbound.cancelled = true;
+    else if (pending.request.method === 'confirm' && typeof command.confirmed === 'boolean') outbound.confirmed = command.confirmed;
+    else if (pending.request.method !== 'confirm' && typeof command.value === 'string') {
+      if (pending.request.method === 'select' && (!Array.isArray(pending.request.options) || !pending.request.options.includes(command.value))) throw new Error('Invalid dialog selection');
+      outbound.value = command.value;
+    } else throw new Error('Invalid dialog response');
+    pending.responding = true; // Claim synchronously before yielding to another browser.
+    try {
+      await this.writeDialogResponse(outbound);
+      if (this.pendingDialogs.get(id) === pending) this.removeDialog(id, outbound.cancelled === true ? 'cancelled' : 'answered');
+      return { type: 'response', command: 'extension_ui_response', id, success: true, data: { delivered: true } };
+    } catch (error) {
+      pending.responding = false;
+      this.diagnostic('delivery_failed', id);
+      throw error;
+    }
+  }
+
+  private cancelPendingDialogs() {
+    for (const [id, pending] of this.pendingDialogs) {
+      if (!pending.responding) {
+        void this.respondToDialog({ type: 'extension_ui_response', id, cancelled: true }).catch(() => {
+          // Retain a failed delivery for recovery/retry; never claim it resolved.
+          this.diagnostic('cancellation_delivery_failed', id);
+        });
+      }
+    }
+  }
+
+  private completeAbort(id: string | undefined) {
+    if (!id || id !== this.abortCommandId) return;
+    this.abortCommandId = null;
+    this.abortState = 'idle';
+    // A delayed acknowledgement belongs to the operation it stopped, not a
+    // newer turn that may already have started after agent_settled.
+    if (this.operationRevision === this.abortOperationRevision) this.isStreaming = false;
+    this.diagnostic('abort_acknowledged');
+    this.manager.broadcastUpdated(this.id);
+  }
+
+  abort(command: RpcCommand = {}, opts: { timeoutMs?: number } = {}): Promise<RpcResponse> {
+    if (!this.abortPromise) {
+      this.abortState = 'stopping';
+      this.abortCommandId = command.id || makeId();
+      this.abortOperationRevision = this.operationRevision;
+      this.manager.broadcastUpdated(this.id);
+      this.diagnostic('abort_sent');
+      // send() writes synchronously. Never wait for its acknowledgement before
+      // releasing hooks whose extensions forgot to pass the turn signal.
+      const native = this.send({ type: 'abort', id: this.abortCommandId }, opts);
+      this.cancelPendingDialogs();
+      this.abortPromise = native.then(resp => {
+        if (resp.success === true) this.completeAbort(this.abortCommandId ?? undefined);
+        else {
+          this.abortState = 'failed';
+          this.diagnostic('abort_failed');
+          this.manager.broadcastUpdated(this.id);
+        }
+        return resp;
+      }, error => {
+        this.abortState = /^RPC command timed out:/.test(String(error instanceof Error ? error.message : error)) ? 'timed_out' : 'failed';
+        this.diagnostic(this.abortState === 'timed_out' ? 'abort_timed_out' : 'abort_failed');
+        this.manager.broadcastUpdated(this.id);
+        throw error;
+      }).finally(() => { this.abortPromise = null; });
+    }
+    // Coalesced callers still receive their own command correlation ID.
+    return this.abortPromise.then(resp => ({ ...resp, ...(command.id ? { id: command.id } : {}) }));
+  }
+
   handleStdout(chunk: string) {
     this.stdoutBuffer += chunk;
     const lines = this.stdoutBuffer.split(/\r?\n/);
@@ -263,6 +415,7 @@ export class PiRpcSession {
         pending.resolve(resp);
       }
     }
+    if (resp.command === 'abort' && resp.success === true) this.completeAbort(resp.id);
     this.updateStateFromResponse(resp);
     this.manager.broadcast({ type: 'event', sessionId: this.id, event: resp });
   }
@@ -287,8 +440,19 @@ export class PiRpcSession {
   handleEvent(event: PiRpcMessage) {
     this.touch(false);
     const type = event.type;
+    if (type === 'extension_ui_request' && ['confirm', 'select', 'input', 'editor'].includes(String(event.method))) {
+      this.retainDialog(event);
+      return;
+    }
+    // Only agent_settled confirms completion after retries/compaction and
+    // queued continuations; neither turn_end nor agent_end establishes idle.
+    if (type === 'agent_settled') {
+      this.clearDialogs('operation_completed', true);
+      if (!this.abortPromise) this.abortState = 'idle';
+      this.isStreaming = false;
+    }
+    if (type === 'agent_start') this.operationRevision++;
     if (type === 'agent_start' || type === 'turn_start') this.isStreaming = true;
-    if (type === 'agent_end' || type === 'turn_end') this.isStreaming = false;
     // Extension command handlers report their errors as extension_error
     // events while the triggering prompt still acks with success. Keep the
     // last one so navigate_tree can explain WHY a leaf verification failed
@@ -368,6 +532,7 @@ export class PiRpcSession {
   async terminate(reason = 'closed') {
     if (this.terminating) return;
     this.terminating = true;
+    this.clearDialogs('terminated');
     for (const [, pending] of this.pending) {
       clearTimeout(pending.timer);
       pending.reject(new Error(`Session terminated: ${reason}`));
@@ -384,6 +549,7 @@ export class PiRpcSession {
   handleExit(code: number | null, signal: string | null, err?: { message?: string }) {
     if (this.exitCode !== null) return;
     this.exitCode = code;
+    this.clearDialogs('process_exit');
     for (const [, pending] of this.pending) {
       clearTimeout(pending.timer);
       pending.reject(err || new Error(`Pi process exited (${signal || code})`));

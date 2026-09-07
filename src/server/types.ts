@@ -55,6 +55,13 @@ export type PendingCommand = {
   timer: ReturnType<typeof setTimeout>;
   command?: string;
 };
+export type PendingDialog = JsonRecord & {
+  id: string;
+  method: 'confirm' | 'select' | 'input' | 'editor';
+  createdAt: number;
+  expiresAt?: number;
+};
+export type AbortState = 'idle' | 'stopping' | 'timed_out' | 'failed';
 export type LiveClient = {
   readyState: number;
   send(payload: string): void;

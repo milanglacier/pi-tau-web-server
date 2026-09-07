@@ -46,22 +46,187 @@ function makeSession(modelSpec = '') {
   return { session, manager };
 }
 
-test('agent_start/turn_start set isStreaming; agent_end/turn_end clear it', () => {
+test('turn boundaries do not report idle before the agent completes', () => {
   const { session, manager } = makeSession();
   session.handleEvent({ type: 'turn_start' });
   assert.equal(session.isStreaming, true);
   session.handleEvent({ type: 'agent_start' });
   assert.equal(session.isStreaming, true);
   session.handleEvent({ type: 'turn_end' });
-  assert.equal(session.isStreaming, false);
-  session.handleEvent({ type: 'agent_end' });
+  assert.equal(session.isStreaming, true);
+  session.handleEvent({ type: 'agent_end', willRetry: false });
+  assert.equal(session.isStreaming, true);
+  session.handleEvent({ type: 'agent_settled' });
   assert.equal(session.isStreaming, false);
   // each event is broadcast
-  assert.equal(manager.broadcasts.length, 4);
+  assert.equal(manager.broadcasts.length, 5);
   for (const b of manager.broadcasts) {
     assert.equal(b.type, 'event');
     assert.equal(b.sessionId, session.id);
   }
+});
+
+test('unanswered dialogs survive snapshots without a browser and notifications are not retained', () => {
+  const { session, manager } = makeSession();
+  session.handleEvent({ type: 'extension_ui_request', id: 'approval', method: 'confirm', title: 'Permission', timeout: 5000 });
+  session.handleEvent({ type: 'extension_ui_request', id: 'notice', method: 'notify', message: 'hello' });
+  const first = session.snapshot();
+  assert.equal(first.pendingDialogs.length, 1);
+  assert.equal(first.pendingDialogs[0].id, 'approval');
+  assert.equal(first.pendingDialogs[0].expiresAt - first.pendingDialogs[0].createdAt, 5000);
+  assert.equal(session.metadata().pendingInteractionCount, 1);
+  assert.deepEqual(session.snapshot().pendingDialogs, first.pendingDialogs);
+  assert.ok(manager.broadcasts.some(b => b.type === 'interaction_state' && b.interactionRevision === first.interactionRevision));
+  assert.equal(session.entries.length, 0, 'live request IDs must not enter saved history');
+  session.handleExit(0, null);
+  assert.deepEqual(session.snapshot().pendingDialogs, []);
+});
+
+test('dialog replies are write-only, session scoped, and the first concurrent reply wins', async () => {
+  const { session } = makeSession();
+  const writes: RpcCommand[] = [];
+  let finishWrite: ((error?: Error) => void) | undefined;
+  session.child = { stdin: { writable: true, write(data: string, cb: (error?: Error) => void) { writes.push(JSON.parse(data)); finishWrite = cb; } } };
+  session.handleEvent({ type: 'extension_ui_request', id: 'approval', method: 'confirm' });
+  const first = session.respondToDialog({ type: 'extension_ui_response', id: 'approval', confirmed: true, sessionId: session.id });
+  await assert.rejects(session.respondToDialog({ type: 'extension_ui_response', id: 'approval', confirmed: false }), /already|pending/);
+  await assert.rejects(session.respondToDialog({ type: 'extension_ui_response', id: 'foreign', confirmed: true }), /pending/);
+  assert.equal(session.pending.size, 0, 'UI writes must not create RPC acknowledgement timers');
+  assert.deepEqual(writes, [{ type: 'extension_ui_response', id: 'approval', confirmed: true }]);
+  finishWrite!();
+  assert.equal((await first).success, true);
+  assert.equal(session.snapshot().pendingDialogs.length, 0);
+  await assert.rejects(session.respondToDialog({ type: 'extension_ui_response', id: 'approval', confirmed: true }), /pending/);
+});
+
+test('Abort writes native cancellation first, cancels existing and new dialogs, and coalesces repeated requests', async () => {
+  const { session } = makeSession();
+  const writes: RpcCommand[] = [];
+  session.child = { stdin: { writable: true, write(data: string, cb: (error?: Error) => void) { writes.push(JSON.parse(data)); cb(); } } };
+  session.handleEvent({ type: 'agent_start' });
+  session.handleEvent({ type: 'extension_ui_request', id: 'old', method: 'confirm' });
+  const first = session.abort({ id: 'stop-1' }, { timeoutMs: 1000 });
+  const second = session.abort({ id: 'stop-2' }, { timeoutMs: 1000 });
+  session.handleEvent({ type: 'extension_ui_request', id: 'new', method: 'input' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(writes, [
+    { type: 'abort', id: 'stop-1' },
+    { type: 'extension_ui_response', id: 'old', cancelled: true },
+    { type: 'extension_ui_response', id: 'new', cancelled: true },
+  ]);
+  assert.equal(session.metadata().abortState, 'stopping');
+  assert.equal(session.isStreaming, true, 'requesting Abort is not completion');
+  assert.equal(session.snapshot().pendingDialogs.length, 0);
+  session.handleEvent({ type: 'agent_settled' });
+  session.handleResponse({ type: 'response', command: 'abort', id: 'stop-1', success: true });
+  assert.equal((await first).success, true);
+  assert.equal((await second).id, 'stop-2', 'each caller keeps its correlation ID');
+  assert.equal(session.metadata().abortState, 'idle');
+  assert.equal(session.isStreaming, false);
+});
+
+test('dialog deadlines are not restarted and unrelated idle dialogs survive tool/turn completion', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const { session } = makeSession();
+  session.handleEvent({ type: 'extension_ui_request', id: 'idle', method: 'editor' });
+  session.handleEvent({ type: 'agent_start' });
+  session.handleEvent({ type: 'extension_ui_request', id: 'timed', method: 'select', timeout: 100 });
+  const deadline = session.snapshot().pendingDialogs.find((d: RpcCommand) => d.id === 'timed').expiresAt;
+  t.mock.timers.tick(75);
+  assert.equal(session.snapshot().pendingDialogs.find((d: RpcCommand) => d.id === 'timed').expiresAt, deadline);
+  session.handleEvent({ type: 'tool_execution_end', toolCallId: 'unrelated' });
+  assert.equal(session.snapshot().pendingDialogs.length, 2);
+  t.mock.timers.tick(25);
+  assert.deepEqual(session.snapshot().pendingDialogs.map((d: RpcCommand) => d.id), ['idle']);
+  session.handleEvent({ type: 'extension_ui_request', id: 'turn', method: 'confirm' });
+  session.handleEvent({ type: 'agent_settled' });
+  assert.deepEqual(session.snapshot().pendingDialogs.map((d: RpcCommand) => d.id), ['idle']);
+  session.handleExit(0, null);
+});
+
+test('all dialog methods validate replies and failed stdin delivery remains recoverable', async () => {
+  const { session } = makeSession();
+  session.child = { stdin: { writable: true, write(_data: string, cb: (error?: Error) => void) { cb(new Error('broken pipe')); } } };
+  session.handleEvent({ type: 'extension_ui_request', id: 'confirm', method: 'confirm' });
+  await assert.rejects(session.respondToDialog({ id: 'confirm', confirmed: false }), /broken pipe/);
+  assert.equal(session.snapshot().pendingDialogs.length, 1);
+  assert.equal(session.pending.size, 0);
+  session.child.stdin.write = (_data: string, cb: () => void) => cb();
+  await session.respondToDialog({ id: 'confirm', confirmed: false });
+  for (const method of ['select', 'input', 'editor']) {
+    session.handleEvent({ type: 'extension_ui_request', id: method, method, options: ['safe'] });
+    await assert.rejects(session.respondToDialog({ id: method, confirmed: true }), /Invalid/);
+    if (method === 'select') await assert.rejects(session.respondToDialog({ id: method, value: 'not-an-option' }), /Invalid/);
+    assert.equal((await session.respondToDialog({ id: method, value: 'safe' })).success, true);
+  }
+  assert.equal(session.snapshot().pendingDialogs.length, 0);
+});
+
+test('a genuine Abort timeout remains stopping and a late acknowledgement recovers the session', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { session } = makeSession();
+  const writes: RpcCommand[] = [];
+  session.child = { stdin: { writable: true, write(data: string, cb: () => void) { writes.push(JSON.parse(data)); cb(); } } };
+  session.handleEvent({ type: 'agent_start' });
+  const stop = session.abort({ id: 'slow-stop' }, { timeoutMs: 100 });
+  const rejected = assert.rejects(stop, /timed out/);
+  t.mock.timers.tick(100);
+  await rejected;
+  assert.equal(session.isStreaming, true);
+  assert.equal(session.metadata().abortState, 'timed_out');
+  session.handleEvent({ type: 'extension_ui_request', id: 'late', method: 'confirm' });
+  await Promise.resolve();
+  assert.deepEqual(writes.at(-1), { type: 'extension_ui_response', id: 'late', cancelled: true });
+  session.handleResponse({ type: 'response', command: 'abort', id: 'slow-stop', success: true });
+  assert.equal(session.metadata().abortState, 'idle');
+  assert.equal(session.isStreaming, false);
+  assert.equal(session.pending.size, 0);
+});
+
+test('approval racing after Abort never sends an approval on the user\'s behalf', async () => {
+  const { session } = makeSession();
+  const writes: RpcCommand[] = [];
+  session.child = { stdin: { writable: true, write(data: string, cb: () => void) { writes.push(JSON.parse(data)); cb(); } } };
+  session.handleEvent({ type: 'extension_ui_request', id: 'race', method: 'confirm' });
+  const stop = session.abort({ id: 'stop' }, { timeoutMs: 1000 });
+  await assert.rejects(session.respondToDialog({ id: 'race', confirmed: true }), /already|pending/);
+  session.handleResponse({ type: 'response', command: 'abort', id: 'stop', success: true });
+  await stop;
+  assert.equal(writes.some(command => command.confirmed === true), false);
+});
+
+test('a late Abort acknowledgement cannot mark a newer operation idle', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { session } = makeSession();
+  session.child = { stdin: { writable: true, write(_data: string, cb: () => void) { cb(); } } };
+  session.handleEvent({ type: 'agent_start' });
+  const check = assert.rejects(session.abort({ id: 'old-stop' }, { timeoutMs: 10 }), /timed out/);
+  t.mock.timers.tick(10);
+  await check;
+  session.handleEvent({ type: 'agent_settled' });
+  session.handleEvent({ type: 'agent_start' });
+  session.handleResponse({ type: 'response', command: 'abort', id: 'old-stop', success: true });
+  assert.equal(session.isStreaming, true);
+});
+
+test('opt-in interaction diagnostics record lifecycle IDs without dialog text or commands', async (t) => {
+  const previous = process.env.TAU_INTERACTION_DIAGNOSTICS;
+  t.after(() => { if (previous === undefined) delete process.env.TAU_INTERACTION_DIAGNOSTICS; else process.env.TAU_INTERACTION_DIAGNOSTICS = previous; });
+  const logs: string[] = [];
+  t.mock.method(console, 'error', (line: string) => logs.push(line));
+  const { session } = makeSession();
+  session.child = { stdin: { writable: true, write(_data: string, cb: () => void) { cb(); } } };
+  delete process.env.TAU_INTERACTION_DIAGNOSTICS;
+  session.handleEvent({ type: 'extension_ui_request', id: 'quiet', method: 'confirm', message: 'secret command' });
+  await session.respondToDialog({ id: 'quiet', cancelled: true });
+  assert.equal(logs.length, 0);
+  process.env.TAU_INTERACTION_DIAGNOSTICS = '1';
+  session.handleEvent({ type: 'extension_ui_request', id: 'logged', method: 'confirm', message: 'secret command' });
+  await session.respondToDialog({ id: 'logged', cancelled: true });
+  const records = logs.map(line => JSON.parse(line));
+  assert.deepEqual(records.map(record => record.action), ['created', 'resolved']);
+  assert.ok(records.every(record => record.sessionId === session.id && record.requestId === 'logged' && record.timestamp));
+  assert.equal(logs.join('').includes('secret command'), false);
 });
 
 test('only tau-tree-navigate extension_error events are kept for navigate_tree diagnostics', () => {

@@ -146,6 +146,9 @@ export class WebSocketClient extends EventTarget {
       case 'live_session_snapshot':
         this.dispatchEvent(new CustomEvent('liveSessionSnapshot', { detail: message }));
         break;
+      case 'interaction_state':
+        this.dispatchEvent(new CustomEvent('interactionState', { detail: message }));
+        break;
       case 'response':
         this.dispatchEvent(new CustomEvent('rpcResponse', { detail: message }));
         break;

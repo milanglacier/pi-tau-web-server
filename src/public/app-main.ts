@@ -19,16 +19,18 @@ import { setupSessionStatsCard, type SessionStats } from './session-stats-card.j
 import { isImeComposition } from './keyboard.js';
 import { buildHistoryItems, type HistoryItem, type SessionHistoryEntry } from './history-render.js';
 
-import type { AppEvent, AppMessage, ExtensionUIRequest, LiveInstance, LiveSession, MessageContentBlock, ModelRecord, PendingFilePath, PendingImage, QueuedCommand, RpcCommand, UsageRecord } from './app-types.js';
+import type { AppEvent, AppMessage, ExtensionUIRequest, InteractionState, LiveInstance, LiveSession, MessageContentBlock, ModelRecord, PendingDialog, PendingFilePath, PendingImage, QueuedCommand, RpcCommand, UsageRecord } from './app-types.js';
 
 type LiveSessionSnapshotData = {
   sessionId?: string;
   sessionFile?: string | null;
-  session?: { sessionFile?: string | null };
+  session?: LiveSession;
   isStreaming?: boolean;
   model?: ModelRecord | null;
   thinkingLevel?: string;
   entries?: SessionHistoryEntry[];
+  pendingDialogs?: PendingDialog[];
+  interactionRevision?: number;
 };
 
 type RpcEventDetail = { sessionId?: string; event?: AppEvent };
@@ -43,7 +45,15 @@ const state = new StateManager();
 // assert non-null at the query site rather than guarding every usage.
 const messageRenderer = new MessageRenderer(document.getElementById('messages')!);
 const toolCardRenderer = new ToolCardRenderer(document.getElementById('messages')!);
-const dialogHandler = new DialogHandler(document.getElementById('dialog-container')!, wsClient, () => activeLiveSessionId);
+const dialogHandler = new DialogHandler(document.getElementById('dialog-container')!, {
+  async send(command) {
+    const response = await fetch('/api/rpc', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(command),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.error || 'Could not send response. Please retry.');
+  },
+}, () => activeLiveSessionId);
 
 // Session sidebar
 const sidebar = new SessionSidebar(
@@ -94,7 +104,7 @@ function setStatusMessage(text: string, restoreText: string | null = null, resto
   if (restoreText !== null) {
     statusRestoreTimer = setTimeout(() => {
       statusRestoreTimer = null;
-      statusText.textContent = restoreText;
+      statusText.textContent = currentStatusText();
     }, restoreMs);
   }
 }
@@ -121,10 +131,7 @@ function flashStatusError(msg: string, ms = 3000) {
   statusFlashTimer = setTimeout(() => {
     statusFlashTimer = null;
     restoreStatusIndicator();
-    const open = wsClient.ws?.readyState === WebSocket.OPEN;
-    // Preserve an in-progress stream: restore the streaming text too.
-    statusText.textContent = (open && state.isStreaming) ? 'Working...'
-      : (open ? 'Connected' : 'Disconnected');
+    statusText.textContent = currentStatusText();
   }, ms);
 }
 
@@ -181,7 +188,15 @@ let liveInstances: LiveInstance[] = []; // Sidebar live indicators derived from 
 let liveSessions: LiveSession[] = [];
 let activeLiveSessionId = localStorage.getItem('tau-active-live-session-id') || null;
 let hasRestoredInitialLiveSession = false;
-let pendingExtensionUIRequests: ExtensionUIRequest[] = []; // background session UI requests waiting for that Tau tab to be selected
+let pendingExtensionUIRequests: ExtensionUIRequest[] = []; // background notifications only
+const interactionStates = new Map<string, InteractionState>();
+const operationRevisions = new Map<string, number>();
+const sessionStateRevisions = new Map<string, number>();
+const abortRequests = new Map<string, Promise<void>>();
+const localAbortStates = new Map<string, NonNullable<LiveSession['abortState']>>();
+const settledWhileStopping = new Set<string>();
+type QueuedDispatch = { id: string; command: QueuedCommand; started: boolean };
+const queuedPrompts = new Map<string, QueuedDispatch>();
 dialogHandler.onIdle = () => processQueuedExtensionUIRequest();
 
 // File browser
@@ -327,12 +342,23 @@ wsClient.addEventListener('rpcEvent', (e: Event) => {
   const event = (detail.event || detail) as AppEvent;
   const sessionId = detail.sessionId;
   if (sessionId) {
+    sessionStateRevisions.set(sessionId, (sessionStateRevisions.get(sessionId) || 0) + 1);
     const session = liveSessions.find(s => s.id === sessionId);
+    if (event.type === 'agent_start') {
+      operationRevisions.set(sessionId, (operationRevisions.get(sessionId) || 0) + 1);
+      const queued = queuedPrompts.get(sessionId);
+      if (queued) queued.started = true;
+    }
+    if (event.type === 'agent_settled') {
+      queuedPrompts.delete(sessionId);
+      if (abortState(sessionId) === 'stopping') settledWhileStopping.add(sessionId);
+      localAbortStates.delete(sessionId);
+    }
     if (session) {
       session.lastActiveAt = new Date().toISOString();
       if (event.type === 'agent_start' || event.type === 'turn_start') session.isStreaming = true;
-      if (event.type === 'agent_end' || event.type === 'turn_end') session.isStreaming = false;
-      if (event.type === 'agent_start' || event.type === 'turn_start' || event.type === 'agent_end' || event.type === 'turn_end') {
+      if (event.type === 'agent_settled') session.isStreaming = false;
+      if (event.type === 'agent_start' || event.type === 'turn_start' || event.type === 'agent_settled') {
         // Keep an open tree modal honest: disable its rows while the turn
         // runs, and refetch the tree (re-enabling the rows) when it ends.
         treeViewController.notifyStreamingChanged(sessionId, !!session.isStreaming);
@@ -347,6 +373,29 @@ wsClient.addEventListener('rpcEvent', (e: Event) => {
     }
   }
   handleRPCEvent(event, sessionId);
+});
+
+wsClient.addEventListener('rpcResponse', (e: Event) => {
+  const response = (e as CustomEvent<{ id?: string; command?: string; success?: boolean; error?: string }>).detail;
+  if (response.command !== 'prompt' || !response.id) return;
+  const found = [...queuedPrompts].find(([, queued]) => queued.id === response.id);
+  if (!found) return;
+  const [sessionId, queued] = found;
+  if (response.success === false) {
+    queuedPrompts.delete(sessionId);
+    queued.command.error = response.error || 'Queued instruction failed';
+    messageQueue.unshift(queued.command);
+    renderQueuedMessages();
+    if (viewingActiveSession && activeLiveSessionId === sessionId) {
+      messageRenderer.renderError(queued.command.error);
+      updateUI();
+    }
+  } else {
+    // Pi acknowledges prompt acceptance before agent_start, not completion.
+    // Keep the dispatch locked until settled. Slash commands may never start
+    // an agent operation, so ask Pi for fresh state after acceptance instead.
+    void reconcileAcceptedPrompt(sessionId, queued);
+  }
 });
 
 wsClient.addEventListener('serverError', (e: Event) => {
@@ -380,12 +429,32 @@ wsClient.addEventListener('liveSessionCreated', (e: Event) => {
 
 wsClient.addEventListener('liveSessionUpdated', (e: Event) => {
   const detail = (e as CustomEvent<LiveSession>).detail;
+  const previousAbortState = liveSessions.find(session => session.id === detail.id)?.abortState;
   upsertLiveSession(detail);
-  if (detail?.id === activeLiveSessionId) applyActiveSessionMetadata(detail);
+  // Native Abort acknowledgement can establish idle without agent_settled.
+  // Never let an acknowledgement for an older operation stop a newer one:
+  // the server's isStreaming metadata already accounts for that race.
+  const acknowledgedStop = previousAbortState && previousAbortState !== 'idle' && detail.abortState === 'idle';
+  if (acknowledgedStop) {
+    localAbortStates.delete(detail.id);
+    settledWhileStopping.delete(detail.id);
+    if (detail.id === activeLiveSessionId && viewingActiveSession && detail.isStreaming === false) {
+      state.setStreaming(false);
+      showTypingIndicator(false);
+    }
+  }
+  if (detail?.id === activeLiveSessionId) {
+    applyActiveSessionMetadata(detail);
+    updateUI();
+  }
 });
 
 wsClient.addEventListener('liveSessionClosed', (e: Event) => {
   handleLiveSessionClosed((e as CustomEvent<{ sessionId: string }>).detail.sessionId);
+});
+
+wsClient.addEventListener('interactionState', (e: Event) => {
+  reconcileInteractionState((e as CustomEvent<InteractionState>).detail);
 });
 
 // Receive a full live-session state snapshot.
@@ -419,6 +488,12 @@ function handleLiveSessionClosed(closedId: string) {
   liveSessions = liveSessions.filter(s => s.id !== closedId);
   messageQueue = messageQueue.filter(cmd => cmd.sessionId !== closedId);
   pendingExtensionUIRequests = pendingExtensionUIRequests.filter(req => req.sessionId !== closedId);
+  interactionStates.delete(closedId);
+  operationRevisions.delete(closedId);
+  sessionStateRevisions.delete(closedId);
+  localAbortStates.delete(closedId);
+  settledWhileStopping.delete(closedId);
+  queuedPrompts.delete(closedId);
   if (dialogHandler.currentRequest?.sessionId === closedId) {
     dialogHandler.clearCurrentDialog();
     processQueuedExtensionUIRequest();
@@ -456,6 +531,7 @@ function handleLiveSessionClosed(closedId: string) {
 
 function upsertLiveSession(session: LiveSession) {
   if (!session) return;
+  sessionStateRevisions.set(session.id, (sessionStateRevisions.get(session.id) || 0) + 1);
   const idx = liveSessions.findIndex(s => s.id === session.id);
   let shouldRenderTabs = false;
   if (idx >= 0) {
@@ -493,7 +569,7 @@ function liveTabSignature(session: LiveSession) {
     session.cwd || '',
     session.modelSpec || '',
     session.isStreaming ? 'streaming' : 'idle',
-    hasPendingExtensionUIRequest(session.id) ? 'ui' : '',
+    pendingInteractionCount(session.id),
   ].join('\u001f');
 }
 
@@ -521,7 +597,7 @@ function renderLiveTabs() {
       tab.dataset.signature = signature;
       tab.innerHTML = `
         ${session.isStreaming ? '<span class="live-tab-streaming-dot"></span>' : ''}
-        ${hasPendingExtensionUIRequest(session.id) ? '<span class="live-tab-ui-dot" title="Waiting for response">?</span>' : ''}
+        ${pendingInteractionCount(session.id) ? `<span class="live-tab-ui-dot" title="Waiting for approval" aria-label="${pendingInteractionCount(session.id)} pending approvals">${pendingInteractionCount(session.id)}</span>` : ''}
         <span class="live-tab-title">${escapeHtml(session.sessionName || basename(session.cwd || ''))}</span>
         <span class="live-tab-model">${escapeHtml(compactModelLabel(session))}</span>
         <span class="live-tab-close" title="Close Tau tab">×</span>
@@ -574,6 +650,7 @@ async function selectLiveSession(id: string) {
   state.reset();
   state.setStreaming(!!session.isStreaming);
   clearConversation();
+  const requestedAtRevision = sessionStateRevisions.get(id) || 0;
   try {
     const res = await fetch(`/api/live-sessions/${encodeURIComponent(id)}/snapshot`);
     const data = await res.json();
@@ -581,7 +658,7 @@ async function selectLiveSession(id: string) {
       handleLiveSessionClosed(id);
       throw new Error(data.error || 'Live session not found');
     }
-    applyLiveSessionSnapshot({ ...data, sessionId: id });
+    applyLiveSessionSnapshot({ ...data, sessionId: id }, requestedAtRevision);
   } catch (e) {
     messageRenderer.renderError((e instanceof Error ? e.message : '') || 'Failed to load live session snapshot');
     return;
@@ -690,9 +767,8 @@ function handleRPCEvent(event: AppEvent, sessionId: string | null = null) {
     case 'turn_start':
       handleAgentStart();
       break;
-    case 'agent_end':
-    case 'turn_end':
-      handleAgentEnd();
+    case 'agent_settled':
+      handleAgentSettled();
       break;
     case 'message_start':
       handleMessageStart(event.message as AppMessage);
@@ -764,7 +840,7 @@ function handleAgentStart() {
   updateUI();
 }
 
-function handleAgentEnd() {
+function handleAgentSettled() {
   const wasStreaming = state.isStreaming;
   state.setStreaming(false);
   showTypingIndicator(false);
@@ -772,14 +848,12 @@ function handleAgentEnd() {
   currentStreamingText = '';
   updateUI();
 
-  // A turn just finished — pull authoritative post-turn stats from pi so the
-  // context pill and stats card stop relying on incremental usage events.
-  // Guard with wasStreaming so paired turn_end/agent_end events do not
-  // double-fetch for the same completed turn.
+  // Pi has finished its end hooks, compaction and queued continuations.
+  // Neither turn_end nor agent_end establishes idle. Fetch post-operation
+  // stats only after agent_settled.
   if (wasStreaming) void sessionStatsCard.refresh();
 
-  // Notify via tab title if unfocused. Guard with wasStreaming so paired
-  // turn_end/agent_end events do not double-count the same completed turn.
+  // Notify via tab title if unfocused, once per completed operation.
   if (wasStreaming && !hasFocus) {
     unreadCount++;
     document.title = `(${unreadCount}) ● ${originalTitle}`;
@@ -937,39 +1011,50 @@ function handleToolExecutionEnd(event: AppEvent) {
   toolCardRenderer.finalizeToolCard(toolCallId, result as ToolResult, isError ?? false);
 }
 
-function hasPendingExtensionUIRequest(sessionId: string) {
-  return pendingExtensionUIRequests.some(req => req.sessionId === sessionId);
+function pendingInteractionCount(sessionId: string) {
+  return liveSessions.find(session => session.id === sessionId)?.pendingInteractionCount || 0;
+}
+
+function reconcileInteractionState(next: InteractionState) {
+  if (!liveSessions.some(session => session.id === next.sessionId)) return;
+  const current = interactionStates.get(next.sessionId);
+  // HTTP snapshots and WebSocket updates can cross in flight. In particular,
+  // an older snapshot must never recreate a request another client answered.
+  if (current && next.interactionRevision <= current.interactionRevision) return;
+  interactionStates.set(next.sessionId, next);
+  const visible = dialogHandler.currentRequest;
+  if (visible?.sessionId === next.sessionId && !next.pendingDialogs.some(request => request.id === visible.id)) {
+    // Server resolution is not a user cancellation; never send another reply.
+    dialogHandler.clearCurrentDialog();
+  }
+  processQueuedExtensionUIRequest(next.sessionId);
+  renderLiveTabs();
 }
 
 function queueExtensionUIRequest(event: AppEvent, sessionId: string) {
-  if (!sessionId) {
-    handleExtensionUIRequest(event, sessionId);
-    return;
-  }
-  if (!pendingExtensionUIRequests.some(req => req.sessionId === sessionId && req.event?.id === event.id)) {
+  // Response-bearing requests arrive only through the full server registry.
+  // Preserve the existing background-tab behavior for transient notifications.
+  if (event.method !== 'notify') return;
+  if (!pendingExtensionUIRequests.some(req => req.sessionId === sessionId && req.event.id === event.id)) {
     pendingExtensionUIRequests.push({ sessionId, event });
   }
-  renderLiveTabs();
 }
 
 function processQueuedExtensionUIRequest(sessionId = activeLiveSessionId) {
-  if (!sessionId || !viewingActiveSession || sessionId !== activeLiveSessionId || dialogHandler.currentRequest) return;
-  const idx = pendingExtensionUIRequests.findIndex(req => req.sessionId === sessionId);
-  if (idx === -1) return;
-  const [{ event }] = pendingExtensionUIRequests.splice(idx, 1);
-  renderLiveTabs();
-  handleExtensionUIRequest(event, sessionId);
+  if (!sessionId || !viewingActiveSession || sessionId !== activeLiveSessionId) return;
+  const notifications = pendingExtensionUIRequests.filter(request => request.sessionId === sessionId);
+  pendingExtensionUIRequests = pendingExtensionUIRequests.filter(request => request.sessionId !== sessionId);
+  for (const { event } of notifications) handleExtensionUIRequest(event, sessionId);
+  if (dialogHandler.currentRequest) return;
+  const request = interactionStates.get(sessionId)?.pendingDialogs.find(request => request.expiresAt === undefined || request.expiresAt > Date.now());
+  if (request) handleExtensionUIRequest(request, sessionId);
 }
 
 function suspendCurrentDialogForTabSwitch(nextSessionId: string) {
   const current = dialogHandler.currentRequest;
   if (!current?.sessionId || current.sessionId === nextSessionId) return;
-  const event = current.request;
-  if (event && !pendingExtensionUIRequests.some(req => req.sessionId === current.sessionId && req.event?.id === event.id)) {
-    pendingExtensionUIRequests.unshift({ sessionId: current.sessionId, event });
-  }
+  // The request remains in its session's registry, including its deadline.
   dialogHandler.clearCurrentDialog();
-  renderLiveTabs();
 }
 
 function handleExtensionUIRequest(event: AppEvent, sessionId: string | null = null) {
@@ -1239,7 +1324,7 @@ function sendMessage() {
 
   cmd.sessionId = activeLiveSessionId;
 
-  if (state.isStreaming) {
+  if (state.isStreaming || sessionHasPendingWork(activeLiveSessionId)) {
     // Queue it for the current Tau tab only; do not let tab switches retarget it.
     messageQueue.push(cmd);
     lastSentMessage = message;
@@ -1266,10 +1351,17 @@ function renderQueuedMessages() {
     const el = document.createElement('div');
     el.className = 'queued-msg';
     el.innerHTML = `
-      <span class="queued-msg-label">Queued</span>
+      <span class="queued-msg-label">${cmd.error ? 'Not sent' : 'Queued'}</span>
       <span class="queued-msg-text">${escapeHtml(cmd.message || '')}</span>
+      ${cmd.error ? '<button class="queued-msg-retry" type="button">Retry</button>' : ''}
       <button class="queued-msg-cancel" title="Cancel">×</button>
     `;
+    el.title = cmd.error || '';
+    el.querySelector('.queued-msg-retry')?.addEventListener('click', () => {
+      delete cmd.error;
+      renderQueuedMessages();
+      flushQueue();
+    });
     el.querySelector('.queued-msg-cancel')?.addEventListener('click', () => {
       messageQueue.splice(i, 1);
       renderQueuedMessages();
@@ -1286,23 +1378,89 @@ function escapeHtml(text: string) {
 }
 
 function flushQueue() {
-  if (!activeLiveSessionId || state.isStreaming) return;
+  if (!activeLiveSessionId || state.isStreaming || sessionHasPendingWork(activeLiveSessionId)) return;
   const idx = messageQueue.findIndex(cmd => cmd.sessionId === activeLiveSessionId);
   if (idx >= 0) {
+    if (messageQueue[idx].error) return; // A failed instruction needs an explicit retry or cancellation.
     const [cmd] = messageQueue.splice(idx, 1);
     lastSentMessage = cmd.message ?? null;
     messageRenderer.renderUserMessage({ content: cmd.message, images: cmd.images });
     renderQueuedMessages();
-    wsClient.send(cmd);
+    // Paired settled/metadata updates may arrive before Pi starts this
+    // prompt. Keep only one queued dispatch in flight for each session.
+    const id = `queued_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+    queuedPrompts.set(activeLiveSessionId, { id, command: cmd, started: false });
+    wsClient.send({ ...cmd, id });
   }
 }
 
-abortBtn.addEventListener('click', () => {
+async function reconcileAcceptedPrompt(sessionId: string, queued: QueuedDispatch) {
+  try {
+    const response = await fetch('/api/rpc', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'get_state', sessionId, refresh: true }),
+    });
+    const data = await response.json();
+    if (data.success && data.data?.isStreaming === false && data.data?.isCompacting === false && !queued.started && queuedPrompts.get(sessionId) === queued) {
+      queuedPrompts.delete(sessionId);
+      if (viewingActiveSession && activeLiveSessionId === sessionId) updateUI();
+    }
+  } catch {
+    // Without an idle acknowledgement, leave the next instruction queued.
+  }
+}
+
+function abortState(sessionId: string) {
+  return localAbortStates.get(sessionId) || liveSessions.find(session => session.id === sessionId)?.abortState || 'idle';
+}
+
+function sessionHasPendingWork(sessionId: string) {
+  return queuedPrompts.has(sessionId) || pendingInteractionCount(sessionId) > 0 || (abortState(sessionId) === 'stopping' && !settledWhileStopping.has(sessionId));
+}
+
+function abortActiveSession() {
   if (!viewingActiveSession || !activeLiveSessionId) return;
-  wsClient.send({ type: 'abort', sessionId: activeLiveSessionId });
-  messageRenderer.renderError('Aborted by user');
-  showTypingIndicator(false);
-});
+  const sessionId = activeLiveSessionId;
+  if (abortRequests.has(sessionId)) return;
+  const revision = operationRevisions.get(sessionId) || 0;
+  localAbortStates.set(sessionId, 'stopping');
+  settledWhileStopping.delete(sessionId);
+  updateUI();
+  const request = (async () => {
+    try {
+      const response = await fetch('/api/rpc', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'abort', sessionId }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.error || 'Pi did not acknowledge the stop');
+      localAbortStates.delete(sessionId);
+      const session = liveSessions.find(session => session.id === sessionId);
+      // A queued instruction may already have started after agent_settled.
+      // This HTTP response belongs to the operation we originally stopped.
+      if (session && (operationRevisions.get(sessionId) || 0) === revision) {
+        session.abortState = 'idle';
+        session.isStreaming = false;
+        if (viewingActiveSession && activeLiveSessionId === sessionId) {
+          state.setStreaming(false);
+          showTypingIndicator(false);
+        }
+      }
+    } catch (error) {
+      if (liveSessions.some(session => session.id === sessionId) && (operationRevisions.get(sessionId) || 0) === revision) {
+        const message = error instanceof Error ? error.message : 'Could not request a stop';
+        localAbortStates.set(sessionId, /timed?\s*out|timeout/i.test(message) ? 'timed_out' : 'failed');
+        if (viewingActiveSession && activeLiveSessionId === sessionId) messageRenderer.renderError(`Stop was not confirmed: ${message}`);
+      }
+    } finally {
+      abortRequests.delete(sessionId);
+      if (viewingActiveSession && activeLiveSessionId === sessionId) updateUI();
+    }
+  })();
+  abortRequests.set(sessionId, request);
+}
+
+abortBtn.addEventListener('click', abortActiveSession);
 
 // Command Palette
 const commandPaletteController = setupCommandPalette([
@@ -1408,10 +1566,8 @@ document.addEventListener('keydown', (e) => {
     }
     if (commandPaletteController.closeIfOpen()) return;
 
-    if (state.isStreaming && viewingActiveSession && activeLiveSessionId) {
-      wsClient.send({ type: 'abort', sessionId: activeLiveSessionId });
-      messageRenderer.renderError('Aborted by user');
-      showTypingIndicator(false);
+    if (viewingActiveSession && activeLiveSessionId && (state.isStreaming || sessionHasPendingWork(activeLiveSessionId))) {
+      abortActiveSession();
     } else if (!sidebarEl.classList.contains('collapsed') && window.innerWidth <= 768) {
       toggleSidebar();
     }
@@ -1551,6 +1707,7 @@ async function switchSession(sessionFile: string | null | undefined, session: Si
     currentStreamingElement = null;
     currentStreamingThinking = '';
     currentStreamingText = '';
+    dialogHandler.clearCurrentDialog();
     viewingActiveSession = false;
     
     state.reset();
@@ -1615,27 +1772,39 @@ async function switchSession(sessionFile: string | null | undefined, session: Si
 // Live-session snapshot sync
 // ═══════════════════════════════════════
 
-function applyLiveSessionSnapshot(data: LiveSessionSnapshotData) {
+function applyLiveSessionSnapshot(data: LiveSessionSnapshotData, requestedAtRevision?: number) {
   console.log('[LiveSession] Received state snapshot:', data.entries?.length, 'entries');
-  if (data.sessionId && data.sessionId !== activeLiveSessionId) return;
+  const sessionId = data.sessionId || activeLiveSessionId;
+  if (!sessionId || !liveSessions.some(session => session.id === sessionId)) return;
+  const interactionRevision = interactionStates.get(sessionId)?.interactionRevision;
+  const staleInteractions = interactionRevision !== undefined && data.interactionRevision !== undefined && data.interactionRevision < interactionRevision;
+  const staleMetadata = staleInteractions || (requestedAtRevision !== undefined && requestedAtRevision !== (sessionStateRevisions.get(sessionId) || 0));
+  if (data.pendingDialogs && typeof data.interactionRevision === 'number') {
+    reconcileInteractionState({ sessionId, pendingDialogs: data.pendingDialogs, interactionRevision: data.interactionRevision });
+  }
+  if (sessionId !== activeLiveSessionId) return;
   hasReceivedInitialServerState = true;
 
-  // Track the active session
-  activeLiveSessionFile = data.sessionFile || data.session?.sessionFile || null;
-  viewingActiveSession = !!activeLiveSessionId;
-  state.setStreaming(!!data.isStreaming);
-  showTypingIndicator(!!data.isStreaming);
+  // A snapshot's count, stop status and streaming flag are a single view of
+  // the past. Do not let an HTTP response overwrite newer WebSocket state.
+  viewingActiveSession = true;
+  if (!staleMetadata) {
+    if (data.session) upsertLiveSession(data.session);
+    activeLiveSessionFile = data.sessionFile || data.session?.sessionFile || null;
+    state.setStreaming(!!data.isStreaming);
+    showTypingIndicator(!!data.isStreaming);
+  }
   updateLiveSessionInputState();
   updateUI();
   updateLiveSessionIndicators();
 
   // Update model display — server is canonical, assign directly.
-  if (data.model !== undefined) {
+  if (!staleMetadata && data.model !== undefined) {
     if (data.model?.contextWindow) {
       contextWindowSize = Number(data.model.contextWindow) || 0;
     }
     modelPickerController.setModelState(data.model || '', data.thinkingLevel || 'off');
-  } else if (data.thinkingLevel) {
+  } else if (!staleMetadata && data.thinkingLevel) {
     modelPickerController.setThinkingLevel(data.thinkingLevel || 'off');
   }
 
@@ -1663,6 +1832,7 @@ function applyLiveSessionSnapshot(data: LiveSessionSnapshotData) {
   treeViewController.notifyTreeChanged(data.sessionId || activeLiveSessionId);
   // A live session just loaded — fetch its authoritative stats from pi.
   void sessionStatsCard.refresh();
+  processQueuedExtensionUIRequest();
 }
 
 // Mark all live sessions in the sidebar with a green dot
@@ -1678,12 +1848,17 @@ function updateLiveSessionIndicators() {
 
 // Refresh live-session list for sidebar indicators if WS missed an update
 async function pollInstances() {
+  const requestedAtRevisions = new Map(sessionStateRevisions);
   try {
     const res = await fetch('/api/live-sessions');
     if (res.ok) {
       const data = await res.json();
       const wasActive = activeLiveSessionId;
-      setLiveSessions(data.sessions || []);
+      const sessions = (data.sessions || []).map((session: LiveSession) =>
+        requestedAtRevisions.get(session.id) !== sessionStateRevisions.get(session.id)
+          ? liveSessions.find(current => current.id === session.id) || session
+          : session);
+      setLiveSessions(sessions);
       const activeSession = wasActive ? liveSessions.find(s => s.id === wasActive) : null;
       if (wasActive && !activeSession) {
         handleLiveSessionClosed(wasActive);
@@ -1925,14 +2100,14 @@ function updateConnectionStatus(status: string) {
   statusIndicator.className = `status-indicator ${status}`;
 
   if (status === 'connected') {
-    statusText.textContent = tailscaleUrl ? 'Connected • TS' : 'Connected';
+    statusText.textContent = currentStatusText();
     statusText.title = tailscaleUrl || '';
     // Fetch tailscale info on first connect
     if (!tailscaleUrl) {
       fetch('/api/health').then(r => r.json()).then(data => {
         if (data.tailscaleUrl) {
           tailscaleUrl = data.tailscaleUrl;
-          statusText.textContent = 'Connected • TS';
+          statusText.textContent = currentStatusText();
           statusText.title = tailscaleUrl;
         }
       }).catch(() => {});
@@ -1942,9 +2117,27 @@ function updateConnectionStatus(status: string) {
   }
 }
 
+function currentStatusText() {
+  if (wsClient.ws?.readyState !== WebSocket.OPEN) return 'Disconnected';
+  if (viewingActiveSession && activeLiveSessionId) {
+    const stopping = abortState(activeLiveSessionId);
+    if (stopping === 'stopping') return 'Stopping…';
+    if (stopping === 'timed_out') return 'Stop timed out — completion not confirmed';
+    if (stopping === 'failed') return 'Stop failed — completion not confirmed';
+    if (pendingInteractionCount(activeLiveSessionId)) return 'Waiting for approval';
+    if (state.isStreaming) return 'Working...';
+  }
+  return tailscaleUrl ? 'Connected • TS' : 'Connected';
+}
+
 function updateUI() {
   const hasLiveSession = !!activeLiveSessionId && viewingActiveSession;
   const isStreaming = state.isStreaming && hasLiveSession;
+  const hasPendingInteraction = hasLiveSession && pendingInteractionCount(activeLiveSessionId!) > 0;
+  const stopping = hasLiveSession && abortState(activeLiveSessionId!) === 'stopping';
+  abortBtn.disabled = !!stopping;
+  abortBtn.title = stopping ? 'Stopping…' : 'Abort';
+  abortBtn.setAttribute('aria-label', stopping ? 'Stopping…' : 'Abort');
 
   // Don't clobber an active red-dot error flash: it owns both the indicator
   // class and statusText for its full 3 s. The flash's restore callback
@@ -1952,28 +2145,21 @@ function updateUI() {
   // safe. Other UI updates below (input enabling, abort button, etc.) still
   // run normally.
   if (statusFlashTimer === null) {
-    if (isStreaming) {
-      statusIndicator.classList.add('streaming');
-      statusIndicator.classList.remove('connected');
-      statusText.textContent = 'Working...';
-    } else {
-      statusIndicator.classList.remove('streaming');
-      statusIndicator.classList.add('connected');
-      statusText.textContent = 'Connected';
-    }
+    restoreStatusIndicator();
+    statusText.textContent = currentStatusText();
   }
 
   messageInput.disabled = !hasLiveSession;
   sendBtn.disabled = !hasLiveSession;
 
-  if (isStreaming) {
+  if (isStreaming || hasPendingInteraction || stopping) {
     abortBtn.classList.remove('hidden');
     sendBtn.classList.add('hidden');
   } else {
     abortBtn.classList.add('hidden');
     sendBtn.classList.remove('hidden');
-    if (hasLiveSession) flushQueue();
   }
+  if (hasLiveSession && !isStreaming) flushQueue();
 }
 
 // ═══════════════════════════════════════
