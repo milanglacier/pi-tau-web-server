@@ -238,6 +238,8 @@ test('a delivery acknowledgement cannot resolve a dialog or let the browser subm
   await page.click('#dialog-yes');
   await page.waitForSelector('#dialog-yes:disabled');
   assert.equal(await page.locator('#dialog-container').isVisible(), true, 'only registry resolution may dismiss the pending interaction');
+  await page.waitForFunction(() => document.querySelector('.dialog-response-notice[role="status"]')?.textContent?.startsWith('Response sent.'));
+  assert.equal(await page.locator('.dialog-response-error').count(), 0, 'a delivered reply is not an error');
 
   liveManager.broadcast({ type: 'live_session_snapshot', sessionId, pendingDialogs: [], interactionRevision: 2 });
   await page.waitForSelector('#dialog-container.hidden', { state: 'attached' });
@@ -567,4 +569,60 @@ test('reconnecting recovers an approval created while the browser was disconnect
   await page.clock.runFor(1100);
   await expectDialog(page);
   assert.equal(await page.locator('#status-text').textContent(), 'Waiting for approval');
+});
+
+test('a queued dispatch whose agent_settled was lost with the socket is released by the reconnect probe', async (t) => {
+  if (skipUnlessBrowser(t)) return;
+  const { sessionId, emit, nextCommand, commands } = await createSession(t);
+  const page = await openPage(t, sessionId);
+  emit({ type: 'agent_start' });
+  await page.waitForSelector('#abort-btn:not(.hidden)');
+  for (const message of ['runs while connected', 'must not stay queued forever']) {
+    await page.fill('#message-input', message);
+    await page.press('#message-input', 'Enter');
+  }
+  const firstPrompt = nextCommand('prompt');
+  emit({ type: 'agent_settled' });
+  const first = await firstPrompt;
+  assert.equal(first.message, 'runs while connected');
+  emit({ type: 'response', command: 'prompt', id: first.id, success: true });
+  emit({ type: 'agent_start' });
+  await page.waitForSelector('#abort-btn:not(.hidden)');
+  assert.equal(await page.locator('.queued-msg').count(), 1);
+  // The operation finishes while no browser is connected.
+  for (const client of liveManager.clients) client.close();
+  await page.waitForFunction(() => document.getElementById('status-text')?.textContent === 'Disconnected');
+  emit({ type: 'agent_settled' });
+  assert.equal(commands.filter(command => command.type === 'prompt').length, 1);
+  const secondPrompt = nextCommand('prompt');
+  await page.clock.runFor(1100);
+  assert.equal((await secondPrompt).message, 'must not stay queued forever');
+  await page.waitForSelector('#queued-messages.hidden', { state: 'attached' });
+});
+
+test('a queued instruction whose dispatch never reaches the server returns to the queue for retry', async (t) => {
+  if (skipUnlessBrowser(t)) return;
+  const { sessionId, emit, nextCommand, commands } = await createSession(t);
+  const page = await openPage(t, sessionId);
+  emit({ type: 'agent_start' });
+  await page.waitForSelector('#abort-btn:not(.hidden)');
+  for (const message of ['dropped on the way out', 'waits behind it']) {
+    await page.fill('#message-input', message);
+    await page.press('#message-input', 'Enter');
+  }
+  let dropPrompts = true;
+  await page.route('**/api/rpc', async route => {
+    if (dropPrompts && route.request().postDataJSON().type === 'prompt') return route.abort('connectionfailed');
+    return route.continue();
+  });
+  emit({ type: 'agent_settled' });
+  await page.waitForSelector('.queued-msg-retry');
+  assert.equal(await page.locator('.queued-msg').count(), 2);
+  assert.equal(await page.locator('.queued-msg-label').first().textContent(), 'Not sent');
+  assert.deepEqual(commands.filter(command => command.type === 'prompt'), []);
+  assert.equal(await page.locator('#message-input').isDisabled(), false);
+  dropPrompts = false;
+  const retry = nextCommand('prompt');
+  await page.click('.queued-msg-retry');
+  assert.equal((await retry).message, 'dropped on the way out');
 });

@@ -2519,6 +2519,19 @@ body.hide-thinking .thinking-block { display: none !important; }
   line-height: 1.55;
 }
 
+/* Delivery feedback under the dialog actions: a sent reply waiting for the
+   server registry to dismiss the sheet, or a failed send that can be retried. */
+.dialog-response-notice {
+  margin-top: 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dialog-response-error {
+  color: var(--error);
+}
+
 .dialog-input,
 .dialog-textarea {
   width: 100%;

@@ -245,20 +245,28 @@ export class DialogHandler {
       });
       // A successful write is not operation completion. The full server
       // registry, not this transport acknowledgement, dismisses the dialog.
+      // That update travels over the WebSocket, so with the socket down the
+      // sheet stays until the reconnect snapshot. Say so rather than freeze.
+      if (this.currentRequest !== current) return;
+      this.notice(dialog, 'status', 'Response sent. Waiting for the server to confirm…');
     } catch (error) {
       if (this.currentRequest !== current) return;
       current.responding = false;
       controls.forEach(control => { control.disabled = false; });
       dialog.removeAttribute('aria-busy');
-      let notice = dialog.querySelector('.dialog-response-error');
-      if (!notice) {
-        notice = document.createElement('div');
-        notice.className = 'dialog-response-error';
-        notice.setAttribute('role', 'alert');
-        dialog.appendChild(notice);
-      }
-      notice.textContent = error instanceof Error ? error.message : 'Could not send response. Please retry.';
+      this.notice(dialog, 'alert', error instanceof Error ? error.message : 'Could not send response. Please retry.');
     }
+  }
+
+  private notice(dialog: HTMLElement, role: 'status' | 'alert', text: string) {
+    let notice = dialog.querySelector<HTMLElement>('.dialog-response-notice');
+    if (!notice) {
+      notice = document.createElement('div');
+      dialog.appendChild(notice);
+    }
+    notice.className = role === 'alert' ? 'dialog-response-notice dialog-response-error' : 'dialog-response-notice';
+    notice.setAttribute('role', role);
+    notice.textContent = text;
   }
 
   escapeHtml(text: string) {

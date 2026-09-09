@@ -74,6 +74,8 @@ test('unanswered dialogs survive snapshots without a browser and notifications a
   assert.equal(first.pendingDialogs.length, 1);
   assert.equal(first.pendingDialogs[0].id, 'approval');
   assert.equal(first.pendingDialogs[0].expiresAt - first.pendingDialogs[0].createdAt, 5000);
+  assert.equal('type' in first.pendingDialogs[0], false, 'the transport type tag is not a dialog field');
+  assert.equal(first.pendingDialogs[0].title, 'Permission');
   assert.equal(session.metadata().pendingInteractionCount, 1);
   assert.deepEqual(session.snapshot().pendingDialogs, first.pendingDialogs);
   assert.ok(manager.broadcasts.some(b => b.type === 'interaction_state' && b.interactionRevision === first.interactionRevision));

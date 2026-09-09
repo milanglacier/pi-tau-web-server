@@ -68,7 +68,9 @@ class RealPi {
       packages: [], extensions: [], skills: [], prompts: [], themes: [],
       compaction: { enabled: false }, retry: { enabled: false }, enableInstallTelemetry: false,
     }));
-    fs.writeFileSync(path.join(agentDir, 'permissions.jsonc'), JSON.stringify({ bash: { '*': 'ask' } }));
+    // Bash rules are regular expressions, so '.*' asks for every command
+    // explicitly instead of relying on the extension's default-ask fallback.
+    fs.writeFileSync(path.join(agentDir, 'permissions.jsonc'), JSON.stringify({ bash: { '.*': 'ask' } }));
     const entry = fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent/rpc-entry'));
     const provider = fileURLToPath(new URL('./fixtures/permission-rpc-provider.ts', import.meta.url));
     this.child = spawn(process.execPath, [

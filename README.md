@@ -238,6 +238,8 @@ The browser connects to Tau Web Server over WebSocket (and HTTP for history and 
 
 Permission dialogs remain on the server while browsers disconnect, and reconnecting or refreshing recovers them without extending their deadlines. The first accepted reply dismisses the dialog in every browser. Abort sends Pi's native cancellation before cancelling outstanding dialogs; Tau displays completion only after Pi confirms it, not when an acknowledgement times out. Tau targets the current Pi protocol and uses `agent_settled`, rather than intermediate turn or agent-end events, to establish completion.
 
+While a stop is outstanding, including after the status line reports that the stop timed out or failed, Tau treats the session as still stopping: any new dialog Pi opens is cancelled immediately and any reply is delivered as a cancellation. This lasts until Pi acknowledges the stop or reports `agent_settled`, at which point dialogs behave normally again. Queued instructions are sent over HTTP so a failed dispatch returns to the queue as "Not sent" with a Retry button, and a reconnect asks Pi for fresh state so an instruction whose completion event was lost with the socket cannot leave the queue locked.
+
 For diagnosis, `TAU_INTERACTION_DIAGNOSTICS=1` logs dialog creation/resolution and Abort sent/acknowledged/timed-out events. These opt-in records exclude command arguments, dialog text, credentials, and conversation content. Live request IDs are never stored in the conversation history or restored after a Pi process restart.
 
 ## Development

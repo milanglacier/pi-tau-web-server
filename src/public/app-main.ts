@@ -325,7 +325,10 @@ wsClient.addEventListener('connected', () => {
   updateConnectionStatus('connected');
   // Fetch model context window size for token % display
   setTimeout(fetchContextWindow, 1000);
-
+  // A dispatch that settled while the socket was down never saw its
+  // agent_settled. Ask Pi for fresh state so the lock cannot outlive the
+  // operation it guarded; a still-running operation keeps it locked.
+  for (const [sessionId, queued] of queuedPrompts) void reconcileAcceptedPrompt(sessionId, queued, true);
 });
 
 wsClient.addEventListener('disconnected', () => {
@@ -373,29 +376,6 @@ wsClient.addEventListener('rpcEvent', (e: Event) => {
     }
   }
   handleRPCEvent(event, sessionId);
-});
-
-wsClient.addEventListener('rpcResponse', (e: Event) => {
-  const response = (e as CustomEvent<{ id?: string; command?: string; success?: boolean; error?: string }>).detail;
-  if (response.command !== 'prompt' || !response.id) return;
-  const found = [...queuedPrompts].find(([, queued]) => queued.id === response.id);
-  if (!found) return;
-  const [sessionId, queued] = found;
-  if (response.success === false) {
-    queuedPrompts.delete(sessionId);
-    queued.command.error = response.error || 'Queued instruction failed';
-    messageQueue.unshift(queued.command);
-    renderQueuedMessages();
-    if (viewingActiveSession && activeLiveSessionId === sessionId) {
-      messageRenderer.renderError(queued.command.error);
-      updateUI();
-    }
-  } else {
-    // Pi acknowledges prompt acceptance before agent_start, not completion.
-    // Keep the dispatch locked until settled. Slash commands may never start
-    // an agent operation, so ask Pi for fresh state after acceptance instead.
-    void reconcileAcceptedPrompt(sessionId, queued);
-  }
 });
 
 wsClient.addEventListener('serverError', (e: Event) => {
@@ -1389,19 +1369,54 @@ function flushQueue() {
     // Paired settled/metadata updates may arrive before Pi starts this
     // prompt. Keep only one queued dispatch in flight for each session.
     const id = `queued_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-    queuedPrompts.set(activeLiveSessionId, { id, command: cmd, started: false });
-    wsClient.send({ ...cmd, id });
+    const queued: QueuedDispatch = { id, command: cmd, started: false };
+    queuedPrompts.set(activeLiveSessionId, queued);
+    void dispatchQueuedPrompt(activeLiveSessionId, queued);
   }
 }
 
-async function reconcileAcceptedPrompt(sessionId: string, queued: QueuedDispatch) {
+// Dispatch over HTTP rather than the WebSocket: a closed socket drops a send
+// silently, which would leave this session's queue locked with no error and
+// no Retry. An HTTP failure is observable and returns the instruction to the
+// queue as "Not sent".
+async function dispatchQueuedPrompt(sessionId: string, queued: QueuedDispatch) {
+  try {
+    const response = await fetch('/api/rpc', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...queued.command, id: queued.id }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.error || 'Queued instruction failed');
+    if (queuedPrompts.get(sessionId) !== queued) return; // Already settled or the tab closed.
+    // Pi acknowledges prompt acceptance before agent_start, not completion.
+    // Keep the dispatch locked until settled. Slash commands may never start
+    // an agent operation, so ask Pi for fresh state after acceptance instead.
+    void reconcileAcceptedPrompt(sessionId, queued);
+  } catch (error) {
+    if (queuedPrompts.get(sessionId) !== queued) return;
+    queuedPrompts.delete(sessionId);
+    queued.command.error = error instanceof Error && error.message ? error.message : 'Queued instruction failed';
+    messageQueue.unshift(queued.command);
+    renderQueuedMessages();
+    if (viewingActiveSession && activeLiveSessionId === sessionId) {
+      messageRenderer.renderError(queued.command.error);
+      updateUI();
+    }
+  }
+}
+
+// `afterReconnect` releases the lock even when agent_start was observed: the
+// matching agent_settled may have been lost with the socket, and Pi's fresh
+// idle answer is then the only completion signal this browser will get.
+async function reconcileAcceptedPrompt(sessionId: string, queued: QueuedDispatch, afterReconnect = false) {
   try {
     const response = await fetch('/api/rpc', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'get_state', sessionId, refresh: true }),
     });
     const data = await response.json();
-    if (data.success && data.data?.isStreaming === false && data.data?.isCompacting === false && !queued.started && queuedPrompts.get(sessionId) === queued) {
+    const idle = data.success && data.data?.isStreaming === false && data.data?.isCompacting === false;
+    if (idle && (afterReconnect || !queued.started) && queuedPrompts.get(sessionId) === queued) {
       queuedPrompts.delete(sessionId);
       if (viewingActiveSession && activeLiveSessionId === sessionId) updateUI();
     }

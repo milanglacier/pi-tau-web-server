@@ -182,7 +182,9 @@ export class PiRpcSession {
     if (!event.id || this.pendingDialogs.has(event.id)) return;
     const createdAt = Date.now();
     const timeout = typeof event.timeout === 'number' && Number.isFinite(event.timeout) && event.timeout > 0 ? event.timeout : undefined;
-    const request = { ...event, id: event.id, method: event.method, createdAt, ...(timeout ? { expiresAt: createdAt + timeout } : {}) } as PendingDialog;
+    // Retain the dialog fields only; the transport's `type` tag is not part of the request.
+    const { type: _type, ...fields } = event;
+    const request = { ...fields, id: event.id, method: event.method, createdAt, ...(timeout ? { expiresAt: createdAt + timeout } : {}) } as PendingDialog;
     const pending: DialogEntry = { request, duringTurn: this.isStreaming };
     this.pendingDialogs.set(request.id, pending);
     if (timeout) {
@@ -192,6 +194,11 @@ export class PiRpcSession {
     }
     this.diagnostic('created', request.id);
     this.broadcastDialogs();
+    // Any non-idle abort state means Pi has not yet acknowledged the stop.
+    // That includes 'timed_out' and 'failed', which persist until a late
+    // acknowledgement or agent_settled: new dialogs keep being cancelled and
+    // replies are converted to cancellations for that whole window, because
+    // approving anything while a stop is outstanding is never correct.
     if (this.abortState !== 'idle') this.cancelPendingDialogs();
   }
 
