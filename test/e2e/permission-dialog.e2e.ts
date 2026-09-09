@@ -12,6 +12,16 @@ import type { Browser, Page } from 'playwright';
 // The real browser and Tau server, with only Pi replaced at its stdio boundary.
 // Snapshot overrides below exercise delayed/stale network deliveries without
 // reaching into the browser's state or dialog implementation.
+//
+// Despite the filename, nothing here depends on the permission extension. These
+// are Tau's own dialog-recovery tests: that a request arriving before a browser
+// connects is restored from the snapshot, that it reaches a second browser, and
+// that Abort cancels it. Every request below is emitted by hand from a fake Pi
+// child, and titles like 'Permission required' are only a representative label
+// for any extension dialog. The behaviour is generic across confirm, select,
+// input and editor, so these tests keep passing with no permission extension
+// installed at all. The real extension is exercised only in
+// test/permission-rpc.test.ts, which explains that split in its own header.
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-permission-e2e-'));
 process.env.TAU_HOST = '127.0.0.1';
 process.env.PI_CODING_AGENT_DIR = tmp;

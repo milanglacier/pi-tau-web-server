@@ -13,6 +13,30 @@ import {
   BASH_TIMEOUT_SECONDS, MODEL, PROVIDER, RECOVERY_TEXT, RUNNING_FINISHED, RUNNING_PID, RUNNING_STARTED, SENTINEL,
 } from './fixtures/permission-rpc-provider.ts';
 
+// Cross-repo integration regression: the real pi-minimal-permission-system
+// extension running inside a real Pi RPC child, driven over Pi's own JSONL
+// protocol.
+//
+// Why this lives in Tau even though it imports nothing from ../src. Tau's
+// server keeps its own registry of pending extension dialogs so a permission
+// request survives a reload, reaches a second browser, and can be cancelled
+// when the user hits Abort. That registry is only a safety net, and it is the
+// right design only because Pi itself releases a hook waiting on
+// ctx.ui.confirm() once an abort arrives. When that assumption broke, the
+// symptom did not appear in the extension: it appeared in Tau as a session
+// wedged forever with no way out but answering the dialog. So Tau is where the
+// assumption gets pinned down. The client below is deliberately independent of
+// Tau's own dialog-cancelling fallback, so a pass here means the contract Tau
+// depends on still holds by itself, not that Tau papered over a Pi-side hang.
+//
+// The bug being guarded: the extension used to call ctx.ui.confirm() without
+// the turn's AbortSignal, so an unanswered permission dialog left Pi's abort
+// waiting for an agent that could never go idle.
+//
+// Only the model is faked (see fixtures/permission-rpc-provider.ts). Pi owns
+// the agent loop, real bash, dialogs and abort, and the extension is loaded
+// from source, so a regression in either repo fails here.
+//
 // Run directly: node --test test/permission-rpc.test.ts
 // Automatically uses the sibling source checkout, never an installed npm copy.
 // Elsewhere, opt in with TAU_PERMISSION_EXTENSION_DIR=/absolute/path/to/checkout.
@@ -117,6 +141,10 @@ class RealPi {
     assert.equal(state.data.isStreaming, false);
     assert.equal(state.data.messageCount, 0, 'must not resume an existing session');
     assert.equal(path.dirname(state.data.sessionFile!), this.sessionDir);
+    // /yolo belongs to the permission extension, and is used here purely as an
+    // identity probe: it proves Pi loaded the source checkout resolved above,
+    // rather than a stale npm copy or a second permission extension inherited
+    // from user settings. Tau itself has no interest in the command.
     const commands = await this.command({ type: 'get_commands' });
     const yolo = commands.data.commands.filter(c => c.name === 'yolo');
     assert.equal(yolo.length, 1, 'exactly one permission extension must be loaded');
@@ -216,6 +244,11 @@ class RealPi {
   }
 }
 
+// The regression this whole file exists for. Before the joint fix this hung
+// until someone answered the dialog, which is exactly the unrecoverable state a
+// Tau user hit with no browser able to help. It deliberately proves two things
+// at once: abort releases the wait, and releasing it does not quietly count as
+// approval, so the sentinel file must still be absent afterwards.
 test('native Pi RPC abort releases an unanswered approval after the bash timeout without executing the command', options, async t => {
   const pi = new RealPi(t);
   await pi.start();
@@ -246,6 +279,9 @@ test('native Pi RPC abort releases an unanswered approval after the bash timeout
   assert.equal(pi.sent.some(c => c.type === 'extension_ui_response'), false);
 });
 
+// Control cases for everything above. Without them the abort tests could all
+// pass against an extension that had simply stopped asking for permission, or
+// that blocked every command outright.
 for (const approved of [true, false]) {
   test(`real Pi RPC ${approved ? 'approval executes' : 'denial blocks'} the requested bash command`, options, async t => {
     const pi = new RealPi(t);
@@ -266,6 +302,10 @@ for (const approved of [true, false]) {
   });
 }
 
+// The policy itself is the extension's business and is covered by its own
+// tests. What matters to Tau is the Pi-visible consequence asserted at the end:
+// a bypassed check emits no confirm at all, so Tau's dialog registry is never
+// handed a phantom pending request that nothing will ever answer.
 test('YOLO enabled before preflight bypasses the real permission confirmation', options, async t => {
   const pi = new RealPi(t);
   await pi.start(['--yolo']);
@@ -278,6 +318,10 @@ test('YOLO enabled before preflight bypasses the real permission confirmation', 
   assert.equal(pi.sent.some(c => c.type === 'extension_ui_response'), false);
 });
 
+// The genuinely joint case. An extension changing its own state mid-dialog must
+// not retroactively approve a request already waiting in Tau's registry, and
+// must not become a second, unofficial way to end the turn: abort stays the
+// only thing that releases it.
 test('enabling YOLO after a confirmation is pending does not approve it or replace native abort', options, async t => {
   const pi = new RealPi(t);
   await pi.start();
@@ -296,6 +340,9 @@ test('enabling YOLO after a confirmation is pending does not approve it or repla
   assert.equal(pi.sent.some(c => c.type === 'extension_ui_response'), false);
 });
 
+// The other direction, guarding against overcorrection. Handing the turn signal
+// to ctx.ui.confirm() must not disturb Pi's ordinary abort path, so a command
+// the user did approve is still killed mid-flight rather than left running.
 test('native Pi RPC abort still stops an approved bash command that is already running', options, async t => {
   const pi = new RealPi(t);
   await pi.start();

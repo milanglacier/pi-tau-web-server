@@ -68,6 +68,8 @@ test('turn boundaries do not report idle before the agent completes', () => {
 
 test('unanswered dialogs survive snapshots without a browser and notifications are not retained', () => {
   const { session, manager } = makeSession();
+  // A hand-built event, not the permission extension: retention is a property
+  // of confirm-style requests in general, which is why notify is dropped below.
   session.handleEvent({ type: 'extension_ui_request', id: 'approval', method: 'confirm', title: 'Permission', timeout: 5000 });
   session.handleEvent({ type: 'extension_ui_request', id: 'notice', method: 'notify', message: 'hello' });
   const first = session.snapshot();

@@ -161,6 +161,7 @@ test('a new browser recovers an unanswered dialog and both clients observe its f
   const writes: Record<string, unknown>[] = [];
   session.child = { stdin: { writable: true, write(data: string, cb: () => void) { writes.push(JSON.parse(data)); cb(); } } };
   liveManager.sessions.set(session.id, session);
+  // Any extension dialog behaves this way; the title is only a familiar label.
   session.handleEvent({ type: 'extension_ui_request', id: 'offline-request', method: 'confirm', title: 'Permission Required', timeout: 10000 });
   const ws1 = connect();
   const seen1: any[] = [];
