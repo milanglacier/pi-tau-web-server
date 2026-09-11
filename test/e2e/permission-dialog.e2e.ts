@@ -569,6 +569,82 @@ test('a handled slash command releases the next queued instruction only after a 
   assert.equal((await secondPrompt).message, 'after the extension command');
 });
 
+test('reconnecting waits for a delayed queued POST to be accepted before probing completion', async (t) => {
+  if (skipUnlessBrowser(t)) return;
+  const { sessionId, emit, nextCommand, commands } = await createSession(t);
+  const page = await openPage(t, sessionId);
+  emit({ type: 'agent_start' });
+  await page.waitForSelector('#abort-btn:not(.hidden)');
+  for (const message of ['first delayed', 'second must wait']) {
+    await page.fill('#message-input', message);
+    await page.press('#message-input', 'Enter');
+  }
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release());
+  let probes = 0;
+  await page.route('**/api/rpc', async route => {
+    const command = route.request().postDataJSON();
+    if (command.message === 'first delayed') await gate;
+    if (command.type === 'get_state' && command.refresh === true) probes++;
+    await route.continue();
+  });
+  const dispatched = page.waitForRequest(r => r.url().endsWith('/api/rpc') && r.postDataJSON().message === 'first delayed');
+  emit({ type: 'agent_settled' });
+  await dispatched;
+  for (const client of liveManager.clients) client.close();
+  await page.waitForFunction(() => document.getElementById('status-text')?.textContent === 'Disconnected');
+  await page.clock.runFor(1100);
+  await page.waitForFunction(() => document.getElementById('status-text')?.textContent === 'Connected');
+  await page.clock.runFor(2000);
+  assert.equal(probes, 0, 'An unresolved POST must not be probed');
+  assert.equal(commands.filter(c => c.type === 'prompt').length, 0);
+  const firstPrompt = nextCommand('prompt');
+  release();
+  const first = await firstPrompt;
+  assert.equal(first.message, 'first delayed');
+  const secondPrompt = nextCommand('prompt');
+  emit({ type: 'response', command: 'prompt', id: first.id, success: true });
+  assert.equal((await secondPrompt).message, 'second must wait');
+  assert.deepEqual(commands.filter(c => c.type === 'prompt').map(c => c.message), ['first delayed', 'second must wait']);
+});
+
+for (const failure of ['network', 'http', 'rpc'] as const) {
+  test(`a slash command's failed ${failure} probe is retried without resending the command`, async (t) => {
+    if (skipUnlessBrowser(t)) return;
+    const { sessionId, emit, nextCommand, commands } = await createSession(t);
+    const page = await openPage(t, sessionId);
+    emit({ type: 'agent_start' });
+    await page.waitForSelector('#abort-btn:not(.hidden)');
+    for (const message of ['/completed-command', 'next instruction']) {
+      await page.fill('#message-input', message);
+      await page.press('#message-input', 'Enter');
+    }
+    let probes = 0;
+    await page.route('**/api/rpc', async route => {
+      if (route.request().postDataJSON().type === 'get_state' && ++probes <= 2) {
+        if (failure === 'network') return route.abort('connectionfailed');
+        return route.fulfill({ status: failure === 'http' ? 503 : 200, json: {
+          success: failure === 'http', data: { isStreaming: false, isCompacting: false },
+        } });
+      }
+      return route.continue();
+    });
+    const firstPrompt = nextCommand('prompt');
+    emit({ type: 'agent_settled' });
+    const first = await firstPrompt;
+    const secondPrompt = nextCommand('prompt');
+    emit({ type: 'response', command: 'prompt', id: first.id, success: true });
+    // Advance in small steps so each failed fetch can finish and schedule its retry.
+    for (let attempt = 0; attempt < 10 && probes < 3; attempt++) await page.clock.runFor(500);
+    assert.equal((await secondPrompt).message, 'next instruction');
+    assert.equal(probes, 3);
+    assert.deepEqual(commands.filter(c => c.type === 'prompt').map(c => c.message), ['/completed-command', 'next instruction']);
+    await page.clock.runFor(3000);
+    assert.equal(probes, 3, 'Retries stop once the dispatch is released');
+  });
+}
+
 test('reconnecting recovers an approval created while the browser was disconnected', async (t) => {
   if (skipUnlessBrowser(t)) return;
   const { sessionId, emit } = await createSession(t);

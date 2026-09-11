@@ -204,3 +204,164 @@ is acknowledged after preflight, and `test/rpc-command.test.ts` already covers i
 The real-Pi scenarios now run against the extension checkout with its Pi dev dependency at
 0.85.1 (see the extension review's fix summary). No live Pi process, symlink, or session file
 was touched.
+
+
+---
+
+# Second round of joint review — independent verification (2026-09-10)
+
+## Scope and verdict
+
+Reviewed Tau `main..fix/abort-permission-waits` at `1ed7a75` and the extension's
+`6fd96a4..fix/abort-permission-waits` at `a579238`. The extension working directory
+is currently on `master`, so I exported the requested branch into a disposable
+`/tmp/pi-permission-round2` directory rather than switching the user's checkout.
+The extension's plan and review have moved to `.plans/completed/` on that branch;
+its existing review already includes an earlier second-round section. Nothing in
+that review or in the Tau review above was replaced.
+
+The joint plan makes sense and addresses the confirmed cancellation mechanism.
+The extension implementation is correct and can stand alone. Tau's server-owned
+dialog registry, write-only response transport, and honest native Abort handling
+are appropriate. However, the first review's queue-recovery fix introduces an
+ordering race and leaves one permanent-lock path open. I would fix the two P2
+findings below before approving the Tau branch. The joint patch is therefore not
+yet correct as a whole.
+
+## Does the plan solve the bug?
+
+Yes. Pi 0.85.1's native Abort signals the agent and waits for idle. Passing the
+captured turn signal to the permission confirmation releases the suspended hook,
+while the post-await signal check prevents a racing approval from allowing an
+aborted tool. No deadline or YOLO change is needed. Tau independently needs to
+retain dialogs and distribute their resolution across browsers because Pi does
+not send an equivalent dialog-resolution event. The historical trace remains
+consistent with this mechanism, rather than conclusive proof of it.
+
+## Findings
+
+### [P2] Do not reconcile an in-flight dispatch as an accepted prompt
+
+Location: `src/public/app-main.ts:328–331`, with the premature release at
+`1418–1421`.
+
+The reconnect handler probes every `queuedPrompts` entry, including entries whose
+HTTP POST has not reached Tau or whose prompt has not been acknowledged. Pi can
+truthfully report idle at that point. The probe deletes the dispatch lock and
+`updateUI()` sends the next queued instruction while the first request is still
+in flight. This reverses instruction order and can cause the delayed first
+instruction to be rejected as already processing; its response is then ignored
+because its dispatch entry was replaced. A fresh idle answer is not evidence
+that an unacknowledged request has completed. Track acceptance separately and do
+not release an unresolved dispatch based solely on this probe.
+
+Reproduced with the existing browser harness: queue two instructions, hold the
+first POST before delivery, disconnect and reconnect the WebSocket, and let the
+fresh Pi state probe report idle. The second instruction reaches the fake Pi
+while the first POST is still held. The assertion that the first instruction
+must reach Pi first fails.
+
+### [P2] Recover from a failed queued-prompt state probe
+
+Location: `src/public/app-main.ts:1423–1425` (also covers an unsuccessful response
+that simply fails the `idle` condition).
+
+After a handled slash command succeeds without starting an agent operation, its
+fresh `get_state` probe is the only normal path that releases `queuedPrompts`.
+If that one HTTP request fails, the catch silently leaves the lock indefinitely.
+There will be no `agent_settled`; ordinary ten-second metadata polling does not
+retry this probe or clear the entry; subsequent messages remain queued without
+a Retry button. Recovery currently requires another WebSocket reconnect or a
+reload. Retry the non-mutating state probe, or expose a reconciliation retry,
+without resending the already accepted command.
+
+Reproduced with the existing browser harness: acknowledge a queued slash command,
+fail only its first fresh state probe, restore healthy HTTP, and advance the
+browser clock through sixty seconds of normal polling. The next instruction is
+still queued and no Retry control is available. The assertion that delivery or
+explicit recovery becomes available fails.
+
+These findings are separate: the first needs an acceptance/delivery distinction;
+the second needs recovery when an authoritative probe cannot be obtained.
+Neither derives from a repository-specific rule in the applicable AGENTS.md.
+
+## Does the extension implementation make sense?
+
+Yes. The branch changes only the shared ask path, captures `ctx.signal` before
+awaiting, blocks an already-aborted request, passes the signal into confirmation,
+and checks that same signal again afterward. Explicit denial, absent UI, policy
+precedence, supported-tool scope, and YOLO behavior are preserved. No actionable
+extension-side defect was found. The existing review's suggestions to pin exact
+reason wording or test an unavailable signal are not demonstrated runtime bugs
+and are not promoted to findings here.
+
+## Do the tests make sense?
+
+Yes. The extension's deferred-confirm tests exercise cancellation and approval
+races for the actual handler. Tau's six real-Pi scenarios validate the independent
+extension/native-RPC contract, including the no-execution sentinel, instead of
+letting Tau's cancellation fallback conceal an extension regression. The generic
+fake-Pi browser tests appropriately cover Tau's own dialog transport and recovery.
+The current queue regressions are useful but cover successful reconnect probing
+and outright POST failure, not the two boundary cases above.
+
+## Verification performed this round
+
+| Check | Result |
+|---|---|
+| Tau `npm run typecheck` | Pass |
+| Tau `npm test` | 223/223 pass; no skips |
+| Tau `npm run test:e2e` with the installed Nix browser bundle explicitly selected | 30/30 pass; no skips |
+| Extension branch export `npm run check`, using existing Pi 0.85.1 development dependencies | Typecheck and 25/25 tests pass |
+| Tau real-Pi regression with `TAU_PERMISSION_EXTENSION_DIR=/tmp/pi-permission-round2` | 6/6 pass against the requested extension branch |
+| Two additional disposable browser probes | Both fail on the expected queue-invariant assertions described above |
+| `git diff --check` | Clean before this review append |
+
+The additional probes are in `/tmp/tau-review-probes/probes.test.ts`; their output
+is `/tmp/tau-round2-probes.log`. They reuse the existing browser/fake-child harness
+and do not modify production code or committed tests. The normal e2e runner first
+hit a sandbox restriction on Nix's home-directory cache; selecting the already
+installed `/nix/store/...-playwright-browsers` bundle allowed all tests to run.
+
+## Review-file delivery limitation
+
+This session can write only inside Tau and `/tmp`, not the sibling extension
+checkout. The extension-specific appendix is prepared at
+`/tmp/pi-permission-round2/review-appendix.md` for appending to its existing
+`.plans/completed/debug-session-hang-and-unaborteable/review.md`. It has not been
+appended to that repository. No live session, loading symlink, configuration,
+branch checkout, or installed dependency was changed or restarted.
+
+## Fixes for the two queue reconciliation findings
+
+### Reconnect now waits for prompt acceptance
+
+`src/public/app-main.ts` now tracks HTTP prompt acceptance separately from
+`agent_start`. Reconnecting remembers that completion must be reconciled, but
+does not send a completion probe until the prompt receives a successful
+acknowledgement. The acceptance handler then performs the deferred probe. This
+preserves instruction order when the first POST is delayed across reconnect,
+while retaining recovery for an operation whose settlement event was missed.
+
+The browser regression holds the first POST before delivery, reconnects, and
+verifies that no fresh completion probe or second prompt is sent. After releasing
+and acknowledging the first POST, it verifies that Pi receives both instructions
+exactly once and in their original order.
+
+### Failed completion probes now recover automatically
+
+Unresolved slash-command and reconnect reconciliation now retry the read-only
+fresh state request after one second. HTTP errors, unsuccessful RPC responses,
+and network failures all retain the lock until a successful idle answer arrives.
+Only one probe per dispatch can be in flight. Retries retain the reconnect
+context and check dispatch identity, so settlement, session closure, or a newer
+dispatch makes an old retry harmless. The accepted command is never resent.
+
+Three browser regressions each fail two consecutive probes, covering network,
+HTTP, and RPC failures. They verify automatic queue progress after recovery,
+exactly one delivery of each instruction, and no further retries after release.
+
+Validation: `npm run typecheck` passed; `npm test` passed all 223 tests with no
+skips; the full `npm run test:e2e` suite passed all 34 browser tests with no skips,
+including the four new regressions, using the installed Nix browser bundle.
+`git diff --check` was clean.

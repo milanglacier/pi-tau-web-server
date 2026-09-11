@@ -195,7 +195,15 @@ const sessionStateRevisions = new Map<string, number>();
 const abortRequests = new Map<string, Promise<void>>();
 const localAbortStates = new Map<string, NonNullable<LiveSession['abortState']>>();
 const settledWhileStopping = new Set<string>();
-type QueuedDispatch = { id: string; command: QueuedCommand; started: boolean };
+type QueuedDispatch = {
+  id: string;
+  command: QueuedCommand;
+  started: boolean;
+  accepted: boolean;
+  reconcileAfterReconnect?: boolean;
+  reconciling?: boolean;
+  retryTimer?: ReturnType<typeof setTimeout>;
+};
 const queuedPrompts = new Map<string, QueuedDispatch>();
 dialogHandler.onIdle = () => processQueuedExtensionUIRequest();
 
@@ -1369,7 +1377,7 @@ function flushQueue() {
     // Paired settled/metadata updates may arrive before Pi starts this
     // prompt. Keep only one queued dispatch in flight for each session.
     const id = `queued_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-    const queued: QueuedDispatch = { id, command: cmd, started: false };
+    const queued: QueuedDispatch = { id, command: cmd, started: false, accepted: false };
     queuedPrompts.set(activeLiveSessionId, queued);
     void dispatchQueuedPrompt(activeLiveSessionId, queued);
   }
@@ -1388,6 +1396,7 @@ async function dispatchQueuedPrompt(sessionId: string, queued: QueuedDispatch) {
     const data = await response.json();
     if (!response.ok || !data.success) throw new Error(data.error || 'Queued instruction failed');
     if (queuedPrompts.get(sessionId) !== queued) return; // Already settled or the tab closed.
+    queued.accepted = true;
     // Pi acknowledges prompt acceptance before agent_start, not completion.
     // Keep the dispatch locked until settled. Slash commands may never start
     // an agent operation, so ask Pi for fresh state after acceptance instead.
@@ -1409,19 +1418,35 @@ async function dispatchQueuedPrompt(sessionId: string, queued: QueuedDispatch) {
 // matching agent_settled may have been lost with the socket, and Pi's fresh
 // idle answer is then the only completion signal this browser will get.
 async function reconcileAcceptedPrompt(sessionId: string, queued: QueuedDispatch, afterReconnect = false) {
+  if (queuedPrompts.get(sessionId) !== queued) return;
+  // Remember reconnects during delivery, but never treat idle as completion
+  // until Pi has acknowledged this particular prompt.
+  if (afterReconnect) queued.reconcileAfterReconnect = true;
+  if (!queued.accepted || queued.reconciling) return;
+  clearTimeout(queued.retryTimer);
+  queued.retryTimer = undefined;
+  queued.reconciling = true;
   try {
     const response = await fetch('/api/rpc', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'get_state', sessionId, refresh: true }),
     });
     const data = await response.json();
-    const idle = data.success && data.data?.isStreaming === false && data.data?.isCompacting === false;
-    if (idle && (afterReconnect || !queued.started) && queuedPrompts.get(sessionId) === queued) {
+    const idle = response.ok && data.success && data.data?.isStreaming === false && data.data?.isCompacting === false;
+    if (idle && (queued.reconcileAfterReconnect || !queued.started) && queuedPrompts.get(sessionId) === queued) {
       queuedPrompts.delete(sessionId);
       if (viewingActiveSession && activeLiveSessionId === sessionId) updateUI();
     }
   } catch {
     // Without an idle acknowledgement, leave the next instruction queued.
+  } finally {
+    queued.reconciling = false;
+    // Slash commands need not emit agent_settled, and reconnects may have
+    // missed it. Retry only the read, never the accepted prompt. The identity
+    // check also makes a pending retry harmless after settlement or tab close.
+    if (queuedPrompts.get(sessionId) === queued && (queued.reconcileAfterReconnect || !queued.started)) {
+      queued.retryTimer = setTimeout(() => void reconcileAcceptedPrompt(sessionId, queued), 1000);
+    }
   }
 }
 
