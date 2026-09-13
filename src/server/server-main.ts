@@ -202,7 +202,7 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
   const id = command.id;
   const cmd = command.type;
   const success = (data?: unknown): RpcResponse => ({ type: 'response', command: cmd, success: true, id, ...(data !== undefined ? { data } : {}) });
-  const error = (message: string): RpcResponse => ({ type: 'response', command: cmd, success: false, error: message, id });
+  const error = (message: string): RpcResponse => ({ type: 'response', command: cmd, success: false, error: message, id, ...(cmd === 'prompt' ? { delivery: 'rejected' } : {}) });
 
   // Backend-local commands do not require a live Pi child.
   if (cmd === 'get_auth') return success({ configured: AUTH_CONFIGURED, enabled: authEnabled });
@@ -340,10 +340,11 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
     if (resp.success !== false && (cmd === 'prompt' || cmd === 'steer' || cmd === 'follow_up')) {
       refreshSessionModel(session).catch(() => {});
     }
-    return { ...resp, success: resp.success !== false };
+    return { ...resp, success: resp.success !== false, ...(cmd === 'prompt' && resp.success === false ? { delivery: 'rejected' } : {}) };
   } catch (e) {
     if (isSetThinkingLevel && prevThinkingLevel !== null) session.thinkingLevel = prevThinkingLevel;
-    return error(errorMessage(e));
+    // A timeout or broken transport does not establish whether Pi ran a prompt.
+    return { ...error(errorMessage(e)), ...(cmd === 'prompt' ? { delivery: 'uncertain' } : {}) };
   }
 }
 

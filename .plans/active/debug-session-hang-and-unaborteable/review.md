@@ -365,3 +365,166 @@ Validation: `npm run typecheck` passed; `npm test` passed all 223 tests with no
 skips; the full `npm run test:e2e` suite passed all 34 browser tests with no skips,
 including the four new regressions, using the installed Nix browser bundle.
 `git diff --check` was clean.
+
+---
+
+# Third round of joint review — independent verification (2026-09-10)
+
+## Scope and verdict
+
+Reviewed Tau `main...fix/abort-permission-waits` at `ab1cdaa`, including the latest
+queue reconciliation fixes, and the permission extension's implementation branch
+at `a579238` against its pre-fix revision `6fd96a4`. The extension checkout remains
+on `master` at `762706a`; its subsequent changes are release versions and the Pi
+development dependency range, not changes to the cancellation implementation or
+behavior tests. I used a disposable branch export rather than switching it.
+
+The coordinated plan makes sense and the extension implementation is correct.
+The two actionable findings from the previous Tau review are addressed. One
+remaining P2 delivery-recovery defect prevents approving the joint patch as a
+whole. No production code or committed tests were changed during this review.
+
+## Does the plan solve the bug?
+
+Yes. An execution timeout cannot bound a tool's preflight approval wait. Capturing
+the active turn signal, passing it to confirmation, and checking it again after
+approval releases native Abort without allowing an unapproved tool to execute.
+Tau's separate server-owned registry, deadline-preserving recovery, write-only
+dialog replies, and native Abort ordering address the browser/transport half of
+the problem. The plan appropriately distinguishes a confirmed failure mechanism
+from an unproven explanation of the historical session trace.
+
+The queue-recovery plan needs one additional distinction: failure to receive an
+acknowledgement does not establish that an instruction was not sent. Retrying a
+read-only completion probe is safe; presenting an already running instruction as
+an unsent command for replay is not.
+
+## Finding
+
+### [P2] Reconcile uncertain prompt delivery before offering an unsent retry
+
+Location: `src/public/app-main.ts:1404–1408`.
+
+If Pi accepts and starts a queued instruction but its HTTP acknowledgement is
+lost, this catch deletes the dispatch and puts the instruction back as “Not sent”
+with Retry, even when `queued.started` is already true. Subsequent settlement
+cannot remove that requeued copy, so Retry after completion executes the same
+instruction again and later queued instructions remain blocked until the user
+retries or cancels it. Preserve/reconcile the dispatch when execution is already
+known, and distinguish uncertain delivery from an explicit rejection before
+offering a replay. A failed response transport alone is not proof of non-delivery.
+
+Reproduced using the existing real-browser/fake-Pi harness: allow the queued POST
+to reach Tau, emit its successful native prompt response and `agent_start`, then
+drop only the HTTP response. The browser shows “Not sent” for the running prompt.
+After `agent_settled`, clicking Retry sends that same prompt a second time. The
+assertion that it was delivered exactly once fails with `2 !== 1`.
+
+This is separate from the two previous findings: acceptance gating and probe
+retries now work, but this error path discards the state before reconciliation can
+help. No repository-specific AGENTS.md rule materially supplies this finding; it
+is a demonstrated delivery/state correctness defect.
+
+## Does the implementation make sense?
+
+Yes, apart from the finding above. The latest `accepted` flag prevents a reconnect
+idle probe from releasing an unresolved POST. Remembering reconnect context until
+acceptance preserves instruction order. The single-flight, identity-guarded
+completion probes recover from network, HTTP, and RPC failures without resending
+the accepted command. The server's dialog claiming and Abort handling remain
+consistent with their separate transport and operation-completion responsibilities.
+
+The extension remains a small change to the shared ask path. Its captured signal
+and post-await cancellation check preserve fail-closed behavior and leave policy
+precedence, supported tools, explicit denial, no-UI behavior, and YOLO semantics
+unchanged. No actionable extension defect was found.
+
+## Do the tests make sense?
+
+Yes. The new delayed-POST browser test exercises acceptance gating across a real
+reconnect. The three failed-probe tests cover network, HTTP, and RPC failures and
+verify that only the read is retried. The existing suite covers dialog recovery,
+multiple clients, Abort ordering and acknowledgements, and queue completion.
+Extension behavior tests exercise the actual handler, including approval/abort
+races, and the six real-Pi scenarios validate native cancellation independently
+of Tau's fallback replies.
+
+The missing regression is loss of the HTTP response after delivery, rather than
+loss of the POST before delivery. The disposable probe adds that distinction and
+fails on the duplicate-delivery assertion, not on setup or browser availability.
+
+## Verification performed this round
+
+| Check | Result |
+|---|---|
+| Tau `npm run typecheck` | Pass |
+| Tau `npm test` | 223/223 pass; no skips |
+| Tau `npm run test:e2e`, selecting the installed Nix browser bundle | 34/34 pass; no skips |
+| Extension branch export `npm run check`, using existing dependencies | Strict typecheck and 25/25 behavior tests pass |
+| `TAU_PERMISSION_EXTENSION_DIR=/tmp/pi-permission-round3 node --test test/permission-rpc.test.ts` | 6/6 pass against the implementation branch; no skips |
+| Additional lost-acknowledgement browser probe | Fails as expected: Retry delivers the already-started instruction twice |
+| `git diff --check` before the review append | Clean |
+
+The additional probe and its output are `/tmp/tau-round3-probe.test.ts` and
+`/tmp/tau-round3-probe.log`. Other logs are `/tmp/tau-round3-typecheck.log`,
+`/tmp/tau-round3-test.log`, `/tmp/tau-round3-e2e.log`,
+`/tmp/pi-permission-round3-check.log`, and `/tmp/tau-round3-extension-rpc.log`.
+All earlier review text is preserved. No live Pi process, loading symlink,
+configuration, session transcript, installed dependency, or branch was changed.
+
+## Companion review delivery limitation
+
+The extension plan/review has moved to
+`.plans/completed/debug-session-hang-and-unaborteable/`. This session may write
+only inside Tau and `/tmp`, so I could not append to the sibling repository.
+Its next-round appendix is prepared at
+`/tmp/pi-permission-round3/review-appendix.md`; it is not yet appended there.
+
+---
+
+## Fix summary for the round-three uncertain-delivery finding
+
+Queued prompts now remain tracked when their HTTP acknowledgement is lost,
+including when Tau has already observed `agent_start`. They are shown as
+“Delivery uncertain” without a Retry button, rather than being put back in the
+unsent queue. Settlement removes the tracked dispatch, so it cannot leave a
+second copy behind for accidental replay.
+
+Tau now distinguishes explicit prompt rejection from a server-side timeout or
+transport exception. Only an explicit rejection, with no observed execution,
+returns an instruction to “Not sent” with Retry. Network failures, malformed or
+unsuccessful HTTP responses, and server acknowledgement timeouts remain uncertain.
+
+Observed execution permits read-only completion reconciliation even without the
+HTTP acknowledgement. This also works when `agent_start` arrives after the
+delivery failure. The existing reconnect recovery and repeated state probes can
+release the dispatch without resending it.
+
+When neither acceptance nor execution is known, an idle state response still
+cannot prove that a delayed instruction will never arrive. Tau deliberately
+keeps that dispatch and subsequent instructions queued, with a visible uncertain
+status. This fix does not provide durable delivery receipts or automatic replay
+for that unresolved case.
+
+Regression coverage now drops the HTTP response after Pi receives the prompt,
+with execution observed both before and after the failure, and with completion
+lost during a socket disconnect. It verifies exactly one delivery and subsequent
+queue progress. Additional cases keep network failures and acknowledgement
+timeouts locked across reconnects without execution evidence, and preserve Retry
+for explicit rejection. Server tests verify the rejection/uncertainty distinction.
+
+### Verification of the round-three fix
+
+- `npm run typecheck` and `npm run build` passed.
+- `npm test` passed all 224 tests with no skips.
+- The full browser suite passed all 39 tests with no skips, using the installed
+  Nix browser bundle. After the final reconciliation cleanup and rebuild, the
+  complete dialog/queue browser file passed all 31 tests again with no skips.
+- `git diff --check` passed. A byte-for-byte prefix comparison against the review
+  captured before this appendix confirmed that all existing review text,
+  including the previously uncommitted round-three review, is unchanged.
+
+Logs: `/tmp/tau-fix-round3-typecheck.log`, `/tmp/tau-fix-round3-build.log`,
+`/tmp/tau-fix-round3-test.log`, `/tmp/tau-fix-round3-e2e.log`, and
+`/tmp/tau-fix-round3-final-queue.log`. This fix changes Tau only; no sibling
+repository or existing companion review was edited.

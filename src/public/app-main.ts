@@ -200,6 +200,7 @@ type QueuedDispatch = {
   command: QueuedCommand;
   started: boolean;
   accepted: boolean;
+  uncertain?: boolean;
   reconcileAfterReconnect?: boolean;
   reconciling?: boolean;
   retryTimer?: ReturnType<typeof setTimeout>;
@@ -358,10 +359,14 @@ wsClient.addEventListener('rpcEvent', (e: Event) => {
     if (event.type === 'agent_start') {
       operationRevisions.set(sessionId, (operationRevisions.get(sessionId) || 0) + 1);
       const queued = queuedPrompts.get(sessionId);
-      if (queued) queued.started = true;
+      if (queued) {
+        queued.started = true;
+        if (queued.uncertain) void reconcileAcceptedPrompt(sessionId, queued);
+      }
     }
     if (event.type === 'agent_settled') {
       queuedPrompts.delete(sessionId);
+      renderQueuedMessages();
       if (abortState(sessionId) === 'stopping') settledWhileStopping.add(sessionId);
       localAbortStates.delete(sessionId);
     }
@@ -1329,7 +1334,15 @@ const queuedMessagesEl = document.getElementById('queued-messages')!;
 
 function renderQueuedMessages() {
   queuedMessagesEl.innerHTML = '';
-  if (messageQueue.length === 0) {
+  const uncertain = activeLiveSessionId ? queuedPrompts.get(activeLiveSessionId) : undefined;
+  if (uncertain?.uncertain) {
+    const el = document.createElement('div');
+    el.className = 'queued-msg';
+    el.innerHTML = `<span class="queued-msg-label">Delivery uncertain</span><span class="queued-msg-text">${escapeHtml(uncertain.command.message || '')}</span>`;
+    el.title = 'The acknowledgement was lost. This instruction may have run. Waiting for confirmed execution or completion before sending more.';
+    queuedMessagesEl.appendChild(el);
+  }
+  if (messageQueue.length === 0 && !uncertain?.uncertain) {
     queuedMessagesEl.classList.add('hidden');
     return;
   }
@@ -1385,15 +1398,17 @@ function flushQueue() {
 
 // Dispatch over HTTP rather than the WebSocket: a closed socket drops a send
 // silently, which would leave this session's queue locked with no error and
-// no Retry. An HTTP failure is observable and returns the instruction to the
-// queue as "Not sent".
+// no Retry. Only explicit rejection permits replay; a lost HTTP response can
+// hide successful delivery and must preserve the dispatch lock.
 async function dispatchQueuedPrompt(sessionId: string, queued: QueuedDispatch) {
+  let rejected = false;
   try {
     const response = await fetch('/api/rpc', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...queued.command, id: queued.id }),
     });
     const data = await response.json();
+    rejected = response.ok && data.success === false && data.delivery === 'rejected';
     if (!response.ok || !data.success) throw new Error(data.error || 'Queued instruction failed');
     if (queuedPrompts.get(sessionId) !== queued) return; // Already settled or the tab closed.
     queued.accepted = true;
@@ -1403,6 +1418,14 @@ async function dispatchQueuedPrompt(sessionId: string, queued: QueuedDispatch) {
     void reconcileAcceptedPrompt(sessionId, queued);
   } catch (error) {
     if (queuedPrompts.get(sessionId) !== queued) return;
+    if (!rejected || queued.started) {
+      queued.uncertain = true;
+      renderQueuedMessages();
+      // Observed execution is enough to reconcile, even without the HTTP ack.
+      // Without it, idle alone cannot prove that a delayed POST will not run.
+      if (queued.started) void reconcileAcceptedPrompt(sessionId, queued);
+      return;
+    }
     queuedPrompts.delete(sessionId);
     queued.command.error = error instanceof Error && error.message ? error.message : 'Queued instruction failed';
     messageQueue.unshift(queued.command);
@@ -1420,9 +1443,9 @@ async function dispatchQueuedPrompt(sessionId: string, queued: QueuedDispatch) {
 async function reconcileAcceptedPrompt(sessionId: string, queued: QueuedDispatch, afterReconnect = false) {
   if (queuedPrompts.get(sessionId) !== queued) return;
   // Remember reconnects during delivery, but never treat idle as completion
-  // until Pi has acknowledged this particular prompt.
+  // until Pi has acknowledged the prompt or execution has been observed.
   if (afterReconnect) queued.reconcileAfterReconnect = true;
-  if (!queued.accepted || queued.reconciling) return;
+  if ((!queued.accepted && !queued.started) || queued.reconciling) return;
   clearTimeout(queued.retryTimer);
   queued.retryTimer = undefined;
   queued.reconciling = true;
@@ -1433,18 +1456,19 @@ async function reconcileAcceptedPrompt(sessionId: string, queued: QueuedDispatch
     });
     const data = await response.json();
     const idle = response.ok && data.success && data.data?.isStreaming === false && data.data?.isCompacting === false;
-    if (idle && (queued.reconcileAfterReconnect || !queued.started) && queuedPrompts.get(sessionId) === queued) {
+    if (idle && (queued.reconcileAfterReconnect || queued.uncertain || !queued.started) && queuedPrompts.get(sessionId) === queued) {
       queuedPrompts.delete(sessionId);
+      renderQueuedMessages();
       if (viewingActiveSession && activeLiveSessionId === sessionId) updateUI();
     }
   } catch {
     // Without an idle acknowledgement, leave the next instruction queued.
   } finally {
     queued.reconciling = false;
-    // Slash commands need not emit agent_settled, and reconnects may have
-    // missed it. Retry only the read, never the accepted prompt. The identity
+    // Slash commands need not emit agent_settled, and interrupted delivery or
+    // reconnects may have missed it. Retry only the read, never the prompt. The identity
     // check also makes a pending retry harmless after settlement or tab close.
-    if (queuedPrompts.get(sessionId) === queued && (queued.reconcileAfterReconnect || !queued.started)) {
+    if (queuedPrompts.get(sessionId) === queued && (queued.reconcileAfterReconnect || queued.uncertain || !queued.started)) {
       queued.retryTimer = setTimeout(() => void reconcileAcceptedPrompt(sessionId, queued), 1000);
     }
   }

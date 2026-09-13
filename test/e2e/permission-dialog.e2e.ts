@@ -686,7 +686,99 @@ test('a queued dispatch whose agent_settled was lost with the socket is released
   await page.waitForSelector('#queued-messages.hidden', { state: 'attached' });
 });
 
-test('a queued instruction whose dispatch never reaches the server returns to the queue for retry', async (t) => {
+for (const startTiming of ['before failure', 'after failure', 'completion lost'] as const) {
+  test(`a lost queued HTTP acknowledgement never replays the prompt: ${startTiming}`, async (t) => {
+    if (skipUnlessBrowser(t)) return;
+    const { sessionId, emit, nextCommand, commands } = await createSession(t);
+    const page = await openPage(t, sessionId);
+    emit({ type: 'agent_start' });
+    await page.waitForSelector('#abort-btn:not(.hidden)');
+    for (const message of ['execute once', 'next instruction']) {
+      await page.fill('#message-input', message);
+      await page.press('#message-input', 'Enter');
+    }
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    t.after(() => release());
+    let idle = false;
+    await page.route('**/api/rpc', async route => {
+      const command = route.request().postDataJSON();
+      if (command.type === 'get_state') {
+        return route.fulfill({ json: { success: true, data: { isStreaming: !idle, isCompacting: false } } });
+      }
+      if (command.message !== 'execute once') return route.continue();
+      await route.fetch();
+      await gate;
+      return route.abort('connectionfailed');
+    });
+    const firstPrompt = nextCommand('prompt');
+    emit({ type: 'agent_settled' });
+    const first = await firstPrompt;
+    emit({ type: 'response', command: 'prompt', id: first.id, success: true });
+    if (startTiming !== 'after failure') {
+      emit({ type: 'agent_start' });
+      await page.waitForSelector('#abort-btn:not(.hidden)');
+    }
+    release();
+    await page.waitForFunction(() => document.querySelector('.queued-msg-label')?.textContent === 'Delivery uncertain');
+    assert.equal(await page.locator('.queued-msg-retry').count(), 0);
+    if (startTiming === 'after failure') {
+      emit({ type: 'agent_start' });
+      await page.waitForSelector('#abort-btn:not(.hidden)');
+    }
+    assert.equal(commands.filter(c => c.type === 'prompt').length, 1);
+    const secondPrompt = nextCommand('prompt');
+    if (startTiming === 'completion lost') {
+      for (const client of liveManager.clients) client.close();
+      await page.waitForFunction(() => document.getElementById('status-text')?.textContent === 'Disconnected');
+      emit({ type: 'agent_settled' });
+      idle = true;
+      await page.clock.runFor(1100);
+    } else {
+      emit({ type: 'agent_settled' });
+    }
+    assert.equal((await secondPrompt).message, 'next instruction');
+    assert.deepEqual(commands.filter(c => c.type === 'prompt').map(c => c.message), ['execute once', 'next instruction']);
+    await page.waitForSelector('#queued-messages.hidden', { state: 'attached' });
+  });
+}
+
+for (const failure of ['network', 'timeout'] as const) {
+  test(`uncertain queued delivery without execution evidence stays locked after reconnect: ${failure}`, async (t) => {
+    if (skipUnlessBrowser(t)) return;
+    const { sessionId, emit, commands } = await createSession(t);
+    const page = await openPage(t, sessionId);
+    emit({ type: 'agent_start' });
+    await page.waitForSelector('#abort-btn:not(.hidden)');
+    for (const message of ['uncertain instruction', 'must wait']) {
+      await page.fill('#message-input', message);
+      await page.press('#message-input', 'Enter');
+    }
+    let probes = 0;
+    await page.route('**/api/rpc', async route => {
+      const command = route.request().postDataJSON();
+      if (command.type === 'prompt') {
+        if (failure === 'network') return route.abort('connectionfailed');
+        return route.fulfill({ json: { success: false, delivery: 'uncertain', error: 'RPC command timed out: prompt' } });
+      }
+      if (command.type === 'get_state' && command.refresh) probes++;
+      return route.continue();
+    });
+    emit({ type: 'agent_settled' });
+    await page.waitForFunction(() => document.querySelector('.queued-msg-label')?.textContent === 'Delivery uncertain');
+    for (const client of liveManager.clients) client.close();
+    await page.waitForFunction(() => document.getElementById('status-text')?.textContent === 'Disconnected');
+    await page.clock.runFor(1100);
+    await page.waitForFunction(() => document.getElementById('status-text')?.textContent === 'Connected');
+    await page.clock.runFor(2000);
+    assert.equal(probes, 0, 'Idle cannot resolve an unacknowledged instruction that may still arrive');
+    assert.equal(await page.locator('.queued-msg-retry').count(), 0);
+    assert.equal(await page.locator('.queued-msg').count(), 2);
+    assert.equal(commands.filter(c => c.type === 'prompt').length, 0);
+  });
+}
+
+test('an explicitly rejected queued instruction returns to the queue for retry', async (t) => {
   if (skipUnlessBrowser(t)) return;
   const { sessionId, emit, nextCommand, commands } = await createSession(t);
   const page = await openPage(t, sessionId);
@@ -698,7 +790,7 @@ test('a queued instruction whose dispatch never reaches the server returns to th
   }
   let dropPrompts = true;
   await page.route('**/api/rpc', async route => {
-    if (dropPrompts && route.request().postDataJSON().type === 'prompt') return route.abort('connectionfailed');
+    if (dropPrompts && route.request().postDataJSON().type === 'prompt') return route.fulfill({ json: { success: false, delivery: 'rejected', error: 'Prompt rejected' } });
     return route.continue();
   });
   emit({ type: 'agent_settled' });

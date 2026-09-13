@@ -296,6 +296,15 @@ test('prompt acknowledgement timeout is not treated as acceptance', async () => 
   const resp = await handleRpcCommand({ type: 'prompt', sessionId: session.id, message: 'hi' });
   assert.equal(resp.success, false);
   assert.match(resp.error, /timed out/);
+  assert.equal(resp.delivery, 'uncertain');
+});
+
+test('explicit prompt rejection is safe to retry', async () => {
+  const session = injectSession({ send: async () => ({ type: 'response', success: false, error: 'Rejected', data: {} }) });
+  const resp = await handleRpcCommand({ type: 'prompt', sessionId: session.id, message: 'hi' });
+  assert.equal(resp.delivery, 'rejected');
+  const missing = await handleRpcCommand({ type: 'prompt', sessionId: 'missing', message: 'hi' });
+  assert.equal(missing.delivery, 'rejected');
 });
 
 test('immediate send failures are reported as errors, not swallowed', async () => {
