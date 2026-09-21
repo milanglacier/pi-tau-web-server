@@ -68,7 +68,7 @@
     "ws": "^8.21.1"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.83.0 <0.90.0",
+    "@earendil-works/pi-coding-agent": ">=0.86.0 <=0.100.0",
     "@types/node": "^26.1.1",
     "@types/ws": "^8.18.1",
     "katex": "^0.18.1",
