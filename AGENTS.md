@@ -3,16 +3,17 @@
 Write in plain, simple language EVERYWHERE: **comments, docstrings, commit
 messages, docs, README documentation, and explanations to the user**.
 
-### Comments & Docstrings
+### Code, Comments & Docstrings
 
 The text in the repo must read as the final, clean version. It should carry
 no trace of the back and forth it took to get there, as if it had never been
 written any other way. Describe only the current state:
 
-- Describe only current behavior in docstrings and inline comments. Do not
-  mention what changed or contrast it with earlier behavior; record
-  behavior changes in commit messages or plans, where readers have the
-  relevant context.
+- Describe only current behavior in code, docstrings and inline comments. Do
+  not mention what changed or contrast it with earlier behavior.
+- The onlu exception where record behavior changes in contract with earlier
+  behavior is acceptable is in **commit messages or plans**, where readers have
+  the relevant context.
 
 ### Commit Messages & Communication
 
