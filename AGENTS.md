@@ -5,6 +5,10 @@ messages, docs, README documentation, and explanations to the user**.
 
 ### Comments & Docstrings
 
+The text in the repo must read as the final, clean version. It should carry
+no trace of the back and forth it took to get there, as if it had never been
+written any other way. Describe only the current state:
+
 - Describe only current behavior in docstrings and inline comments. Do not
   mention what changed or contrast it with earlier behavior; record
   behavior changes in commit messages or plans, where readers have the
@@ -50,6 +54,7 @@ in mind to avoid introducing features or fixes that cause regressions.
 When a user asks to add a note to `AGENTS.md`, capture durable project knowledge that helps future agents avoid repeating the same mistakes.
 
 Expected content:
+
 - The problem, edge case, or project-specific constraint, described with short detail and examples to recognize it later.
 - The intended behavior or invariant to preserve, expressed in terms of outcomes.
 - Relevant context about where the issue appears, if it helps identify the area in the future.
