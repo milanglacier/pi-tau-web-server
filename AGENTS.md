@@ -1,13 +1,43 @@
-## Commit Messages & Communication
+## Writing
 
-Write commit messages and explanations to the user in plain English for the
-user.
+Write in plain, simple language EVERYWHERE: **comments, docstrings, commit
+messages, docs, README documentation, and explanations to the user**.
 
-Commit messages in this repo should read like a human explaining the change, not telegraphic shorthand. The maintainer has repeatedly pushed back on terse, abbreviated subject lines that drop the words that carry the actual intent.
+### Comments & Docstrings
 
-Write the subject as a full, clear sentence. It may be long — that is fine — but it must name the real outcome, not a compressed label for it. For example, `fix(ui): canonical model identity, extension-refresh, drop client merges` was rejected as ambiguous jargon; `fix(ui): make server canonical for model/thinking identity across clients and extensions` was rejected as terse; the accepted form was `fix(ui): preserve the full provider/model:thinking-level identity in every browser so it is never downgraded or left stale, including when extensions change the model`. The words "preserve the full ... identity" and "never downgraded or left stale" are the point — keep that kind of language instead of collapsing it to one-word labels like "canonicalize" or "refresh".
+- Describe only current behavior in docstrings and inline comments. Do not
+  mention what changed or contrast it with earlier behavior; record
+  behavior changes in commit messages or plans, where readers have the
+  relevant context.
 
-In the body, write full sentences that explain why each change was made, not bullet fragments that only describe what changed. Keep the key framing words the user cared about ("preserve", "no downgrade", "stale") visible in the subject or the opening paragraph.
+### Commit Messages & Communication
+
+Write commit messages and explanations to the user in plain English, since the
+user has not read the code. Use complete sentences, not compressed jargon or
+dense noun phrases. Bad: "removing pairs-order nondeterminism". Good: "results
+no longer depend on the order the placeholders are listed in". Do not coin
+terminology (e.g. "walk-based expander", "placeholder DSL"); say what the thing
+does instead.
+
+Commit messages in this repo should read like a human explaining the change,
+not telegraphic shorthand. The maintainer has repeatedly pushed back on terse,
+abbreviated subject lines that drop the words that carry the actual intent.
+
+Write the subject as a full, clear sentence. It may be long — that is fine —
+but it must name the real outcome, not a compressed label for it. For example,
+`fix(ui): canonical model identity, extension-refresh, drop client merges` was
+rejected as ambiguous jargon; `fix(ui): make server canonical for
+model/thinking identity across clients and extensions` was rejected as terse;
+the accepted form was `fix(ui): preserve the full provider/model:thinking-level
+identity in every browser so it is never downgraded or left stale, including
+when extensions change the model`. The words "preserve the full ... identity"
+and "never downgraded or left stale" are the point — keep that kind of language
+instead of collapsing it to one-word labels like "canonicalize" or "refresh".
+
+In the body, write full sentences that explain why each change was made, not
+bullet fragments that only describe what changed. Keep the key framing words
+the user cared about ("preserve", "no downgrade", "stale") visible in the
+subject or the opening paragraph.
 
 # Important Notes About the Codebase and Rabbit Holes
 
