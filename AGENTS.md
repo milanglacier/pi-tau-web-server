@@ -11,7 +11,7 @@ written any other way. Describe only the current state:
 
 - Describe only current behavior in code, docstrings and inline comments. Do
   not mention what changed or contrast it with earlier behavior.
-- The onlu exception where record behavior changes in contract with earlier
+- The only exception where record behavior changes in contract with earlier
   behavior is acceptable is in **commit messages or plans**, where readers have
   the relevant context.
 
