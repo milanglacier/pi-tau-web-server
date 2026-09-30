@@ -755,6 +755,12 @@ newLiveSessionForm?.addEventListener('submit', async (e) => {
 // ═══════════════════════════════════════
 
 function handleRPCEvent(event: AppEvent, sessionId: string | null = null) {
+  if (event.parentToolCallId && (
+    event.type === 'tool_execution_start' ||
+    event.type === 'tool_execution_update' ||
+    event.type === 'tool_execution_end'
+  )) return;
+
   switch (event.type) {
     case 'agent_start':
     case 'turn_start':

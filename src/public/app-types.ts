@@ -91,6 +91,7 @@ export type AppEvent = {
   message?: AppMessage | string;
   assistantMessageEvent?: { type?: string; delta?: string };
   toolCallId?: string;
+  parentToolCallId?: string;
   toolName?: string;
   args?: Record<string, unknown>;
   partialResult?: unknown;

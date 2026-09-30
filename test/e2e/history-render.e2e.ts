@@ -6,6 +6,10 @@ import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { chromium } from 'playwright';
+import type { JsonAgentSessionEvent } from '@earendil-works/pi-coding-agent';
+
+type ToolExecutionEvent = Extract<JsonAgentSessionEvent, { type: 'tool_execution_start' | 'tool_execution_update' | 'tool_execution_end' }>;
+type ToolResultMessage = Extract<Extract<JsonAgentSessionEvent, { type: 'message_end' }>['message'], { role: 'toolResult' }>;
 
 // Real-browser test of the progressive session-history render: it drives the
 // actual UI against the in-process server, with the pi child process mocked
@@ -459,6 +463,57 @@ test('scroll to bottom reaches a large live tool card created off-screen', async
     return el.scrollHeight - el.scrollTop - el.clientHeight < 10;
   }, undefined, { timeout: 5000 });
 
+  await assertNoPageErrors(errors);
+});
+
+test('nested tool events leave root cards unchanged and match reloaded history', async (t: TestContext) => {
+  if (skipUnlessBrowser(t)) return;
+  const { page, errors } = await openPage();
+  await page.click(sessionItemSelector(smallFile));
+  await page.waitForFunction((expected: number) =>
+    document.querySelectorAll('#messages > .message').length === expected, B_ROUNDS * 2);
+
+  const session = liveManager.findBySessionFile(smallFile);
+  assert.ok(session, 'small fixture should have a resumed live session');
+  const toolCallId = 'root-with-nested-calls';
+  const card = page.locator(`.tool-card[data-tool-call-id="${toolCallId}"]`);
+  const broadcast = (event: ToolExecutionEvent | { type: 'auto_compaction_start'; parentToolCallId: string }) => liveManager.broadcast({ type: 'event', sessionId: session.id, event });
+  broadcast({ type: 'tool_execution_start', toolCallId, toolName: 'codemode', args: { code: 'tools.read()' } });
+  await card.waitFor({ state: 'attached' });
+  broadcast({ type: 'tool_execution_update', toolCallId, toolName: 'codemode', args: { code: 'tools.read()' }, partialResult: { content: [{ type: 'text', text: 'root partial output' }], details: {} } });
+  await page.waitForFunction((id: string) =>
+    document.querySelector(`.tool-card[data-tool-call-id="${id}"] .tool-output`)?.textContent === 'root partial output', toolCallId);
+
+  const parentToolCallId = toolCallId;
+  broadcast({ type: 'tool_execution_start', parentToolCallId, toolCallId: 'nested-read', toolName: 'read', args: { path: '/tmp/nested.txt' } });
+  broadcast({ type: 'tool_execution_update', parentToolCallId, toolCallId: 'nested-read', toolName: 'read', args: { path: '/tmp/nested.txt' }, partialResult: { content: [{ type: 'text', text: 'nested output' }], details: {} } });
+  broadcast({ type: 'tool_execution_end', parentToolCallId, toolCallId: 'nested-read', toolName: 'read', result: { content: [{ type: 'text', text: 'nested output' }], details: {} }, isError: false });
+  // Reusing an existing card ID also checks that nested updates and completions
+  // cannot change a root card, independently of the nested-start guard.
+  broadcast({ type: 'tool_execution_update', parentToolCallId, toolCallId, toolName: 'read', args: { path: '/tmp/nested.txt' }, partialResult: { content: [{ type: 'text', text: 'nested overwrite' }], details: {} } });
+  broadcast({ type: 'tool_execution_end', parentToolCallId, toolCallId, toolName: 'read', result: { content: [{ type: 'text', text: 'nested overwrite' }], details: {} }, isError: true });
+  // This ordered event confirms that the browser consumed the nested events
+  // and still handles other event types carrying the parent field.
+  broadcast({ type: 'auto_compaction_start', parentToolCallId });
+  await page.waitForSelector('#compaction-indicator');
+  assert.equal(await page.locator('#messages > .tool-card').count(), 1);
+  assert.equal(await card.locator('.tool-output').textContent(), 'root partial output');
+
+  const result = { content: [{ type: 'text', text: 'root final output' }], details: {} } satisfies Pick<ToolResultMessage, 'content' | 'details'>;
+  broadcast({ type: 'tool_execution_end', toolCallId, toolName: 'codemode', result, isError: false });
+  await page.waitForFunction((id: string) =>
+    document.querySelector(`.tool-card[data-tool-call-id="${id}"] .tool-output`)?.textContent === 'root final output', toolCallId);
+  const liveIds = await page.locator('#messages > .tool-card').evaluateAll(cards => cards.map(card => card.getAttribute('data-tool-call-id')));
+
+  session.entries.push(
+    { type: 'message', message: { role: 'assistant', content: [{ type: 'toolCall', id: toolCallId, name: 'codemode', arguments: { code: 'tools.read()' } }] } },
+    { type: 'message', message: { role: 'toolResult', toolCallId, toolName: 'codemode', ...result, isError: false, timestamp: Date.now(),
+      nestedCalls: { complete: true, calls: [{ id: 'nested-read', name: 'read', arguments: { path: '/tmp/nested.txt' }, status: 'ok' }] } } satisfies ToolResultMessage }
+  );
+  await page.reload();
+  await card.waitFor({ state: 'attached' });
+  assert.deepEqual(await page.locator('#messages > .tool-card').evaluateAll(cards => cards.map(card => card.getAttribute('data-tool-call-id'))), liveIds);
+  assert.equal(await card.locator('.tool-output').textContent(), 'root final output');
   await assertNoPageErrors(errors);
 });
 
