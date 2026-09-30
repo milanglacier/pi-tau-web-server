@@ -540,11 +540,10 @@ test('scroll to bottom reaches a large live tool card created off-screen', async
   await assertNoPageErrors(errors);
 });
 
-test('codemode arguments are safe highlighted JavaScript in live, nested, and reloaded cards', async (t: TestContext) => {
+test('codemode arguments are safe highlighted JavaScript in live and reloaded cards', async (t: TestContext) => {
   if (skipUnlessBrowser(t)) return;
   const { page, errors, card, broadcast, id, session, finish } = await openNestedPage();
   const source = '// Read a file.\r\nconst result = await tools.read({ path: "file.txt" });\r\nconst markup = "<img src=x onerror=alert(1)>";\r\nconst fence = "```";\r\n\r\n';
-  const nestedSource = 'const html = "<script>alert(1)</script>";\nreturn await tools.read({ path: "nested.txt" });\n';
   broadcast({ type: 'tool_execution_start', toolCallId: id, toolName: 'codemode', args: { code: source } });
   await card.waitFor({ state: 'attached' });
   const assertSource = async () => {
@@ -562,25 +561,7 @@ test('codemode arguments are safe highlighted JavaScript in live, nested, and re
   assert.equal(await page.evaluate(() => navigator.clipboard.readText()), source);
   assert.equal(await card.locator('.tool-card-header').getAttribute('aria-expanded'), 'true');
 
-  broadcast({ type: 'tool_execution_start', toolCallId: `${id}/1`, parentToolCallId: id,
-    toolName: 'codemode', args: { code: nestedSource } });
-  const row = card.locator('.nested-call-row');
-  await row.locator('.nested-call-toggle').click();
-  assert.equal(await row.locator('.nested-call-arguments code').textContent(), nestedSource);
-  assert.ok(await row.locator('.hljs-keyword').count() > 0);
-  assert.equal(await row.locator('script').count(), 0);
-  const nestedHtml = await row.locator('code').innerHTML();
-  const codeNode = await row.locator('code').elementHandle();
-  broadcast({ type: 'tool_execution_end', toolCallId: `${id}/1`, parentToolCallId: id,
-    toolName: 'codemode', result: { content: [], details: {} }, isError: false });
-  await page.waitForFunction((root: string) =>
-    document.querySelector(`.tool-card[data-tool-call-id="${root}"] .nested-call-status`)?.textContent === 'succeeded', id);
-  assert.equal(await row.locator('code').evaluate((current, previous) => current === previous, codeNode), true,
-    'status updates keep the same highlighted source node');
-
-  const result = finish({ complete: true, calls: [
-    { id: `${id}/1`, name: 'codemode', arguments: { code: nestedSource }, status: 'ok', durationMs: 3 },
-  ] }, 'Plain tool output <script>');
+  const result = finish({ complete: true, calls: [] }, 'Plain tool output <script>');
   session.entries.push(
     { type: 'message', message: { role: 'assistant', content: [{ type: 'toolCall', id, name: 'codemode', arguments: { code: source } }] } },
     { type: 'message', message: result },
@@ -591,13 +572,6 @@ test('codemode arguments are safe highlighted JavaScript in live, nested, and re
   await assertSource();
   assert.equal(await card.locator('.tool-args code').innerHTML(), liveHtml);
   assert.equal(await card.locator('.tool-output').textContent(), 'Plain tool output <script>');
-  await card.locator('.nested-calls-toggle').click();
-  await row.locator('.nested-call-toggle').click();
-  assert.equal(await row.locator('code').innerHTML(), nestedHtml);
-  await row.locator('.copy-btn').click();
-  await page.waitForFunction(() => document.querySelector('.nested-call-details .copy-btn')?.textContent === 'Copied!');
-  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), nestedSource);
-  assert.equal(await row.locator('.nested-call-toggle').getAttribute('aria-expanded'), 'true');
 
   const keyword = card.locator('.tool-args .hljs-keyword').first();
   await page.evaluate(() => document.documentElement.dataset.theme = 'night');
@@ -651,8 +625,8 @@ test('codemode argument fallbacks preserve JSON, empty code, and omitted nested 
       }));
     });
     renderer.reconcileToolResult('missing-code', { nestedCalls: { complete: false, calls: [
-      { id: 'omitted', name: 'codemode', argumentsBytes: 100, status: 'ok' },
-      { id: 'empty', name: 'codemode', arguments: {}, status: 'ok' },
+      { id: 'omitted', name: 'read', argumentsBytes: 100, status: 'ok' },
+      { id: 'empty', name: 'read', arguments: {}, status: 'ok' },
     ] } }, false);
     for (const button of host.querySelectorAll<HTMLButtonElement>('.nested-call-toggle')) button.click();
     return { rendered, nested: Array.from(host.querySelectorAll('.nested-call-arguments'), el => el.textContent) };

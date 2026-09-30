@@ -48,3 +48,19 @@ Show the JavaScript source of a codemode call in a highlighted code block instea
 - All 58 browser tests passed, including the existing history, nested-call, and permission tests.
 - A final build, typecheck, unit-test run, and git diff --check passed.
 - npm install reported one existing high-severity advisory in brace-expansion under Pi's development dependency. The highlighting package adds no dependencies.
+
+## Follow-up: simplify rendering for supported calls
+
+Codemode cannot call another codemode. The nested-codemode rendering described above is therefore unreachable and does not need highlighting support.
+
+- [x] Keep the shared highlighted argument renderer for live and saved root calls only. Remove its nested-element option.
+- [x] Render nested arguments as plain text in a stable pre element. Remove the argument cache key and element replacement logic used for nested highlighting.
+- [x] Remove the nested-codemode browser fixture and its highlighting and copying checks. Use read calls to check omitted and empty nested arguments.
+- [x] Preserve the existing plan above and append this correction.
+
+### Follow-up verification
+
+- Typecheck and all 247 unit tests passed.
+- The three codemode browser tests passed, along with the nested-call checks reached during the run.
+- The full browser run hit the command's 200-second timeout before finishing, so a complete browser-suite result is not available.
+- git diff --check passed.

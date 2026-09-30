@@ -13,7 +13,6 @@ type CallsRow = {
   toggle: HTMLButtonElement;
   call: NestedCallSummary;
   details?: HTMLElement;
-  argumentsKey?: string;
 };
 
 type CallsView = {
@@ -383,26 +382,17 @@ export class ToolCardRenderer {
     if (!row.details) {
       row.details = document.createElement('div');
       row.details.className = 'nested-call-details';
+      const args = document.createElement('pre');
+      args.className = 'nested-call-arguments';
       const error = document.createElement('div');
       error.className = 'nested-call-error';
-      row.details.appendChild(error);
+      row.details.append(args, error);
       row.element.appendChild(row.details);
     }
-    const error = row.details.querySelector<HTMLElement>('.nested-call-error')!;
+    const args = row.details.querySelector('.nested-call-arguments')!;
     const text = this.argumentsText(row.call);
-    const key = JSON.stringify([row.call.name, text]);
-    if (row.argumentsKey !== key) {
-      let args = this.renderArguments(row.call.name, row.call.arguments, 'nested-call-arguments');
-      if (!args) {
-        args = document.createElement('pre');
-        args.textContent = text;
-      }
-      args.classList.add('nested-call-arguments');
-      const previous = row.details.querySelector('.nested-call-arguments');
-      if (previous) previous.replaceWith(args);
-      else row.details.insertBefore(args, error);
-      row.argumentsKey = key;
-    }
+    if (args.textContent !== text) args.textContent = text;
+    const error = row.details.querySelector<HTMLElement>('.nested-call-error')!;
     if (error.textContent !== (row.call.error || '')) error.textContent = row.call.error || '';
     error.hidden = !row.call.error;
   }
@@ -542,17 +532,17 @@ export class ToolCardRenderer {
     return '';
   }
 
-  private renderArguments(toolName: string, args?: ToolArgs, className = 'tool-args'): HTMLElement | undefined {
+  private renderArguments(toolName: string, args?: ToolArgs): HTMLElement | undefined {
     if (toolName === 'codemode' && typeof args?.code === 'string') {
       const element = document.createElement('div');
-      element.className = `${className} tool-code-args`;
+      element.className = 'tool-args tool-code-args';
       element.appendChild(createJavaScriptCodeBlock(args.code));
       return element;
     }
     const text = this.formatJson(args);
     if (!text) return undefined;
-    const element = document.createElement(className === 'nested-call-arguments' ? 'pre' : 'div');
-    element.className = className;
+    const element = document.createElement('div');
+    element.className = 'tool-args';
     element.textContent = text;
     return element;
   }
