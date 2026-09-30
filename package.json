@@ -58,7 +58,7 @@
     "tsconfig.public.json"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.public.json && node scripts/copy-katex.ts",
+    "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.public.json && node scripts/copy-katex.ts && node scripts/copy-highlight.ts",
     "prepare": "npm run build",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.public.json --noEmit && tsc -p tsconfig.test.json",
     "test": "npm run build && node --test test/*.test.ts",
@@ -69,6 +69,7 @@
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.86.0 <=0.120.0",
+    "@highlightjs/cdn-assets": "^11.12.0",
     "@types/node": "^26.1.1",
     "@types/ws": "^8.18.1",
     "katex": "^0.18.1",

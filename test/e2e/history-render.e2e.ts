@@ -120,10 +120,10 @@ let smallFile = '';
 // auto-restores the previous test's active session. CPU throttling makes the
 // progressive fill reliably span many frames even on fast machines, so the
 // "tail painted before full history" window is wide enough to observe.
-type OpenPageOptions = { forceManualScrollAnchoring?: boolean };
+type OpenPageOptions = { forceManualScrollAnchoring?: boolean; blockServiceWorkers?: boolean };
 
 async function openPage(options: OpenPageOptions = {}) {
-  const context = await browser!.newContext();
+  const context = await browser!.newContext({ serviceWorkers: options.blockServiceWorkers ? 'block' : 'allow' });
   contexts.push(context);
   if (options.forceManualScrollAnchoring) {
     await context.addInitScript(() => {
@@ -248,12 +248,12 @@ after(async () => {
 
 let nestedFixtureNumber = 0;
 
-async function openNestedPage() {
+async function openNestedPage(options: OpenPageOptions = {}) {
   const number = ++nestedFixtureNumber;
   const entries = buildSmallSession(fs.mkdtempSync(path.join(os.tmpdir(), 'tau-e2e-nested-cwd-')));
   entries[0].id = `nested-${number}`;
   const file = writeSession(`nested-${number}.jsonl`, entries);
-  const { page, errors } = await openPage();
+  const { page, errors } = await openPage(options);
   await page.click(sessionItemSelector(file));
   await page.waitForFunction((expected: number) =>
     document.querySelectorAll('#messages > .message').length === expected, B_ROUNDS * 2);
@@ -537,6 +537,132 @@ test('scroll to bottom reaches a large live tool card created off-screen', async
     return el.scrollHeight - el.scrollTop - el.clientHeight < 10;
   }, undefined, { timeout: 5000 });
 
+  await assertNoPageErrors(errors);
+});
+
+test('codemode arguments are safe highlighted JavaScript in live, nested, and reloaded cards', async (t: TestContext) => {
+  if (skipUnlessBrowser(t)) return;
+  const { page, errors, card, broadcast, id, session, finish } = await openNestedPage();
+  const source = '// Read a file.\r\nconst result = await tools.read({ path: "file.txt" });\r\nconst markup = "<img src=x onerror=alert(1)>";\r\nconst fence = "```";\r\n\r\n';
+  const nestedSource = 'const html = "<script>alert(1)</script>";\nreturn await tools.read({ path: "nested.txt" });\n';
+  broadcast({ type: 'tool_execution_start', toolCallId: id, toolName: 'codemode', args: { code: source } });
+  await card.waitFor({ state: 'attached' });
+  const assertSource = async () => {
+    assert.equal(await card.locator('.tool-args code').textContent(), source);
+    assert.ok(await card.locator('.tool-args .hljs-keyword').count() > 0);
+    assert.equal(await card.locator('.tool-args .code-block-header span').textContent(), 'JavaScript');
+    assert.equal(await card.locator('.tool-args img, .tool-args script').count(), 0);
+  };
+  await assertSource();
+  const liveHtml = await card.locator('.tool-args code').innerHTML();
+
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await card.locator('.tool-args .copy-btn').click();
+  await page.waitForFunction(() => document.querySelector('.tool-args .copy-btn')?.textContent === 'Copied!');
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), source);
+  assert.equal(await card.locator('.tool-card-header').getAttribute('aria-expanded'), 'true');
+
+  broadcast({ type: 'tool_execution_start', toolCallId: `${id}/1`, parentToolCallId: id,
+    toolName: 'codemode', args: { code: nestedSource } });
+  const row = card.locator('.nested-call-row');
+  await row.locator('.nested-call-toggle').click();
+  assert.equal(await row.locator('.nested-call-arguments code').textContent(), nestedSource);
+  assert.ok(await row.locator('.hljs-keyword').count() > 0);
+  assert.equal(await row.locator('script').count(), 0);
+  const nestedHtml = await row.locator('code').innerHTML();
+  const codeNode = await row.locator('code').elementHandle();
+  broadcast({ type: 'tool_execution_end', toolCallId: `${id}/1`, parentToolCallId: id,
+    toolName: 'codemode', result: { content: [], details: {} }, isError: false });
+  await page.waitForFunction((root: string) =>
+    document.querySelector(`.tool-card[data-tool-call-id="${root}"] .nested-call-status`)?.textContent === 'succeeded', id);
+  assert.equal(await row.locator('code').evaluate((current, previous) => current === previous, codeNode), true,
+    'status updates keep the same highlighted source node');
+
+  const result = finish({ complete: true, calls: [
+    { id: `${id}/1`, name: 'codemode', arguments: { code: nestedSource }, status: 'ok', durationMs: 3 },
+  ] }, 'Plain tool output <script>');
+  session.entries.push(
+    { type: 'message', message: { role: 'assistant', content: [{ type: 'toolCall', id, name: 'codemode', arguments: { code: source } }] } },
+    { type: 'message', message: result },
+  );
+  await page.reload();
+  await card.waitFor({ state: 'attached' });
+  await card.locator('.tool-card-header').click();
+  await assertSource();
+  assert.equal(await card.locator('.tool-args code').innerHTML(), liveHtml);
+  assert.equal(await card.locator('.tool-output').textContent(), 'Plain tool output <script>');
+  await card.locator('.nested-calls-toggle').click();
+  await row.locator('.nested-call-toggle').click();
+  assert.equal(await row.locator('code').innerHTML(), nestedHtml);
+  await row.locator('.copy-btn').click();
+  await page.waitForFunction(() => document.querySelector('.nested-call-details .copy-btn')?.textContent === 'Copied!');
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), nestedSource);
+  assert.equal(await row.locator('.nested-call-toggle').getAttribute('aria-expanded'), 'true');
+
+  const keyword = card.locator('.tool-args .hljs-keyword').first();
+  await page.evaluate(() => document.documentElement.dataset.theme = 'night');
+  const darkColor = await keyword.evaluate(element => getComputedStyle(element).color);
+  await page.evaluate(() => document.documentElement.dataset.theme = 'clean');
+  const lightColor = await keyword.evaluate(element => getComputedStyle(element).color);
+  assert.notEqual(lightColor, darkColor);
+  assert.notEqual(lightColor, await card.locator('.tool-args code').evaluate(element => getComputedStyle(element).color));
+  await page.setViewportSize({ width: 360, height: 740 });
+  assert.equal(await card.evaluate(element => element.scrollWidth <= element.clientWidth), true);
+  await assertNoPageErrors(errors);
+});
+
+test('codemode source stays readable and safe when highlighting assets cannot load', async (t: TestContext) => {
+  if (skipUnlessBrowser(t)) return;
+  const { page, errors, card, broadcast, id } = await openNestedPage({ blockServiceWorkers: true });
+  await page.route('**/vendor/highlight/*.js', route => route.abort());
+  await page.reload();
+  await page.waitForFunction((count: number) =>
+    document.querySelectorAll('#messages > .message').length === count, B_ROUNDS * 2);
+  const source = 'const html = "<img src=x onerror=alert(1)>";\nreturn "```";\n';
+  broadcast({ type: 'tool_execution_start', toolCallId: id, toolName: 'codemode', args: { code: source } });
+  await card.waitFor({ state: 'attached' });
+  assert.equal(await card.locator('.tool-args code').textContent(), source);
+  assert.equal(await card.locator('.tool-args code span, .tool-args img').count(), 0);
+  await assertNoPageErrors(errors);
+});
+
+test('codemode argument fallbacks preserve JSON, empty code, and omitted nested notices', async (t: TestContext) => {
+  if (skipUnlessBrowser(t)) return;
+  const { page, errors } = await openPage();
+  const results = await page.evaluate(async () => {
+    const { ToolCardRenderer } = await import(new URL('/tool-card.js', location.href).href);
+    const host = document.createElement('div');
+    document.getElementById('messages')!.appendChild(host);
+    const renderer = new ToolCardRenderer(host);
+    const cases = [
+      { toolCallId: 'missing-code', toolName: 'codemode', args: { path: 'file.txt' } },
+      { toolCallId: 'invalid-code', toolName: 'codemode', args: { code: 42 } },
+      { toolCallId: 'empty-code', toolName: 'codemode', args: { code: '' } },
+      { toolCallId: 'ordinary-tool', toolName: 'write', args: { code: 'const value = 1;' } },
+      { toolCallId: 'edit-diff', toolName: 'edit', args: { oldText: 'old', newText: 'new' } },
+    ];
+    const rendered = cases.map(execution => {
+      const card = renderer.createToolCard({ ...execution, status: 'pending' });
+      const history = renderer.createHistoryCard({ ...execution, toolCallId: `${execution.toolCallId}-history` });
+      return [card, history].map(element => ({
+        args: element.querySelector('.tool-args')?.textContent,
+        code: element.querySelector('code')?.textContent,
+        diff: element.querySelector('.tool-diff')?.textContent,
+      }));
+    });
+    renderer.reconcileToolResult('missing-code', { nestedCalls: { complete: false, calls: [
+      { id: 'omitted', name: 'codemode', argumentsBytes: 100, status: 'ok' },
+      { id: 'empty', name: 'codemode', arguments: {}, status: 'ok' },
+    ] } }, false);
+    for (const button of host.querySelectorAll<HTMLButtonElement>('.nested-call-toggle')) button.click();
+    return { rendered, nested: Array.from(host.querySelectorAll('.nested-call-arguments'), el => el.textContent) };
+  });
+  for (const view of results.rendered[0]) assert.equal(view.args, JSON.stringify({ path: 'file.txt' }, null, 2));
+  for (const view of results.rendered[1]) assert.equal(view.args, JSON.stringify({ code: 42 }, null, 2));
+  for (const view of results.rendered[2]) assert.equal(view.code, '');
+  for (const view of results.rendered[3]) assert.equal(view.args, JSON.stringify({ code: 'const value = 1;' }, null, 2));
+  for (const view of results.rendered[4]) assert.equal(view.diff, '- old+ new');
+  assert.deepEqual(results.nested, ['Arguments omitted (100 bytes)', '{}']);
   await assertNoPageErrors(errors);
 });
 

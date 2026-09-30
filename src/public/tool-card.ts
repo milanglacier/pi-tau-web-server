@@ -3,6 +3,7 @@
  */
 
 import { NestedToolCallsModel } from './nested-tool-calls.js';
+import { createJavaScriptCodeBlock } from './javascript-code-block.js';
 import type { NestedCallSummary, NestedCallsRecord, NestedCallsSummary } from './nested-tool-calls.js';
 
 export type ToolArgs = Record<string, unknown>;
@@ -12,6 +13,7 @@ type CallsRow = {
   toggle: HTMLButtonElement;
   call: NestedCallSummary;
   details?: HTMLElement;
+  argumentsKey?: string;
 };
 
 type CallsView = {
@@ -77,7 +79,6 @@ export class ToolCardRenderer {
     card.dataset.toolCallId = String(toolCallId || '');
 
     const argsPreview = this.getArgsPreview(String(toolName || ''), args);
-    const argsJson = this.formatJson(args);
     const isExpanded = this.allChoice ?? (status === 'streaming' || status === 'pending');
 
     const isEdit = (toolName === 'edit' || toolName === 'Edit') && args && (args.oldText || args.old_text) && (args.newText || args.new_text);
@@ -95,19 +96,17 @@ export class ToolCardRenderer {
         </div>
       </div>
       <div class="tool-card-body${isExpanded ? ' expanded' : ''}">
-        ${!isEdit && argsJson ? `<div class="tool-args">${this.escapeHtml(argsJson)}</div>` : ''}
         <div class="tool-output-wrapper">
           <div class="tool-output"></div>
         </div>
       </div>
     `;
 
-    // Insert diff view for Edit tools
-    if (isEdit) {
-      const diffEl = this.renderDiff(String(args.oldText || args.old_text || ''), String(args.newText || args.new_text || ''));
-      const body = card.querySelector('.tool-card-body');
-      if (body) body.insertBefore(diffEl, body.firstChild);
-    }
+    const body = card.querySelector('.tool-card-body')!;
+    const argumentsEl = isEdit
+      ? this.renderDiff(String(args.oldText || args.old_text || ''), String(args.newText || args.new_text || ''))
+      : this.renderArguments(toolName || '', args);
+    if (argumentsEl) body.insertBefore(argumentsEl, body.firstChild);
 
     this.container.appendChild(card);
     this.toolCards.set(id, card);
@@ -257,13 +256,8 @@ export class ToolCardRenderer {
     if (isEdit) {
       body.appendChild(this.renderDiff(String(args.oldText || args.old_text || ''), String(args.newText || args.new_text || '')));
     } else {
-      const argsJson = this.formatJson(args);
-      if (argsJson) {
-        const argsEl = document.createElement('div');
-        argsEl.className = 'tool-args';
-        argsEl.textContent = argsJson;
-        body.appendChild(argsEl);
-      }
+      const argsEl = this.renderArguments(toolName || '', args);
+      if (argsEl) body.appendChild(argsEl);
     }
 
     const outputEl = document.createElement('div');
@@ -389,17 +383,26 @@ export class ToolCardRenderer {
     if (!row.details) {
       row.details = document.createElement('div');
       row.details.className = 'nested-call-details';
-      const args = document.createElement('pre');
-      args.className = 'nested-call-arguments';
       const error = document.createElement('div');
       error.className = 'nested-call-error';
-      row.details.append(args, error);
+      row.details.appendChild(error);
       row.element.appendChild(row.details);
     }
-    const args = row.details.querySelector('.nested-call-arguments')!;
-    const text = this.argumentsText(row.call);
-    if (args.textContent !== text) args.textContent = text;
     const error = row.details.querySelector<HTMLElement>('.nested-call-error')!;
+    const text = this.argumentsText(row.call);
+    const key = JSON.stringify([row.call.name, text]);
+    if (row.argumentsKey !== key) {
+      let args = this.renderArguments(row.call.name, row.call.arguments, 'nested-call-arguments');
+      if (!args) {
+        args = document.createElement('pre');
+        args.textContent = text;
+      }
+      args.classList.add('nested-call-arguments');
+      const previous = row.details.querySelector('.nested-call-arguments');
+      if (previous) previous.replaceWith(args);
+      else row.details.insertBefore(args, error);
+      row.argumentsKey = key;
+    }
     if (error.textContent !== (row.call.error || '')) error.textContent = row.call.error || '';
     error.hidden = !row.call.error;
   }
@@ -537,6 +540,21 @@ export class ToolCardRenderer {
       }
     }
     return '';
+  }
+
+  private renderArguments(toolName: string, args?: ToolArgs, className = 'tool-args'): HTMLElement | undefined {
+    if (toolName === 'codemode' && typeof args?.code === 'string') {
+      const element = document.createElement('div');
+      element.className = `${className} tool-code-args`;
+      element.appendChild(createJavaScriptCodeBlock(args.code));
+      return element;
+    }
+    const text = this.formatJson(args);
+    if (!text) return undefined;
+    const element = document.createElement(className === 'nested-call-arguments' ? 'pre' : 'div');
+    element.className = className;
+    element.textContent = text;
+    return element;
   }
 
   formatJson(obj?: ToolArgs) {

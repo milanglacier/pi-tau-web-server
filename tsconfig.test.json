@@ -13,5 +13,5 @@
     "allowImportingTsExtensions": true,
     "allowJs": true
   },
-  "include": ["test/**/*.ts", "src/pi-extension/**/*.ts"]
+  "include": ["test/**/*.ts", "src/pi-extension/**/*.ts", "src/public/highlight-vendor.d.ts"]
 }

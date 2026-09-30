@@ -1829,6 +1829,41 @@ pre {
   border-radius: 0;
 }
 
+.javascript-code-block {
+  --syntax-comment: #a0a0a0;
+  --syntax-keyword: #c4a7e7;
+  --syntax-string: #9dcc9a;
+  --syntax-number: #e8b982;
+  --syntax-name: #91c9ee;
+}
+
+:root[data-theme="clean"] .javascript-code-block,
+:root[data-theme="terracotta"] .javascript-code-block,
+:root[data-theme="sage"] .javascript-code-block {
+  --syntax-comment: #656565;
+  --syntax-keyword: #773e9b;
+  --syntax-string: #326b38;
+  --syntax-number: #96520c;
+  --syntax-name: #24618c;
+}
+
+.javascript-code-block .hljs-comment { color: var(--syntax-comment); }
+.javascript-code-block .hljs-keyword { color: var(--syntax-keyword); }
+.javascript-code-block .hljs-string,
+.javascript-code-block .hljs-regexp { color: var(--syntax-string); }
+.javascript-code-block .hljs-number,
+.javascript-code-block .hljs-literal { color: var(--syntax-number); }
+.javascript-code-block .hljs-title,
+.javascript-code-block .hljs-built_in,
+.javascript-code-block .hljs-attr,
+.javascript-code-block .hljs-property { color: var(--syntax-name); }
+
+.tool-args.tool-code-args,
+.nested-call-arguments.tool-code-args { white-space: normal; }
+.tool-args.tool-code-args { padding: 0; }
+.tool-args.tool-code-args > .code-block-wrapper { margin: 0; border: 0; border-radius: 0; }
+.javascript-code-block pre { white-space: pre; }
+
 pre code {
   background: none;
   padding: 0;
