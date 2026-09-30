@@ -52,9 +52,12 @@ export class ToolCardRenderer {
   historyCardsExpanded: boolean;
   readonly nestedCalls = new NestedToolCallsModel();
   private roots = new Map<string, ToolExecution>();
+  private liveRoots = new Set<string>();
   private callsViews = new Map<string, CallsView>();
   private expansion = new Map<string, ExpansionChoice>();
   private allChoice: boolean | undefined;
+  private bottomScrollFrame: number | undefined;
+  private bottomScrollTop: number | undefined;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -146,6 +149,7 @@ export class ToolCardRenderer {
     const card = this.toolCards.get(toolCallId);
     if (!card) return;
 
+    const wasFollowing = this.isFollowingBottom();
     // Update status
     const statusElement = card.querySelector('.tool-status');
     if (statusElement) {
@@ -167,10 +171,11 @@ export class ToolCardRenderer {
       this.setBodyExpanded(card, false);
     }
     this.renderNestedCalls(toolCallId);
+    if (summary) this.scrollToBottom(wasFollowing);
   }
 
   /**
-   * Create a pre-collapsed card for session history using DOM methods (no innerHTML)
+   * Create a snapshot card using DOM methods (no innerHTML).
    */
   createHistoryCard(toolExecution: ToolExecution, target: ParentNode = this.container) {
     const { toolCallId, toolName, args } = toolExecution;
@@ -180,7 +185,7 @@ export class ToolCardRenderer {
     if (existing) return existing;
 
     const card = document.createElement('div');
-    card.className = 'tool-card history';
+    card.className = this.liveRoots.has(id) ? 'tool-card' : 'tool-card history';
     card.dataset.toolCallId = String(toolCallId || '');
 
     // Header
@@ -234,8 +239,8 @@ export class ToolCardRenderer {
     headerRight.appendChild(copyBtn);
 
     const status = document.createElement('div');
-    status.className = 'tool-status complete';
-    status.textContent = 'complete';
+    status.className = `tool-status ${toolExecution.status ?? 'complete'}`;
+    status.textContent = toolExecution.status ?? 'complete';
     headerRight.appendChild(status);
 
     header.appendChild(headerRight);
@@ -276,7 +281,7 @@ export class ToolCardRenderer {
   }
 
   /**
-   * Add result to a history card (stays collapsed)
+   * Add a saved result to its card.
    */
   addHistoryResult(toolCallId: string, result: ToolResult, isError: boolean) {
     const card = this.toolCards.get(toolCallId);
@@ -295,6 +300,7 @@ export class ToolCardRenderer {
       outputElement.textContent = this.formatResult(result);
     }
     if (result?.nestedCalls) this.nestedCalls.replace(toolCallId, result.nestedCalls);
+    this.nestedCalls.finish(toolCallId);
     this.renderNestedCalls(toolCallId);
   }
 
@@ -304,14 +310,20 @@ export class ToolCardRenderer {
     const known = this.roots.has(id);
     this.roots.set(id, execution);
     if (!known) {
-      this.nestedCalls.registerRoot(id);
-      for (const owner of this.callsViews.keys()) this.renderNestedCalls(owner);
+      for (const owner of this.nestedCalls.registerRoot(id)) this.renderNestedCalls(owner);
     }
+    if (execution.status === 'complete' || execution.status === 'error') this.nestedCalls.finish(id);
   }
 
   observeNestedCall(event: Parameters<NestedToolCallsModel['observe']>[0]) {
     const owner = this.nestedCalls.observe(event);
-    if (owner) this.renderNestedCalls(owner);
+    if (owner) {
+      this.liveRoots.add(owner);
+      const wasFollowing = this.isFollowingBottom();
+      this.toolCards.get(owner)?.classList.remove('history');
+      this.renderNestedCalls(owner);
+      this.scrollToBottom(wasFollowing);
+    }
   }
 
   reconcileToolResult(toolCallId: string, result: ToolResult, isError: boolean) {
@@ -586,17 +598,26 @@ export class ToolCardRenderer {
     return div.innerHTML;
   }
 
-  scrollToBottom() {
-    if (this.container) {
-      const threshold = 100;
-      const isNear =
-        this.container.scrollHeight - this.container.scrollTop - this.container.clientHeight < threshold;
-      if (isNear) {
-        requestAnimationFrame(() => {
-          this.container.scrollTop = this.container.scrollHeight;
-        });
-      }
-    }
+  private isFollowingBottom() {
+    return this.container.scrollHeight - this.container.scrollTop - this.container.clientHeight < 100 ||
+      (this.bottomScrollFrame !== undefined && Math.abs(this.container.scrollTop - this.bottomScrollTop!) < 1);
+  }
+
+  scrollToBottom(wasFollowing = this.isFollowingBottom()) {
+    if (!wasFollowing) return;
+    if (this.bottomScrollFrame !== undefined) cancelAnimationFrame(this.bottomScrollFrame);
+    const top = this.container.scrollTop;
+    this.bottomScrollTop = top;
+    this.bottomScrollFrame = requestAnimationFrame(() => {
+      this.bottomScrollFrame = undefined;
+      this.bottomScrollTop = undefined;
+      // A reader can scroll away before the next frame.
+      if (Math.abs(this.container.scrollTop - top) >= 1) return;
+      const behavior = this.container.style.scrollBehavior;
+      this.container.style.scrollBehavior = 'auto';
+      this.container.scrollTop = this.container.scrollHeight;
+      this.container.style.scrollBehavior = behavior;
+    });
   }
 
   expandAll() {
@@ -620,9 +641,13 @@ export class ToolCardRenderer {
   }
 
   clear() {
+    if (this.bottomScrollFrame !== undefined) cancelAnimationFrame(this.bottomScrollFrame);
+    this.bottomScrollFrame = undefined;
+    this.bottomScrollTop = undefined;
     this.toolCards.forEach((card) => card.remove());
     this.toolCards.clear();
     this.roots.clear();
+    this.liveRoots.clear();
     this.nestedCalls.clear();
     this.callsViews.clear();
     this.expansion.clear();

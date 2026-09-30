@@ -159,7 +159,7 @@ test('buffer omissions remain bounded and do not create unrelated root summaries
   start(model, 'second/1', 'second');
   model.registerRoot('unrelated');
   assert.equal(model.get('unrelated'), undefined);
-  model.registerRoot('second');
+  assert.deepEqual(model.registerRoot('second'), ['second']);
   assert.deepEqual(model.get('second'), { calls: [], complete: false, final: false });
 });
 
@@ -253,6 +253,37 @@ test('finish and settlement mark running calls unfinished while preserving compl
   model.replace('root', { complete: true, calls: [{ id: 'root/1', name: 'read', status: 'ok', durationMs: 30 }] });
   model.finish('root');
   assert.equal(model.get('root')!.complete, true);
+});
+
+test('root registration reports only summaries whose calls change', () => {
+  const model = new NestedToolCallsModel();
+  for (let n = 0; n < 500; n++) model.registerRoot(`past-${n}`);
+  for (let n = 0; n < 500; n++) {
+    model.replace(`past-${n}`, { complete: true, calls: Array.from({ length: 10 }, (_, i) => ({
+      id: `past-${n}/${i + 1}`, name: 'read', status: 'ok', arguments: { path: 'file' },
+    })) });
+  }
+  const before = model.get('past-0');
+  assert.deepEqual(model.registerRoot('unrelated'), []);
+  assert.deepEqual(model.get('past-0'), before);
+  assert.equal(model.get('unrelated'), undefined);
+
+  assert.deepEqual(model.registerRoot('past-0/1'), ['past-0']);
+  assert.equal(model.get('past-0')!.calls.length, 9);
+  assert.equal(model.get('past-0/1'), undefined);
+  start(model, 'buffered/1', 'buffered');
+  assert.deepEqual(model.registerRoot('buffered'), ['buffered']);
+  assert.equal(model.get('buffered')!.calls.length, 1);
+  assert.deepEqual(model.registerRoot('buffered'), []);
+});
+
+test('root registration reports both owners when descendants move', () => {
+  const model = modelWithRoot();
+  start(model, 'root/1');
+  start(model, 'root/1/1', 'root/1');
+  assert.deepEqual(model.registerRoot('root/1'), ['root', 'root/1']);
+  assert.equal(model.get('root'), undefined);
+  assert.equal(model.get('root/1')!.calls[0].id, 'root/1/1');
 });
 
 test('incomplete empty records render a summary and clear removes roots and buffered children', () => {

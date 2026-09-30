@@ -2041,7 +2041,10 @@ function renderHistoryItem(item: HistoryItem, target: ParentNode) {
     messageRenderer.renderAssistantMessage({ content: item.content, usage: item.usage }, false, true, target);
   } else {
     toolCardRenderer.createHistoryCard(
-      { toolCallId: item.toolCallId, toolName: item.toolName, args: item.args },
+      {
+        toolCallId: item.toolCallId, toolName: item.toolName, args: item.args,
+        status: item.result !== undefined ? (item.isError ? 'error' : 'complete') : 'pending',
+      },
       target
     );
     if (item.result !== undefined || item.isError) {
@@ -2056,7 +2059,10 @@ function renderSessionHistory(entries: SessionHistoryEntry[]) {
   console.log(`[History] Rendering ${items.length} items from ${entries.length} entries`);
   for (const item of items) {
     if (item.kind === 'toolCall') {
-      toolCardRenderer.rememberRoot({ toolCallId: item.toolCallId, toolName: item.toolName, args: item.args });
+      toolCardRenderer.rememberRoot({
+        toolCallId: item.toolCallId, toolName: item.toolName, args: item.args,
+        status: item.result !== undefined ? (item.isError ? 'error' : 'complete') : 'pending',
+      });
     }
   }
 

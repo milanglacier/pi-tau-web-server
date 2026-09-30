@@ -918,6 +918,172 @@ test('nested controls work with a keyboard on a narrow screen', async (t: TestCo
   await assertNoPageErrors(errors);
 });
 
+test('unfinished snapshot calls open for live children without reopening completed history', async (t: TestContext) => {
+  if (skipUnlessBrowser(t)) return;
+  const { page, errors, id, card, session, start, end, finish, broadcast } = await openNestedPage();
+  const manual = id + '-manual';
+  const completed = [id + '-old', id + '-saved'];
+  session.entries.push({ type: 'message', message: { role: 'assistant', content: [id, manual, ...completed].map(root => ({
+    type: 'toolCall', id: root, name: 'codemode', arguments: { code: 'snapshot arguments' },
+  })) } });
+  for (const root of completed) {
+    session.entries.push({ type: 'message', message: {
+      role: 'toolResult', toolCallId: root, toolName: 'codemode', content: [], isError: false, timestamp: Date.now(),
+      ...(root.endsWith('-saved') ? { nestedCalls: { complete: true, calls: [{ id: root + '/1', name: 'read', status: 'ok' }] } } : {}),
+    } });
+  }
+  session.isStreaming = true;
+  await page.reload();
+  await card.waitFor({ state: 'attached' });
+  await page.waitForFunction(() => document.querySelectorAll('#messages > .tool-card').length === 4);
+  assert.equal(await card.locator('.tool-card-body.expanded').count(), 0);
+  // Opening and closing the snapshot card records an explicit manual choice.
+  const manualCard = page.locator(`.tool-card[data-tool-call-id="${manual}"]`);
+  await manualCard.locator('.tool-card-header').click();
+  await manualCard.locator('.tool-card-header').click();
+  start('/1', id);
+  broadcast({ type: 'tool_execution_start', toolCallId: manual + '/1', parentToolCallId: manual, toolName: 'read', args: {} });
+  for (const root of completed) {
+    broadcast({ type: 'tool_execution_start', toolCallId: root + '/2', parentToolCallId: root, toolName: 'read', args: {} });
+  }
+  await card.locator('.nested-call-row').waitFor({ state: 'attached' });
+  await manualCard.locator('.nested-call-row').waitFor({ state: 'attached' });
+  assert.equal(await card.locator('.tool-card-body.expanded').count(), 1);
+  assert.equal(await card.locator('.nested-calls-toggle').getAttribute('aria-expanded'), 'true');
+  assert.equal(await card.locator('.tool-status').textContent(), 'pending');
+  assert.equal(await manualCard.locator('.tool-card-body.expanded').count(), 0);
+  end('/1', id, true, 'handled snapshot failure');
+  end('', undefined, false, 'parent result');
+  finish({ complete: true, calls: [{ id: id + '/1', name: 'read', status: 'error', error: 'handled snapshot failure', durationMs: 9 }] });
+  await page.waitForFunction((root: string) =>
+    document.querySelector(`.tool-card[data-tool-call-id="${root}"] .nested-call-duration`)?.textContent === '9 ms', id);
+  assert.equal(await card.locator('.tool-status').textContent(), 'complete');
+  assert.equal(await card.locator('.tool-card-body.expanded').count(), 1);
+  assert.equal(await card.locator('.nested-calls-toggle').getAttribute('aria-expanded'), 'true');
+  assert.match(await card.locator('.nested-calls-indicator').textContent() || '', /1 failed/);
+  for (const [index, root] of completed.entries()) {
+    const old = page.locator(`.tool-card[data-tool-call-id="${root}"]`);
+    assert.equal(await old.locator('.tool-card-body.expanded').count(), 0);
+    assert.equal(await old.locator('.nested-call-row').count(), index);
+  }
+  assert.equal(await page.locator('#messages > .tool-card').count(), 4);
+  await assertNoPageErrors(errors);
+});
+
+test('live children received before a deferred snapshot card still open that card', async (t: TestContext) => {
+  if (skipUnlessBrowser(t)) return;
+  const { page, errors, id, card, session, broadcast, start } = await openNestedPage();
+  session.entries.push({ type: 'message', message: { role: 'assistant', content: [
+    { type: 'toolCall', id, name: 'codemode', arguments: { code: 'deferred root' } },
+  ] } });
+  for (let n = 0; n < 100; n++) session.entries.push({ type: 'message', message: { role: 'user', content: `deferred-padding-${n}` } });
+  await page.addInitScript(() => {
+    const callbacks: IdleRequestCallback[] = [];
+    window.requestIdleCallback = callback => { callbacks.push(callback); return callbacks.length; };
+    Object.assign(window, { finishHistory: () => {
+      while (callbacks.length) callbacks.shift()!({ didTimeout: false, timeRemaining: () => 100 });
+    } });
+  });
+  await page.reload();
+  await page.waitForFunction(() => document.getElementById('messages')?.textContent?.includes('deferred-padding-99'));
+  assert.equal(await card.count(), 0);
+  start('/1', id);
+  broadcast({ type: 'tool_execution_start', toolCallId: id + '-fence', toolName: 'read', args: {} });
+  await page.locator(`.tool-card[data-tool-call-id="${id}-fence"]`).waitFor({ state: 'attached' });
+  await page.evaluate(() => (window as unknown as { finishHistory: () => void }).finishHistory());
+  await card.waitFor({ state: 'attached' });
+  assert.equal(await card.locator('.nested-call-status').textContent(), 'running');
+  assert.equal(await card.locator('.tool-card-body.expanded').count(), 1);
+  assert.equal(await card.locator('.nested-calls-toggle').getAttribute('aria-expanded'), 'true');
+  await assertNoPageErrors(errors);
+});
+
+test('a reader at the bottom follows child rows across small and large live updates', async (t: TestContext) => {
+  if (skipUnlessBrowser(t)) return;
+  const { page, errors, id, card, start } = await openNestedPage();
+  await page.setViewportSize({ width: 800, height: 450 });
+  await page.addStyleTag({ content: '.messages { scroll-behavior: auto !important; }' });
+  start();
+  await card.waitFor({ state: 'attached' });
+  await page.evaluate(() => {
+    const el = document.getElementById('messages')!;
+    el.scrollTop = el.scrollHeight;
+  });
+  for (const count of [1, 2, 30, 31, 32]) {
+    const first = count === 30 ? 3 : count;
+    for (let n = first; n <= count; n++) start(`/${n}`, id);
+    await page.waitForFunction(({ root, count }) =>
+      document.querySelectorAll(`.tool-card[data-tool-call-id="${root}"] .nested-call-row`).length === count, { root: id, count });
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    const gap = await page.evaluate(() => {
+      const el = document.getElementById('messages')!;
+      return el.scrollHeight - el.scrollTop - el.clientHeight;
+    });
+    assert.ok(gap <= 3, `${count} child rows left the reader ${gap} pixels above the bottom`);
+  }
+  assert.equal(await card.locator('.tool-status').textContent(), 'pending');
+  await assertNoPageErrors(errors);
+});
+
+test('pending bottom scrolls respect a reader scroll and conversation clearing', async (t: TestContext) => {
+  if (skipUnlessBrowser(t)) return;
+  const { page, errors } = await openPage();
+  const positions = await page.evaluate(async () => {
+    const { ToolCardRenderer } = await import(new URL('/tool-card.js', location.href).href);
+    const container = document.createElement('div');
+    container.style.cssText = 'position:fixed;top:0;left:0;width:500px;height:200px;overflow:auto;scroll-behavior:auto';
+    const padding = document.createElement('div');
+    padding.style.height = '1000px';
+    container.appendChild(padding);
+    document.body.appendChild(container);
+    const renderer = new ToolCardRenderer(container);
+    renderer.createToolCard({ toolCallId: 'scroll-root', toolName: 'codemode', args: {}, status: 'pending' });
+    const frames = () => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    await frames();
+    container.scrollTop = container.scrollHeight;
+    renderer.observeNestedCall({ type: 'tool_execution_start', toolCallId: 'scroll-root/1', parentToolCallId: 'scroll-root', toolName: 'read', args: {} });
+    container.scrollTop = 0;
+    await frames();
+    const afterReaderScroll = container.scrollTop;
+    container.scrollTop = container.scrollHeight;
+    renderer.observeNestedCall({ type: 'tool_execution_start', toolCallId: 'scroll-root/2', parentToolCallId: 'scroll-root', toolName: 'read', args: {} });
+    renderer.clear();
+    container.replaceChildren(padding);
+    container.scrollTop = 77;
+    await frames();
+    const afterClear = container.scrollTop;
+    container.remove();
+    return { afterReaderScroll, afterClear };
+  });
+  assert.deepEqual(positions, { afterReaderScroll: 0, afterClear: 77 });
+  await assertNoPageErrors(errors);
+});
+
+test('an unrelated live root leaves completed history DOM untouched', async (t: TestContext) => {
+  if (skipUnlessBrowser(t)) return;
+  const { page, errors } = await openPage();
+  await page.click(sessionItemSelector(largeFile));
+  await page.waitForFunction((expected: number) =>
+    document.querySelectorAll('#messages > .message, #messages > .tool-card').length === expected, TOTAL_ITEMS, { timeout: 60000 });
+  await page.evaluate(() => {
+    let mutations = 0;
+    const observer = new MutationObserver(records => { mutations += records.length; });
+    document.querySelectorAll('.tool-card.history').forEach(card => observer.observe(card, {
+      attributes: true, childList: true, characterData: true, subtree: true,
+    }));
+    Object.assign(window, { historyMutationCount: () => { observer.disconnect(); return mutations; } });
+  });
+  const session = liveManager.findBySessionFile(largeFile);
+  const id = 'unrelated-history-root';
+  liveManager.broadcast({ type: 'event', sessionId: session.id, event: {
+    type: 'tool_execution_start', toolCallId: id, toolName: 'codemode', args: {},
+  } satisfies JsonAgentSessionEvent });
+  await page.locator(`.tool-card[data-tool-call-id="${id}"]`).waitFor({ state: 'attached' });
+  assert.equal(await page.evaluate(() => (window as unknown as { historyMutationCount: () => number }).historyMutationCount()), 0);
+  assert.equal(await page.locator('.tool-card.history').count(), Math.ceil(ROUNDS / TOOL_EVERY));
+  await assertNoPageErrors(errors);
+});
+
 test('nested updates do not move a reader scrolled above a live parent', async (t: TestContext) => {
   if (skipUnlessBrowser(t)) return;
   const { page, errors } = await openPage();

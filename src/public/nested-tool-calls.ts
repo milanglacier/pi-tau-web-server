@@ -96,18 +96,22 @@ export class NestedToolCallsModel {
   private pending = collection();
   private pendingDroppedParents = new Set<string>();
 
-  registerRoot(id: string): void {
-    if (this.roots.has(id)) return;
+  registerRoot(id: string): string[] {
+    if (this.roots.has(id)) return [];
+    const changed = new Set<string>();
     const target = collection();
     this.roots.set(id, target);
     // A root definition takes priority over an assumed child with the same ID.
-    for (const source of [this.pending, ...this.roots.values()]) {
+    for (const [sourceId, source] of [[undefined, this.pending], ...this.roots] as const) {
       if (source === target) continue;
+      let removed = false;
       for (const [callId, call] of source.calls) {
         if (callId === id) {
           source.calls.delete(callId);
-        } else if (this.owner(callId) === id) {
+          removed = true;
+        } else if (descendantOf(callId, id) && this.owner(callId) === id) {
           source.calls.delete(callId);
+          removed = true;
           if (call.argumentsBytes !== undefined || call.status === 'unfinished') target.complete = false;
           if (target.calls.size >= MAX_CALLS) {
             target.complete = false;
@@ -120,14 +124,20 @@ export class NestedToolCallsModel {
           target.calls.set(callId, moved);
         }
       }
-      this.recount(source);
+      if (removed) {
+        this.recount(source);
+        if (sourceId !== undefined) changed.add(sourceId);
+      }
     }
     for (const parent of this.pendingDroppedParents) {
       if (parent === id || descendantOf(parent, id)) {
         target.complete = false;
         this.pendingDroppedParents.delete(parent);
+        changed.add(id);
       }
     }
+    if (target.calls.size > 0 || !target.complete) changed.add(id);
+    return [...changed];
   }
 
   observe(event: ExecutionEvent, now = performance.now()): string | undefined {
