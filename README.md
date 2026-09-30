@@ -5,9 +5,11 @@
 Pi Tau Web Server is a fork of [deflating/tau](https://github.com/deflating/tau), forked at
 [`5e2bce39`](https://github.com/deflating/tau/tree/5e2bce39) and rewritten from
 a Pi extension that ran inside the Pi TUI into a standalone Node.js web server.
-Instead of living inside a TUI session, Tau runs one backend process and spawns
-headless `pi --mode rpc` child processes — one per in-page Tau tab — so you can
-work with multiple Pi sessions side by side in your browser.
+The original Tau project was retired on 2026-09-30 and is no longer maintained.
+This fork is under active maintenance and development. Instead of living inside
+a TUI session, Tau runs one backend process and spawns headless `pi --mode rpc`
+child processes — one per in-page Tau tab — so you can work with multiple Pi
+sessions side by side in your browser.
 
 ## Key differences from `5e2bce39`
 
