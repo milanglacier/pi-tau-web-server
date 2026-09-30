@@ -380,7 +380,9 @@ wsClient.addEventListener('rpcEvent', (e: Event) => {
         treeViewController.notifyStreamingChanged(sessionId, !!session.isStreaming);
       }
       if (event.type === 'session_name' && event.name) session.sessionName = event.name;
-      if ((event.message as AppMessage)?.usage) session.contextUsage = { ...(session.contextUsage || {}), usage: (event.message as AppMessage).usage };
+      if ((event.message as AppMessage)?.role === 'assistant' && (event.message as AppMessage)?.usage) {
+        session.contextUsage = { ...(session.contextUsage || {}), usage: (event.message as AppMessage).usage };
+      }
       renderLiveTabs();
     }
     if (sessionId !== activeLiveSessionId || !viewingActiveSession) {
@@ -433,6 +435,7 @@ wsClient.addEventListener('liveSessionUpdated', (e: Event) => {
     settledWhileStopping.delete(detail.id);
     if (detail.id === activeLiveSessionId && viewingActiveSession && detail.isStreaming === false) {
       state.setStreaming(false);
+      toolCardRenderer.settleNestedCalls();
       showTypingIndicator(false);
     }
   }
@@ -755,11 +758,14 @@ newLiveSessionForm?.addEventListener('submit', async (e) => {
 // ═══════════════════════════════════════
 
 function handleRPCEvent(event: AppEvent, sessionId: string | null = null) {
-  if (event.parentToolCallId && (
+  if (event.parentToolCallId !== undefined && (
     event.type === 'tool_execution_start' ||
     event.type === 'tool_execution_update' ||
     event.type === 'tool_execution_end'
-  )) return;
+  )) {
+    toolCardRenderer.observeNestedCall(event);
+    return;
+  }
 
   switch (event.type) {
     case 'agent_start':
@@ -840,6 +846,7 @@ function handleAgentStart() {
 }
 
 function handleAgentSettled() {
+  toolCardRenderer.settleNestedCalls();
   const wasStreaming = state.isStreaming;
   state.setStreaming(false);
   showTypingIndicator(false);
@@ -862,7 +869,17 @@ function handleAgentSettled() {
 
 let currentStreamingThinking = '';
 
+function rememberToolDefinitions(message: AppMessage) {
+  if (message?.role !== 'assistant' || !Array.isArray(message.content)) return;
+  for (const block of message.content) {
+    if (block.type === 'toolCall' && block.id) {
+      toolCardRenderer.rememberRoot({ toolCallId: block.id, toolName: block.name, args: block.arguments });
+    }
+  }
+}
+
 function handleMessageStart(message: AppMessage) {
+  rememberToolDefinitions(message);
   if (message.role === 'assistant') {
     currentStreamingText = '';
     currentStreamingThinking = '';
@@ -901,6 +918,7 @@ function getMessageThinking(message: AppMessage) {
 }
 
 function handleMessageUpdate(event: AppEvent) {
+  if (typeof event.message === 'object') rememberToolDefinitions(event.message);
   const { assistantMessageEvent } = event;
   if (!assistantMessageEvent) return;
 
@@ -927,6 +945,17 @@ function handleMessageUpdate(event: AppEvent) {
 }
 
 function handleMessageEnd(message: AppMessage) {
+  if (message?.role === 'toolResult') {
+    if (message.toolCallId) {
+      toolCardRenderer.reconcileToolResult(message.toolCallId, {
+        content: Array.isArray(message.content) ? message.content : [],
+        nestedCalls: message.nestedCalls,
+      }, message.isError ?? false);
+    }
+    return;
+  }
+  if (message?.role !== 'assistant') return;
+  rememberToolDefinitions(message);
   if (!currentStreamingElement && message?.role === 'assistant') {
     messageRenderer.renderAssistantMessage(message, false, true);
   }
@@ -1465,7 +1494,10 @@ async function reconcileAcceptedPrompt(sessionId: string, queued: QueuedDispatch
     if (idle && (queued.reconcileAfterReconnect || queued.uncertain || !queued.started) && queuedPrompts.get(sessionId) === queued) {
       queuedPrompts.delete(sessionId);
       renderQueuedMessages();
-      if (viewingActiveSession && activeLiveSessionId === sessionId) updateUI();
+      if (viewingActiveSession && activeLiveSessionId === sessionId) {
+        toolCardRenderer.settleNestedCalls();
+        updateUI();
+      }
     }
   } catch {
     // Without an idle acknowledgement, leave the next instruction queued.
@@ -1513,6 +1545,7 @@ function abortActiveSession() {
         session.isStreaming = false;
         if (viewingActiveSession && activeLiveSessionId === sessionId) {
           state.setStreaming(false);
+          toolCardRenderer.settleNestedCalls();
           showTypingIndicator(false);
         }
       }
@@ -1998,6 +2031,7 @@ function clearConversation() {
   cancelHistoryRender();
   messageRenderer.clear();
   toolCardRenderer.clear();
+  state.toolExecutions.clear();
 }
 
 function renderHistoryItem(item: HistoryItem, target: ParentNode) {
@@ -2020,6 +2054,11 @@ function renderSessionHistory(entries: SessionHistoryEntry[]) {
   const token = ++historyRenderToken;
   const { items, totalCost, lastInputTokens: builtInputTokens, lastUsage: builtUsage } = buildHistoryItems(entries);
   console.log(`[History] Rendering ${items.length} items from ${entries.length} entries`);
+  for (const item of items) {
+    if (item.kind === 'toolCall') {
+      toolCardRenderer.rememberRoot({ toolCallId: item.toolCallId, toolName: item.toolName, args: item.args });
+    }
+  }
 
   // Stats come from the pure pre-pass so the context pill is correct
   // immediately, even though the DOM fills in newest-first below.

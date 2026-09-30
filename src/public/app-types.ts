@@ -1,4 +1,5 @@
 import type { DialogRequest } from './dialogs.js';
+import type { NestedCallsRecord } from './nested-tool-calls.js';
 
 export type PendingDialog = DialogRequest & {
   id: string;
@@ -82,6 +83,7 @@ export type AppMessage = {
   images?: PendingImage[];
   toolCallId?: string;
   isError?: boolean;
+  nestedCalls?: NestedCallsRecord;
 };
 
 export type AppEvent = {

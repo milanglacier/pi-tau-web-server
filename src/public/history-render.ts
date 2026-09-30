@@ -109,7 +109,10 @@ export function buildHistoryItems(entries: SessionHistoryEntry[]): HistoryBuildR
       // addHistoryResult() silently ignoring unknown toolCallIds.
       const item = toolCallItems.get(msg.toolCallId ?? '');
       if (item) {
-        item.result = { content: (msg.content as MessageContentBlock[]) || [] };
+        item.result = {
+          content: (msg.content as MessageContentBlock[]) || [],
+          ...(msg.nestedCalls ? { nestedCalls: msg.nestedCalls } : {}),
+        };
         item.isError = msg.isError ?? false;
       }
     }

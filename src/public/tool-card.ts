@@ -2,7 +2,28 @@
  * Tool Card - Renders and updates tool execution cards (collapsible)
  */
 
+import { NestedToolCallsModel } from './nested-tool-calls.js';
+import type { NestedCallSummary, NestedCallsRecord, NestedCallsSummary } from './nested-tool-calls.js';
+
 export type ToolArgs = Record<string, unknown>;
+
+type CallsRow = {
+  element: HTMLElement;
+  toggle: HTMLButtonElement;
+  call: NestedCallSummary;
+  details?: HTMLElement;
+};
+
+type CallsView = {
+  section: HTMLElement;
+  toggle: HTMLButtonElement;
+  list: HTMLElement;
+  notice: HTMLElement;
+  indicator: HTMLElement;
+  rows: Map<string, CallsRow>;
+};
+
+type ExpansionChoice = { body?: boolean; calls?: boolean };
 
 export type ToolExecution = {
   toolCallId?: string;
@@ -21,6 +42,7 @@ type ToolResultBlock = {
 
 export type ToolResult = {
   content?: ToolResultBlock[];
+  nestedCalls?: NestedCallsRecord;
   [key: string]: unknown;
 };
 
@@ -28,6 +50,11 @@ export class ToolCardRenderer {
   container: HTMLElement;
   toolCards: Map<string, HTMLElement>;
   historyCardsExpanded: boolean;
+  readonly nestedCalls = new NestedToolCallsModel();
+  private roots = new Map<string, ToolExecution>();
+  private callsViews = new Map<string, CallsView>();
+  private expansion = new Map<string, ExpansionChoice>();
+  private allChoice: boolean | undefined;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -37,6 +64,10 @@ export class ToolCardRenderer {
 
   createToolCard(toolExecution: ToolExecution) {
     const { toolCallId, toolName, args, status } = toolExecution;
+    const id = String(toolCallId || '');
+    this.rememberRoot(toolExecution);
+    const existing = this.toolCards.get(id);
+    if (existing) return existing;
 
     const card = document.createElement('div');
     card.className = 'tool-card';
@@ -44,12 +75,12 @@ export class ToolCardRenderer {
 
     const argsPreview = this.getArgsPreview(String(toolName || ''), args);
     const argsJson = this.formatJson(args);
-    const isExpanded = (status === 'streaming' || status === 'pending');
+    const isExpanded = this.allChoice ?? (status === 'streaming' || status === 'pending');
 
     const isEdit = (toolName === 'edit' || toolName === 'Edit') && args && (args.oldText || args.old_text) && (args.newText || args.new_text);
 
     card.innerHTML = `
-      <div class="tool-card-header" onclick="this.parentElement.querySelector('.tool-card-body').classList.toggle('expanded'); this.querySelector('.tool-card-chevron').classList.toggle('expanded')">
+      <div class="tool-card-header">
         <div class="tool-header-left">
           <span class="tool-card-chevron${isExpanded ? ' expanded' : ''}"><svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor"><path d="M2 1l4 3-4 3z"/></svg></span>
           <span class="tool-name">${this.escapeHtml(toolName || '')}</span>
@@ -76,7 +107,9 @@ export class ToolCardRenderer {
     }
 
     this.container.appendChild(card);
-    this.toolCards.set(String(toolCallId || ''), card);
+    this.toolCards.set(id, card);
+    this.bindHeader(id, card);
+    this.renderNestedCalls(id);
     this.scrollToBottom();
 
     return card;
@@ -97,11 +130,8 @@ export class ToolCardRenderer {
     }
 
     // Auto-expand when streaming
-    if (toolExecution.status === 'streaming') {
-      const body = card.querySelector('.tool-card-body');
-      const chevron = card.querySelector('.tool-card-chevron');
-      if (body) body.classList.add('expanded');
-      if (chevron) chevron.classList.add('expanded');
+    if (toolExecution.status === 'streaming' && this.choice(String(toolExecution.toolCallId || '')).body === undefined) {
+      this.setBodyExpanded(card, true);
     }
 
     // Update output
@@ -131,13 +161,12 @@ export class ToolCardRenderer {
       outputElement.textContent = output;
     }
 
-    // Collapse completed cards (less noise)
-    if (!isError) {
-      const body = card.querySelector('.tool-card-body');
-      const chevron = card.querySelector('.tool-card-chevron');
-      if (body) body.classList.remove('expanded');
-      if (chevron) chevron.classList.remove('expanded');
+    this.nestedCalls.finish(toolCallId);
+    const summary = this.nestedCalls.get(toolCallId);
+    if (!isError && this.isClean(summary) && this.choice(toolCallId).body === undefined) {
+      this.setBodyExpanded(card, false);
     }
+    this.renderNestedCalls(toolCallId);
   }
 
   /**
@@ -145,6 +174,10 @@ export class ToolCardRenderer {
    */
   createHistoryCard(toolExecution: ToolExecution, target: ParentNode = this.container) {
     const { toolCallId, toolName, args } = toolExecution;
+    const id = String(toolCallId || '');
+    this.rememberRoot(toolExecution);
+    const existing = this.toolCards.get(id);
+    if (existing) return existing;
 
     const card = document.createElement('div');
     card.className = 'tool-card history';
@@ -207,12 +240,6 @@ export class ToolCardRenderer {
 
     header.appendChild(headerRight);
 
-    // Toggle expand on click
-    header.addEventListener('click', () => {
-      body.classList.toggle('expanded');
-      chevron.classList.toggle('expanded');
-    });
-
     card.appendChild(header);
 
     // Body is collapsed by default unless Expand All was invoked while
@@ -241,7 +268,9 @@ export class ToolCardRenderer {
     card.appendChild(body);
 
     target.appendChild(card);
-    this.toolCards.set(String(toolCallId || ''), card);
+    this.toolCards.set(id, card);
+    this.bindHeader(id, card);
+    this.renderNestedCalls(id);
 
     return card;
   }
@@ -265,6 +294,218 @@ export class ToolCardRenderer {
     if (outputElement && result) {
       outputElement.textContent = this.formatResult(result);
     }
+    if (result?.nestedCalls) this.nestedCalls.replace(toolCallId, result.nestedCalls);
+    this.renderNestedCalls(toolCallId);
+  }
+
+  rememberRoot(execution: ToolExecution) {
+    const id = execution.toolCallId;
+    if (!id) return;
+    const known = this.roots.has(id);
+    this.roots.set(id, execution);
+    if (!known) {
+      this.nestedCalls.registerRoot(id);
+      for (const owner of this.callsViews.keys()) this.renderNestedCalls(owner);
+    }
+  }
+
+  observeNestedCall(event: Parameters<NestedToolCallsModel['observe']>[0]) {
+    const owner = this.nestedCalls.observe(event);
+    if (owner) this.renderNestedCalls(owner);
+  }
+
+  reconcileToolResult(toolCallId: string, result: ToolResult, isError: boolean) {
+    if (!this.toolCards.has(toolCallId)) {
+      const root = this.roots.get(toolCallId);
+      if (!root) return;
+      this.createToolCard({ ...root, status: 'complete' });
+    }
+    if (result.nestedCalls) this.nestedCalls.replace(toolCallId, result.nestedCalls);
+    this.finalizeToolCard(toolCallId, result, isError);
+  }
+
+  settleNestedCalls() {
+    for (const id of this.nestedCalls.settle()) this.renderNestedCalls(id);
+  }
+
+  private choice(id: string): ExpansionChoice {
+    return this.expansion.get(id) ?? { body: this.allChoice, calls: this.allChoice };
+  }
+
+  private setBodyExpanded(card: HTMLElement, expanded: boolean) {
+    card.querySelector('.tool-card-body')?.classList.toggle('expanded', expanded);
+    card.querySelector('.tool-card-chevron')?.classList.toggle('expanded', expanded);
+    card.querySelector('.tool-card-header')?.setAttribute('aria-expanded', String(expanded));
+  }
+
+  private bindHeader(id: string, card: HTMLElement) {
+    const header = card.querySelector<HTMLElement>('.tool-card-header')!;
+    header.tabIndex = 0;
+    header.setAttribute('role', 'button');
+    header.setAttribute('aria-label', `Toggle ${this.roots.get(id)?.toolName || 'tool'} details`);
+    this.setBodyExpanded(card, !!card.querySelector('.tool-card-body.expanded'));
+    const toggle = () => {
+      const open = !card.querySelector('.tool-card-body.expanded');
+      this.expansion.set(id, { ...this.choice(id), body: open });
+      this.setBodyExpanded(card, open);
+    };
+    header.addEventListener('click', toggle);
+    header.addEventListener('keydown', event => {
+      if (event.target === header && (event.key === 'Enter' || event.key === ' ')) {
+        event.preventDefault();
+        toggle();
+      }
+    });
+  }
+
+  private setText(element: Element, text: string) {
+    if (element.textContent !== text) element.textContent = text;
+  }
+
+  private isClean(summary?: NestedCallsSummary) {
+    return !summary || summary.calls.every(call => call.status === 'ok');
+  }
+
+  private argumentsText(call: NestedCallSummary) {
+    if (call.arguments === undefined) {
+      return `Arguments omitted${call.argumentsBytes !== undefined ? ` (${call.argumentsBytes} bytes)` : ''}`;
+    }
+    return JSON.stringify(call.arguments, null, 2);
+  }
+
+  private updateDetails(row: CallsRow) {
+    if (!row.details) {
+      row.details = document.createElement('div');
+      row.details.className = 'nested-call-details';
+      const args = document.createElement('pre');
+      args.className = 'nested-call-arguments';
+      const error = document.createElement('div');
+      error.className = 'nested-call-error';
+      row.details.append(args, error);
+      row.element.appendChild(row.details);
+    }
+    const args = row.details.querySelector('.nested-call-arguments')!;
+    const text = this.argumentsText(row.call);
+    if (args.textContent !== text) args.textContent = text;
+    const error = row.details.querySelector<HTMLElement>('.nested-call-error')!;
+    if (error.textContent !== (row.call.error || '')) error.textContent = row.call.error || '';
+    error.hidden = !row.call.error;
+  }
+
+  private renderNestedCalls(id: string) {
+    const card = this.toolCards.get(id);
+    const summary = this.nestedCalls.get(id);
+    if (!card) return;
+    if (!summary || (summary.complete && summary.calls.length === 0)) {
+      const view = this.callsViews.get(id);
+      view?.section.remove();
+      view?.indicator.remove();
+      this.callsViews.delete(id);
+      return;
+    }
+    const history = card.classList.contains('history');
+    let view = this.callsViews.get(id);
+    if (!view) {
+      const section = document.createElement('div');
+      section.className = 'nested-calls';
+      const toggle = document.createElement('button');
+      toggle.className = 'nested-calls-toggle';
+      toggle.type = 'button';
+      const list = document.createElement('div');
+      list.className = 'nested-calls-list';
+      const notice = document.createElement('div');
+      notice.className = 'nested-calls-notice';
+      section.append(toggle, list, notice);
+      const body = card.querySelector('.tool-card-body')!;
+      body.insertBefore(section, body.querySelector('.tool-output-wrapper, .tool-output'));
+      const indicator = document.createElement('span');
+      indicator.className = 'nested-calls-indicator';
+      card.querySelector('.tool-header-left')!.appendChild(indicator);
+      view = { section, toggle, list, notice, indicator, rows: new Map() };
+      this.callsViews.set(id, view);
+      const current = view;
+      toggle.addEventListener('click', () => {
+        const open = toggle.getAttribute('aria-expanded') !== 'true';
+        this.expansion.set(id, { ...this.choice(id), calls: open });
+        toggle.setAttribute('aria-expanded', String(open));
+        current.list.hidden = !open;
+        current.notice.hidden = !open || !current.notice.textContent;
+      });
+    }
+
+    const labels = { ok: 'succeeded', error: 'failed', running: 'running', unfinished: 'unfinished' };
+    const counts = (Object.keys(labels) as Array<keyof typeof labels>)
+      .map(status => ({ status, count: summary.calls.filter(call => call.status === status).length }))
+      .filter(({ count }) => count > 0)
+      .map(({ status, count }) => `${count} ${labels[status]}`).join(', ');
+    const caption = `Calls · ${counts || '0 retained'}${summary.complete ? '' : ' · incomplete'}`;
+    this.setText(view.toggle, caption);
+    this.setText(view.indicator, caption);
+    view.indicator.classList.toggle('has-failure', summary.calls.some(call => call.status === 'error'));
+    view.indicator.classList.toggle('has-unfinished', summary.calls.some(call => call.status === 'unfinished'));
+    this.setText(view.notice, summary.final
+      ? (summary.complete ? '' : 'Incomplete record: calls or arguments may be omitted, or calls may be unfinished. Counts describe retained calls only.')
+      : `Observed calls only. Calls that started before this browser attached may be missing.${summary.complete ? '' : ' Some calls or arguments were omitted, or calls are unfinished.'}`);
+
+    const retained = new Set(summary.calls.map(call => call.id));
+    for (const [callId, row] of view.rows) {
+      if (!retained.has(callId)) {
+        row.element.remove();
+        view.rows.delete(callId);
+      }
+    }
+    let previous: HTMLElement | null = null;
+    for (const call of summary.calls) {
+      let row = view.rows.get(call.id);
+      if (!row) {
+        const element = document.createElement('div');
+        element.className = 'nested-call-row';
+        element.dataset.callId = call.id;
+        const toggle = document.createElement('button');
+        toggle.className = 'nested-call-toggle';
+        toggle.type = 'button';
+        toggle.setAttribute('aria-expanded', 'false');
+        for (const className of ['name', 'preview', 'status', 'duration']) {
+          const span = document.createElement('span');
+          span.className = `nested-call-${className}`;
+          toggle.appendChild(span);
+        }
+        element.appendChild(toggle);
+        row = { element, toggle, call };
+        view.rows.set(call.id, row);
+        const current = row;
+        toggle.addEventListener('click', () => {
+          const open = toggle.getAttribute('aria-expanded') !== 'true';
+          toggle.setAttribute('aria-expanded', String(open));
+          if (open) this.updateDetails(current);
+          if (current.details) current.details.hidden = !open;
+        });
+      }
+      row.call = call;
+      row.element.style.setProperty('--call-depth', String(Math.min(call.depth, 3)));
+      row.element.dataset.status = call.status;
+      this.setText(row.toggle.querySelector('.nested-call-name')!, call.name);
+      this.setText(row.toggle.querySelector('.nested-call-preview')!, call.arguments === undefined
+        ? this.argumentsText(call) : this.getArgsPreview(call.name, call.arguments));
+      this.setText(row.toggle.querySelector('.nested-call-status')!, labels[call.status]);
+      this.setText(row.toggle.querySelector('.nested-call-duration')!, call.durationMs === undefined ? '' : `${call.durationMs} ms`);
+      row.toggle.setAttribute('aria-label', `${call.name}: ${labels[call.status]}. Toggle arguments and error`);
+      if (row.toggle.getAttribute('aria-expanded') === 'true') this.updateDetails(row);
+      const next: ChildNode | null = previous ? previous.nextSibling : view.list.firstChild;
+      if (next !== row.element) view.list.insertBefore(row.element, next);
+      previous = row.element;
+    }
+
+    const status = card.querySelector('.tool-status')?.textContent;
+    const completed = status === 'complete' || status === 'error';
+    const clean = completed && status === 'complete' && this.isClean(summary);
+    const autoOpen = !history && !clean;
+    const choice = this.choice(id);
+    const open = choice.calls ?? (history ? this.historyCardsExpanded : autoOpen);
+    view.toggle.setAttribute('aria-expanded', String(open));
+    view.list.hidden = !open;
+    view.notice.hidden = !open || !view.notice.textContent;
+    if (choice.body === undefined && !history) this.setBodyExpanded(card, autoOpen);
   }
 
   /** Compact preview for the header line */
@@ -335,7 +576,8 @@ export class ToolCardRenderer {
         .join('\n');
     }
 
-    return JSON.stringify(result, null, 2);
+    const { nestedCalls: _nestedCalls, ...output } = result;
+    return JSON.stringify(output, null, 2);
   }
 
   escapeHtml(text: unknown) {
@@ -359,23 +601,32 @@ export class ToolCardRenderer {
 
   expandAll() {
     this.historyCardsExpanded = true;
-    this.toolCards.forEach(card => {
-      card.querySelector('.tool-card-body')?.classList.add('expanded');
-      card.querySelector('.tool-card-chevron')?.classList.add('expanded');
+    this.allChoice = true;
+    this.toolCards.forEach((card, id) => {
+      this.expansion.set(id, { body: true, calls: true });
+      this.setBodyExpanded(card, true);
+      this.renderNestedCalls(id);
     });
   }
 
   collapseAll() {
     this.historyCardsExpanded = false;
-    this.toolCards.forEach(card => {
-      card.querySelector('.tool-card-body')?.classList.remove('expanded');
-      card.querySelector('.tool-card-chevron')?.classList.remove('expanded');
+    this.allChoice = false;
+    this.toolCards.forEach((card, id) => {
+      this.expansion.set(id, { body: false, calls: false });
+      this.setBodyExpanded(card, false);
+      this.renderNestedCalls(id);
     });
   }
 
   clear() {
     this.toolCards.forEach((card) => card.remove());
     this.toolCards.clear();
+    this.roots.clear();
+    this.nestedCalls.clear();
+    this.callsViews.clear();
+    this.expansion.clear();
+    this.allChoice = undefined;
     this.historyCardsExpanded = false;
   }
 }

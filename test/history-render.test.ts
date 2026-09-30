@@ -123,6 +123,36 @@ test('multiple toolCalls in one assistant message each get their own result', ()
   assert.equal(byId.get('b')!.isError, false);
 });
 
+test('nested records stay paired with their own parent without adding history items', () => {
+  const first = {
+    complete: true,
+    calls: [{ id: 'a/1', name: 'read', arguments: { path: '/a' }, status: 'ok', durationMs: 12 }],
+  };
+  const second = { complete: false, calls: [] };
+  const { items } = buildHistoryItems([
+    msg({ role: 'assistant', content: [
+      { type: 'toolCall', id: 'a', name: 'codemode', arguments: { code: 'a()' } },
+      { type: 'toolCall', id: 'b', name: 'codemode', arguments: { code: 'b()' } },
+    ] }),
+    msg({ role: 'toolResult', toolCallId: 'b', content: [], nestedCalls: second }),
+    msg({ role: 'toolResult', toolCallId: 'a', content: [{ type: 'text', text: 'parent output' }], nestedCalls: first }),
+  ]);
+  assert.equal(items.length, 2);
+  assert.deepEqual(items.map((item: { kind: string }) => item.kind), ['toolCall', 'toolCall']);
+  assert.deepEqual(items[0].result, { content: [{ type: 'text', text: 'parent output' }], nestedCalls: first });
+  assert.deepEqual(items[1].result, { content: [], nestedCalls: second });
+});
+
+test('tool-result usage is separate from assistant usage', () => {
+  const { totalCost, lastInputTokens, lastUsage } = buildHistoryItems([
+    msg({ role: 'assistant', content: [{ type: 'toolCall', id: 'a', name: 'codemode', arguments: {} }] }),
+    msg({ role: 'toolResult', toolCallId: 'a', content: [], usage: { input: 999, cost: { total: 12 } } }),
+  ]);
+  assert.equal(totalCost, 0);
+  assert.equal(lastInputTokens, 0);
+  assert.equal(lastUsage, null);
+});
+
 test('unmatched toolResult is dropped without throwing', () => {
   const { items } = buildHistoryItems([
     msg({ role: 'toolResult', toolCallId: 'ghost', content: [{ type: 'text', text: 'orphan' }] }),

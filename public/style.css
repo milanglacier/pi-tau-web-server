@@ -2065,6 +2065,48 @@ body.hide-thinking .thinking-block { display: none !important; }
 .tool-status.error { background: rgba(248, 113, 113, 0.1); color: var(--error); border: 1px solid rgba(248, 113, 113, 0.2); }
 .tool-status.error::before { content: '!'; font-size: 9px; font-weight: 700; }
 
+.nested-calls { padding: 6px 12px; border-bottom: 1px solid var(--border); }
+.nested-calls-toggle, .nested-call-toggle {
+  font: inherit;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+}
+.nested-calls-toggle { padding: 4px 0; width: 100%; font-size: 11px; }
+.nested-calls-toggle::before, .nested-call-toggle::before { content: '▸'; flex-shrink: 0; }
+.nested-calls-toggle[aria-expanded="true"]::before,
+.nested-call-toggle[aria-expanded="true"]::before { content: '▾'; }
+.nested-calls-toggle:focus-visible, .nested-call-toggle:focus-visible,
+.tool-card-header:focus-visible { outline: 2px solid var(--tool-accent); outline-offset: -2px; }
+.nested-calls-indicator {
+  font-size: 10px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.nested-calls-indicator.has-failure, .nested-call-row[data-status="error"] .nested-call-status,
+.nested-call-error { color: var(--error); }
+.nested-calls-indicator.has-unfinished { font-weight: 600; }
+.nested-call-row { margin-left: calc(var(--call-depth, 0) * 10px); }
+.nested-call-toggle { display: flex; align-items: center; gap: 6px; padding: 4px 0; width: 100%; min-width: 0; font-size: 11px; }
+.nested-call-name, .nested-call-preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.nested-call-name { max-width: 30%; font-weight: 600; }
+.nested-call-preview { flex: 1; color: var(--text-dim); }
+.nested-call-status, .nested-call-duration { flex-shrink: 0; font-size: 10px; }
+.nested-call-row[data-status="ok"] .nested-call-status { color: var(--success); }
+.nested-call-details { margin: 2px 0 6px 12px; font-size: 11px; overflow-wrap: anywhere; }
+.nested-call-arguments { margin: 0; font: inherit; white-space: pre-wrap; }
+.nested-calls-notice { padding: 4px 0; color: var(--text-dim); font-size: 11px; }
+@media (max-width: 600px) {
+  .nested-calls { padding: 6px 8px; }
+  .nested-call-row { margin-left: calc(var(--call-depth, 0) * 5px); }
+  .tool-card-header { flex-wrap: wrap; gap: 4px; }
+  .tool-header-left { flex: 1; flex-wrap: wrap; }
+  .nested-calls-indicator { flex-basis: 100%; }
+}
+
 .tool-card-body { display: none; border-top: 1px solid var(--border); }
 .tool-card-body.expanded { display: block; }
 
