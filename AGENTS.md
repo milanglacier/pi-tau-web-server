@@ -75,3 +75,9 @@ When displaying the model in the UI, join them as `provider/id` — which
 naturally produces `openrouter/z-ai/glm-5.2`. When adding a thinking level for
 the model input box, append `:level` to the full string:
 `openrouter/z-ai/glm-5.2:high`.
+
+## End-to-end tests take over 250000 ms, so allow for that
+
+A full `npm run test:e2e` run takes more than 250000 ms. A tool with a shorter
+default timeout will kill it partway, so set the timeout or run it as a
+background command and wait for it to finish.
