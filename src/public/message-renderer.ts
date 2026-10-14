@@ -193,30 +193,21 @@ export class MessageRenderer {
         contentDiv.appendChild(textNode);
       }
       textNode.innerHTML = rendered;
-      // Stash the raw markdown so finalizeStreamingMessage can do a clean
-      // re-render without scraping textContent from already-rendered HTML.
-      textNode.dataset.rawText = content;
     } else {
       contentDiv.innerHTML = rendered;
-      contentDiv.dataset.rawText = content;
     }
     this.scrollToBottom();
   }
 
-  finalizeStreamingMessage(messageElement: HTMLElement, usage: RenderMessage['usage'] | null = null, thinking = '') {
+  /**
+   * Replace the streaming DOM with the final render of `thinking` and the
+   * markdown `text`. The caller passes both, so a message without text ends
+   * with only its thinking block.
+   */
+  finalizeStreamingMessage(messageElement: HTMLElement, usage: RenderMessage['usage'] | null = null, thinking = '', text = '') {
     const contentDiv = messageElement.querySelector('.message-content');
     if (contentDiv) {
       contentDiv.classList.remove('streaming');
-
-      // Recover the raw markdown text we stashed during streaming updates.
-      // Falls back to textContent (which loses formatting markers) only if
-      // the dataset is somehow missing.
-      const streamingText = contentDiv.querySelector('.streaming-text');
-      const rawText =
-        (streamingText && streamingText.dataset.rawText) ||
-        contentDiv.dataset.rawText ||
-        contentDiv.textContent ||
-        '';
 
       // Final render — catches edge cases like code blocks whose closing
       // fence arrived on the very last delta.
@@ -224,7 +215,7 @@ export class MessageRenderer {
       if (thinking) {
         html += this.renderThinkingBlock(thinking);
       }
-      html += renderMarkdown(rawText);
+      html += renderMarkdown(text);
       contentDiv.innerHTML = html;
     }
 

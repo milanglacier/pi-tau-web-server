@@ -978,8 +978,8 @@ function handleMessageEnd(message: AppMessage) {
 
     // Pass usage info for cost display
     const usage = message?.usage || null;
-    // Pass thinking content so finalize can render the thinking block
-    messageRenderer.finalizeStreamingMessage(currentStreamingElement, usage, currentStreamingThinking);
+    // Pass thinking and text so finalize renders each in its own place
+    messageRenderer.finalizeStreamingMessage(currentStreamingElement, usage, currentStreamingThinking, currentStreamingText);
     currentStreamingElement = null;
     currentStreamingThinking = '';
     currentStreamingText = '';
