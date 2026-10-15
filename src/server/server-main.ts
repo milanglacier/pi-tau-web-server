@@ -20,8 +20,9 @@ import type { Stats, Dirent } from 'node:fs';
 import type { Socket } from 'node:net';
 import type { WebSocket as WsType } from 'ws';
 import type { JsonRecord, RpcCommand, RpcResponse, StatusError } from './types.js';
-import { ARGS, AUTH_CONFIGURED, HOST, MIME_TYPES, PI_AGENT_DIR, PORT, SESSIONS_DIR, STATIC_DIR, TAU_SETTINGS, expandHome, loadTauSettings, parseArgs, saveTauSetting } from './config.js';
+import { ARGS, AUTH_CONFIGURED, HOST, MIME_TYPES, PI_AGENT_DIR, PORT, SESSIONS_DIR, STATIC_DIR, TAU_SETTINGS, USER_HOME, expandHome, loadTauSettings, parseArgs, saveTauSetting } from './config.js';
 import { SESSION_COOKIE_NAME, SESSION_REFRESH_THRESHOLD_SECONDS, buildSessionCookie, issueSessionToken, parseCookies, verifySessionToken } from './auth.js';
+import { completeDirectories } from './path-completion.js';
 import { getAvailableModels, modelLabel, normalizeModel, parseModelSpecToModel, parsePiListModels, _clearModelListCacheForTest, _setExecFileForTest } from './model-utils.js';
 import { LiveSessionManager, PiRpcSession, isGenericSessionName, liveManager, makeId, _setSpawnPiForTest } from './sessions.js';
 import { NAVIGATE_COMMAND, NAVIGATION_MARKER_TYPE, flattenTree, isTreeNavigationInProgress, leafDescendsFrom, navigateTree, pathFromRoot, selectNavigationTarget } from './tree.js';
@@ -457,6 +458,10 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
     if (!isSnapshotRoute && req.method === 'DELETE') { liveManager.delete(id, 'closed_by_user').then(() => json(res, 200, { success: true })); return; }
   }
 
+  if (cleanPath === '/api/complete/directories' && req.method === 'GET') {
+    const items = completeDirectories(parsed.searchParams.get('prefix') || '', TAU_SETTINGS.projectsDir || USER_HOME);
+    return json(res, 200, { items });
+  }
   if (cleanPath === '/api/projects' && req.method === 'GET') return serveProjectsList(res);
   if (cleanPath === '/api/sessions' && req.method === 'GET') return serveSessionsList(res);
   if (cleanPath.startsWith('/api/search') && req.method === 'GET') return serveSearch(res, parsed.searchParams.get('q') || '');
