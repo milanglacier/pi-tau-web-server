@@ -3882,14 +3882,14 @@ body.hide-thinking .thinking-block { display: none !important; }
 .new-live-session-overlay {
   position: fixed;
   inset: 0;
-  z-index: 70;
+  z-index: 1000;
   background: rgba(0, 0, 0, 0.28);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
 }
 .new-live-session-modal {
   position: fixed;
-  z-index: 71;
+  z-index: 1001;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
@@ -3901,6 +3901,13 @@ body.hide-thinking .thinking-block { display: none !important; }
   -webkit-backdrop-filter: blur(var(--blur-heavy)) saturate(1.6);
   box-shadow: var(--shadow-lg), var(--shadow-inset);
   overflow: hidden;
+}
+/* On desktop, center the modal over the chat area, not under the sidebar. */
+@media (min-width: 769px) {
+  body:has(#sidebar:not(.collapsed)) .new-live-session-modal {
+    left: calc(50% + var(--sidebar-width) / 2);
+    width: min(520px, calc(100vw - var(--sidebar-width) - 28px));
+  }
 }
 .new-live-session-header {
   display: flex;
