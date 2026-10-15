@@ -187,7 +187,7 @@ Six built-in themes: Dusk (clean neutral dark, default), Dawn (warm blue dark), 
 | `--open`                              |                 Open the URL in the default browser on start |
 | `--port` / `TAU_PORT`                 |                                Server port (default: `3001`) |
 | `--host` / `TAU_HOST`                 |                            Bind address (default: `0.0.0.0`) |
-| `--projects-dir` / `TAU_PROJECTS_DIR` | Directory scanned for project chips in the new-session modal |
+| `--projects-dir` / `TAU_PROJECTS_DIR` | Directory scanned for project chips in the new-session modal; also the base for relative paths typed in the project field |
 
 ### Environment variables
 
