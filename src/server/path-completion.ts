@@ -23,7 +23,7 @@ function isDirectory(dir: string, entry: fs.Dirent): boolean {
 export function completeDirectories(prefix: string, baseDir: string): DirectoryCompletion[] {
   let text = String(prefix || '');
   if (text === '~') text = '~/';
-  if (text.startsWith('~/')) text = path.join(USER_HOME, text.slice(1)) + (text.endsWith('/') ? '/' : '');
+  if (text.startsWith('~/')) text = USER_HOME + text.slice(1);
 
   const slash = text.lastIndexOf('/');
   const dirPart = slash === -1 ? '' : text.slice(0, slash + 1);

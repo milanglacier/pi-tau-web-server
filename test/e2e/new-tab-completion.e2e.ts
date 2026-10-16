@@ -86,6 +86,74 @@ test('typing a project name lists matching directories and Tab fills in the firs
   await page.waitForFunction(() => document.querySelector('.completion-wrap:has(#new-live-session-cwd) .model-item-name')?.textContent === 'src');
 });
 
+test('editing a directory clears displayed suggestions before the next lookup', async (t) => {
+  const page = await openPopup(t);
+  if (!page) return;
+  await page.fill('#new-live-session-cwd', 'alp');
+  await rows(page, 'new-live-session-cwd').first().waitFor();
+
+  const result = await page.evaluate(() => {
+    const input = document.getElementById('new-live-session-cwd') as HTMLInputElement;
+    input.value = 'be';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    input.dispatchEvent(tab);
+    return {
+      value: input.value,
+      interceptedTab: tab.defaultPrevented,
+      rows: input.parentElement!.querySelectorAll('.model-item').length,
+    };
+  });
+  assert.deepEqual(result, { value: 'be', interceptedTab: false, rows: 0 });
+  await rows(page, 'new-live-session-cwd').first().waitFor();
+  assert.deepEqual(await rows(page, 'new-live-session-cwd').locator('.model-item-name').allTextContents(), ['beta']);
+});
+
+test('editing the input aborts pending completion before the debounce ends', async (t) => {
+  const page = await openPopup(t);
+  if (!page) return;
+  const result = await page.evaluate(async () => {
+    const modulePath = '/completion-list.js';
+    const { attachCompletionList } = await import(modulePath);
+    const container = document.createElement('div');
+    const input = document.createElement('input');
+    container.appendChild(input);
+    document.body.appendChild(container);
+    let started!: () => void;
+    const requestStarted = new Promise<void>((resolve) => { started = resolve; });
+    let resolveItems!: (items: Array<{ primary: string; value: string }>) => void;
+    let signal!: AbortSignal;
+    const completion = attachCompletionList({
+      input,
+      debounceMs: 100,
+      getItems(_text: string, requestSignal: AbortSignal) {
+        signal = requestSignal;
+        started();
+        return new Promise((resolve) => { resolveItems = resolve; });
+      },
+    });
+    input.value = 'a';
+    input.dispatchEvent(new Event('input'));
+    await requestStarted;
+    input.value = 'b';
+    input.dispatchEvent(new Event('input'));
+    resolveItems([{ primary: 'alpha', value: 'alpha/' }]);
+    await Promise.resolve();
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', cancelable: true });
+    input.dispatchEvent(tab);
+    const state = {
+      aborted: signal.aborted,
+      value: input.value,
+      interceptedTab: tab.defaultPrevented,
+      rows: container.querySelectorAll('.model-item').length,
+    };
+    completion.close();
+    container.remove();
+    return state;
+  });
+  assert.deepEqual(result, { aborted: true, value: 'b', interceptedTab: false, rows: 0 });
+});
+
 test('Escape closes the directory list without closing the popup', async (t) => {
   const page = await openPopup(t);
   if (!page) return;

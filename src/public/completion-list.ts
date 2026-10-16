@@ -122,16 +122,15 @@ export function attachCompletionList(options: CompletionListOptions) {
   function accept(index: number) {
     const item = items[index];
     if (!item) return;
-    if (timer) clearTimeout(timer);
+    close();
     input.value = item.value;
     input.focus();
     input.setSelectionRange(input.value.length, input.value.length);
     if (continueAfterAccept) refresh();
-    else close();
   }
 
   input.addEventListener('input', () => {
-    if (timer) clearTimeout(timer);
+    close();
     timer = setTimeout(refresh, debounceMs);
   });
 
