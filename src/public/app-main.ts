@@ -6,6 +6,8 @@ import { WebSocketClient } from './websocket-client.js';
 import { StateManager } from './state.js';
 import { MessageRenderer } from './message-renderer.js';
 import { ToolCardRenderer, type ToolExecution, type ToolResult } from './tool-card.js';
+import { attachCompletionList } from './completion-list.js';
+import { modelMeta, modelRef, normalizeModelList, searchModels } from './model-match.js';
 import { DialogHandler, type DialogRequest } from './dialogs.js';
 import { SessionSidebar, type SidebarProject, type SidebarSession } from './session-sidebar.js';
 import { themes, applyTheme, getCurrentTheme } from './themes.js';
@@ -467,8 +469,8 @@ const liveTabAddBtn = document.getElementById('live-tab-add');
 const newLiveSessionOverlay = document.getElementById('new-live-session-overlay');
 const newLiveSessionModal = document.getElementById('new-live-session-modal');
 const newLiveSessionForm = document.getElementById('new-live-session-form');
-const newLiveSessionCwd = document.getElementById('new-live-session-cwd')!;
-const newLiveSessionModel = document.getElementById('new-live-session-model')!;
+const newLiveSessionCwd = document.getElementById('new-live-session-cwd') as HTMLInputElement;
+const newLiveSessionModel = document.getElementById('new-live-session-model') as HTMLInputElement;
 const newLiveSessionProjects = document.getElementById('new-live-session-projects');
 const newLiveSessionSubmit = document.getElementById('new-live-session-submit')!;
 
@@ -709,16 +711,55 @@ async function loadProjectChips() {
   } catch {}
 }
 
+// Model suggestions use the same list and matching as the status-bar model picker.
+let newLiveSessionModels: Array<ModelRecord | string> = [];
+
+async function loadNewLiveSessionModels() {
+  try {
+    const res = await fetch('/api/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'get_available_models', sessionId: null }) });
+    const data = await res.json();
+    if (data.success && data.data?.models) newLiveSessionModels = data.data.models;
+  } catch {}
+}
+
+const cwdCompletion = attachCompletionList({
+  input: newLiveSessionCwd,
+  debounceMs: 100,
+  continueAfterAccept: true,
+  async getItems(text, signal) {
+    const res = await fetch(`/api/complete/directories?prefix=${encodeURIComponent(text)}`, { signal });
+    const data = await res.json();
+    return (data.items || []).map((item: { name: string; path: string }) => ({ primary: item.name, value: `${item.path}/` }));
+  },
+});
+
+const modelCompletion = attachCompletionList({
+  input: newLiveSessionModel,
+  highlightFirst: true,
+  getItems(text) {
+    if (text.includes(':')) return [];
+    return searchModels(normalizeModelList(newLiveSessionModels), text).map((model) => ({
+      primary: model.id,
+      badge: model.provider,
+      meta: modelMeta(model),
+      value: modelRef(model),
+    }));
+  },
+});
+
 function openNewLiveSessionModal() {
   newLiveSessionOverlay?.classList.remove('hidden');
   newLiveSessionModal?.classList.remove('hidden');
   newLiveSessionSubmit.disabled = false;
   if (!newLiveSessionCwd.value) newLiveSessionCwd.value = liveSessions.find(s => s.id === activeLiveSessionId)?.cwd || '';
   loadProjectChips();
+  loadNewLiveSessionModels();
   requestAnimationFrame(() => newLiveSessionCwd?.focus());
 }
 
 function closeNewLiveSessionModal() {
+  cwdCompletion.close();
+  modelCompletion.close();
   newLiveSessionOverlay?.classList.add('hidden');
   newLiveSessionModal?.classList.add('hidden');
 }

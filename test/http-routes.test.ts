@@ -671,3 +671,42 @@ test('GET /api/files filters dotfiles and ignored directories from the listing',
   assert.ok(!names.includes('node_modules'));
   assert.ok(!names.includes('.hidden'));
 });
+
+test('GET /api/complete/directories lists only directories that match the typed name', async () => {
+  const root = path.join(PROJECTS_DIR, 'complete-abs');
+  fs.mkdirSync(path.join(root, 'alpha'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'Alps'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'beta'), { recursive: true });
+  fs.mkdirSync(path.join(root, '.hidden'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'alfile'), '');
+
+  const res = await fetch(`${base}/api/complete/directories?prefix=${encodeURIComponent(root + '/al')}`);
+  assert.equal(res.status, 200);
+  const body = await jsonBody(res);
+  assert.deepEqual(body.items.map((i: { name: string }) => i.name), ['alpha', 'Alps']);
+  assert.equal(body.items[0].path, path.join(root, 'alpha'));
+
+  const all = await jsonBody(await fetch(`${base}/api/complete/directories?prefix=${encodeURIComponent(root + '/')}`));
+  assert.deepEqual(all.items.map((i: { name: string }) => i.name), ['alpha', 'Alps', 'beta']);
+
+  const dot = await jsonBody(await fetch(`${base}/api/complete/directories?prefix=${encodeURIComponent(root + '/.')}`));
+  assert.deepEqual(dot.items.map((i: { name: string }) => i.name), ['.hidden']);
+});
+
+test('GET /api/complete/directories resolves relative text against the projects dir', async () => {
+  fs.mkdirSync(path.join(PROJECTS_DIR, 'relproj-one'), { recursive: true });
+  const body = await jsonBody(await fetch(`${base}/api/complete/directories?prefix=relproj`));
+  assert.deepEqual(body.items.map((i: { path: string }) => i.path), [path.join(PROJECTS_DIR, 'relproj-one')]);
+});
+
+test('GET /api/complete/directories returns an empty list for a missing directory', async () => {
+  const res = await fetch(`${base}/api/complete/directories?prefix=${encodeURIComponent('/no/such/dir/x')}`);
+  assert.equal(res.status, 200);
+  assert.deepEqual((await jsonBody(res)).items, []);
+});
+
+test('GET /api/complete/directories expands ~ to the home directory', async () => {
+  const body = await jsonBody(await fetch(`${base}/api/complete/directories?prefix=${encodeURIComponent('~/')}`));
+  const home = process.env.HOME || os.homedir();
+  for (const item of body.items) assert.equal(path.dirname(item.path), path.resolve(home));
+});
