@@ -1829,7 +1829,7 @@ pre {
   border-radius: 0;
 }
 
-.javascript-code-block {
+.code-block-wrapper {
   --syntax-comment: #a0a0a0;
   --syntax-keyword: #c4a7e7;
   --syntax-string: #9dcc9a;
@@ -1837,9 +1837,9 @@ pre {
   --syntax-name: #91c9ee;
 }
 
-:root[data-theme="clean"] .javascript-code-block,
-:root[data-theme="terracotta"] .javascript-code-block,
-:root[data-theme="sage"] .javascript-code-block {
+:root[data-theme="clean"] .code-block-wrapper,
+:root[data-theme="terracotta"] .code-block-wrapper,
+:root[data-theme="sage"] .code-block-wrapper {
   --syntax-comment: #656565;
   --syntax-keyword: #773e9b;
   --syntax-string: #326b38;
@@ -1847,22 +1847,24 @@ pre {
   --syntax-name: #24618c;
 }
 
-.javascript-code-block .hljs-comment { color: var(--syntax-comment); }
-.javascript-code-block .hljs-keyword { color: var(--syntax-keyword); }
-.javascript-code-block .hljs-string,
-.javascript-code-block .hljs-regexp { color: var(--syntax-string); }
-.javascript-code-block .hljs-number,
-.javascript-code-block .hljs-literal { color: var(--syntax-number); }
-.javascript-code-block .hljs-title,
-.javascript-code-block .hljs-built_in,
-.javascript-code-block .hljs-attr,
-.javascript-code-block .hljs-property { color: var(--syntax-name); }
+.code-block-wrapper .hljs-comment,
+.code-block-wrapper .hljs-meta { color: var(--syntax-comment); }
+.code-block-wrapper .hljs-keyword { color: var(--syntax-keyword); }
+.code-block-wrapper .hljs-string,
+.code-block-wrapper .hljs-regexp { color: var(--syntax-string); }
+.code-block-wrapper .hljs-number,
+.code-block-wrapper .hljs-literal { color: var(--syntax-number); }
+.code-block-wrapper .hljs-title,
+.code-block-wrapper .hljs-built_in,
+.code-block-wrapper .hljs-variable,
+.code-block-wrapper .hljs-attr,
+.code-block-wrapper .hljs-property { color: var(--syntax-name); }
 
 .tool-args.tool-code-args,
 .nested-call-arguments.tool-code-args { white-space: normal; }
 .tool-args.tool-code-args { padding: 0; }
 .tool-args.tool-code-args > .code-block-wrapper { margin: 0; border: 0; border-radius: 0; }
-.javascript-code-block pre { white-space: pre; }
+.code-block-wrapper pre { white-space: pre; }
 
 pre code {
   background: none;
@@ -2231,6 +2233,15 @@ body.hide-thinking .thinking-block { display: none !important; }
 :root[data-theme="sage"] .diff-added {
   background: rgba(40, 160, 90, 0.08);
   color: #1a8a5a;
+}
+
+.diff-context {
+  color: var(--text-dim);
+}
+
+.diff-separator {
+  border-top: 1px dashed var(--border-hover);
+  margin: 4px 0;
 }
 
 /* ═══════════════════════════════════════════════════════

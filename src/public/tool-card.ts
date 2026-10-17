@@ -3,10 +3,231 @@
  */
 
 import { NestedToolCallsModel } from './nested-tool-calls.js';
-import { createJavaScriptCodeBlock } from './javascript-code-block.js';
+import { createCodeBlock, createJavaScriptCodeBlock } from './javascript-code-block.js';
 import type { NestedCallSummary, NestedCallsRecord, NestedCallsSummary } from './nested-tool-calls.js';
 
 export type ToolArgs = Record<string, unknown>;
+
+export type EditBlock = {
+  oldText: string;
+  newText: string;
+};
+
+export type DiffLine = {
+  type: 'context' | 'removed' | 'added';
+  text: string;
+};
+
+const BASH_KEYS = new Set(['command', 'timeout']);
+const READ_KEYS = new Set(['path', 'file_path', 'offset', 'limit']);
+const WRITE_KEYS = new Set(['path', 'file_path', 'content']);
+const EDIT_TOP_KEYS = new Set(['path', 'file_path', 'edits', 'oldText', 'newText', 'old_text', 'new_text']);
+const EDIT_ITEM_KEYS = new Set(['oldText', 'newText', 'old_text', 'new_text']);
+
+function parseLineNumber(value: unknown): number | undefined {
+  if (typeof value === 'string' && value.trim() !== '') {
+    value = Number(value);
+  }
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** Format finite numbers or numeric strings as a read line range, omitting malformed ranges. */
+export function formatReadLineRange(offset?: unknown, limit?: unknown): string {
+  if (offset == null && limit == null) return '';
+  const start = offset == null ? 1 : parseLineNumber(offset);
+  if (start === undefined) return '';
+  if (limit == null) return `:${start}`;
+  const count = parseLineNumber(limit);
+  if (count === undefined) return '';
+  const end = start + count - 1;
+  return `:${start}${end ? `-${end}` : ''}`;
+}
+
+function normalizeSingleEdit(value: unknown): EditBlock | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const obj = value as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    if (!EDIT_ITEM_KEYS.has(key)) return undefined;
+  }
+  if ('oldText' in obj && typeof obj.oldText !== 'string') return undefined;
+  if ('old_text' in obj && typeof obj.old_text !== 'string') return undefined;
+  if ('newText' in obj && typeof obj.newText !== 'string') return undefined;
+  if ('new_text' in obj && typeof obj.new_text !== 'string') return undefined;
+  const oldText = obj.oldText ?? obj.old_text;
+  const newText = obj.newText ?? obj.new_text;
+  if (typeof oldText !== 'string' || typeof newText !== 'string') return undefined;
+  return { oldText, newText };
+}
+
+/** Normalize edit tool arguments into one or more replacement blocks, or undefined when malformed. */
+export function extractEdits(args?: ToolArgs): EditBlock[] | undefined {
+  if (!args || typeof args !== 'object') return undefined;
+  for (const key of Object.keys(args)) {
+    if (!EDIT_TOP_KEYS.has(key)) return undefined;
+  }
+  if ('path' in args && typeof args.path !== 'string') return undefined;
+  if ('file_path' in args && typeof args.file_path !== 'string') return undefined;
+
+  const edits: EditBlock[] = [];
+  if ('edits' in args && args.edits !== undefined) {
+    let rawEdits: unknown = args.edits;
+    if (typeof rawEdits === 'string') {
+      try {
+        rawEdits = JSON.parse(rawEdits);
+      } catch {
+        return undefined;
+      }
+    }
+    if (Array.isArray(rawEdits)) {
+      for (const item of rawEdits) {
+        const normalized = normalizeSingleEdit(item);
+        if (!normalized) return undefined;
+        edits.push(normalized);
+      }
+    } else {
+      const normalized = normalizeSingleEdit(rawEdits);
+      if (!normalized) return undefined;
+      edits.push(normalized);
+    }
+  }
+
+  const hasLegacy = 'oldText' in args || 'old_text' in args || 'newText' in args || 'new_text' in args;
+  if (hasLegacy) {
+    if ('oldText' in args && typeof args.oldText !== 'string') return undefined;
+    if ('old_text' in args && typeof args.old_text !== 'string') return undefined;
+    if ('newText' in args && typeof args.newText !== 'string') return undefined;
+    if ('new_text' in args && typeof args.new_text !== 'string') return undefined;
+    const oldText = args.oldText ?? args.old_text;
+    const newText = args.newText ?? args.new_text;
+    if (typeof oldText !== 'string' || typeof newText !== 'string') return undefined;
+    edits.push({ oldText, newText });
+  }
+
+  if (edits.length === 0) return undefined;
+  return edits;
+}
+
+/** Compute a line-by-line diff between oldText and newText. */
+export function computeLineDiff(oldText: string, newText: string): DiffLine[] {
+  const oldLines = oldText === '' ? [] : oldText.split('\n');
+  const newLines = newText === '' ? [] : newText.split('\n');
+  let start = 0;
+  while (start < oldLines.length && start < newLines.length && oldLines[start] === newLines[start]) {
+    start++;
+  }
+  let oldEnd = oldLines.length;
+  let newEnd = newLines.length;
+  while (oldEnd > start && newEnd > start && oldLines[oldEnd - 1] === newLines[newEnd - 1]) {
+    oldEnd--;
+    newEnd--;
+  }
+
+  const result: DiffLine[] = [];
+  for (let i = 0; i < start; i++) {
+    result.push({ type: 'context', text: oldLines[i] });
+  }
+
+  const m = oldEnd - start;
+  const n = newEnd - start;
+  if (m === 0) {
+    for (let j = start; j < newEnd; j++) {
+      result.push({ type: 'added', text: newLines[j] });
+    }
+  } else if (n === 0) {
+    for (let i = start; i < oldEnd; i++) {
+      result.push({ type: 'removed', text: oldLines[i] });
+    }
+  } else if (m * n > 250000) {
+    for (let i = start; i < oldEnd; i++) {
+      result.push({ type: 'removed', text: oldLines[i] });
+    }
+    for (let j = start; j < newEnd; j++) {
+      result.push({ type: 'added', text: newLines[j] });
+    }
+  } else {
+    const dp: Uint32Array[] = Array.from({ length: m + 1 }, () => new Uint32Array(n + 1));
+    for (let i = m - 1; i >= 0; i--) {
+      for (let j = n - 1; j >= 0; j--) {
+        if (oldLines[start + i] === newLines[start + j]) {
+          dp[i][j] = dp[i + 1][j + 1] + 1;
+        } else {
+          dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+      }
+    }
+    let i = 0;
+    let j = 0;
+    while (i < m || j < n) {
+      if (i < m && j < n && oldLines[start + i] === newLines[start + j]) {
+        result.push({ type: 'context', text: oldLines[start + i] });
+        i++;
+        j++;
+      } else if (i < m && (j === n || dp[i + 1][j] >= dp[i][j + 1])) {
+        result.push({ type: 'removed', text: oldLines[start + i] });
+        i++;
+      } else {
+        result.push({ type: 'added', text: newLines[start + j] });
+        j++;
+      }
+    }
+  }
+
+  for (let i = oldEnd; i < oldLines.length; i++) {
+    result.push({ type: 'context', text: oldLines[i] });
+  }
+  return result;
+}
+
+function isValidBashArgs(args?: ToolArgs): args is { command: string; timeout?: number | null } {
+  if (!args || typeof args.command !== 'string') return false;
+  for (const key of Object.keys(args)) {
+    if (!BASH_KEYS.has(key)) return false;
+  }
+  if (args.timeout !== undefined && args.timeout !== null) {
+    if (typeof args.timeout !== 'number' || !Number.isFinite(args.timeout)) return false;
+  }
+  return true;
+}
+
+function isValidReadArgs(args?: ToolArgs): boolean {
+  if (!args) return false;
+  for (const key of Object.keys(args)) {
+    if (!READ_KEYS.has(key)) return false;
+  }
+  if ('path' in args && typeof args.path !== 'string') return false;
+  if ('file_path' in args && typeof args.file_path !== 'string') return false;
+  const filePath = args.path ?? args.file_path;
+  if (typeof filePath !== 'string' || filePath.length === 0) return false;
+  if (args.offset !== undefined && args.offset !== null && parseLineNumber(args.offset) === undefined) {
+    return false;
+  }
+  if (args.limit !== undefined && args.limit !== null && parseLineNumber(args.limit) === undefined) {
+    return false;
+  }
+  return true;
+}
+
+function isValidWriteArgs(args?: ToolArgs): args is { content: string; path?: string; file_path?: string } {
+  if (!args || typeof args.content !== 'string') return false;
+  for (const key of Object.keys(args)) {
+    if (!WRITE_KEYS.has(key)) return false;
+  }
+  if ('path' in args && typeof args.path !== 'string') return false;
+  if ('file_path' in args && typeof args.file_path !== 'string') return false;
+  const filePath = args.path ?? args.file_path;
+  return typeof filePath === 'string' && filePath.length > 0;
+}
+
+function getWriteCodeBlockOptions(filePath: string): { language?: 'javascript' | 'bash'; label: string } {
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith('.js') || lower.endsWith('.mjs') || lower.endsWith('.cjs')) {
+    return { language: 'javascript', label: 'JavaScript' };
+  }
+  if (lower.endsWith('.sh') || lower.endsWith('.bash') || lower.endsWith('.zsh')) {
+    return { language: 'bash', label: 'Bash' };
+  }
+  return { label: filePath };
+}
 
 type CallsRow = {
   element: HTMLElement;
@@ -80,8 +301,6 @@ export class ToolCardRenderer {
     const argsPreview = this.getArgsPreview(String(toolName || ''), args);
     const isExpanded = this.allChoice ?? (status === 'streaming' || status === 'pending');
 
-    const isEdit = (toolName === 'edit' || toolName === 'Edit') && args && (args.oldText || args.old_text) && (args.newText || args.new_text);
-
     card.innerHTML = `
       <div class="tool-card-header">
         <div class="tool-header-left">
@@ -102,9 +321,7 @@ export class ToolCardRenderer {
     `;
 
     const body = card.querySelector('.tool-card-body')!;
-    const argumentsEl = isEdit
-      ? this.renderDiff(String(args.oldText || args.old_text || ''), String(args.newText || args.new_text || ''))
-      : this.renderArguments(toolName || '', args);
+    const argumentsEl = this.renderArguments(toolName || '', args);
     if (argumentsEl) body.insertBefore(argumentsEl, body.firstChild);
 
     this.container.appendChild(card);
@@ -250,14 +467,8 @@ export class ToolCardRenderer {
     const body = document.createElement('div');
     body.className = `tool-card-body${this.historyCardsExpanded ? ' expanded' : ''}`;
 
-    const isEdit = (toolName === 'edit' || toolName === 'Edit') && args && (args.oldText || args.old_text) && (args.newText || args.new_text);
-
-    if (isEdit) {
-      body.appendChild(this.renderDiff(String(args.oldText || args.old_text || ''), String(args.newText || args.new_text || '')));
-    } else {
-      const argsEl = this.renderArguments(toolName || '', args);
-      if (argsEl) body.appendChild(argsEl);
-    }
+    const argsEl = this.renderArguments(toolName || '', args);
+    if (argsEl) body.appendChild(argsEl);
 
     const outputEl = document.createElement('div');
     outputEl.className = 'tool-output';
@@ -517,7 +728,17 @@ export class ToolCardRenderer {
   getArgsPreview(toolName: string, args?: ToolArgs) {
     if (!args || Object.keys(args).length === 0) return '';
 
+    const rawPath = typeof args.path === 'string' && args.path.length > 0
+      ? args.path
+      : typeof args.file_path === 'string' && args.file_path.length > 0
+        ? args.file_path
+        : undefined;
+    if ((toolName === 'read' || toolName === 'Read') && rawPath) {
+      return `${rawPath}${formatReadLineRange(args.offset, args.limit)}`;
+    }
+
     // Show the most relevant arg inline
+    if (rawPath) return rawPath;
     if (args.path) return String(args.path);
     if (args.command) return String(args.command).substring(0, 80);
     if (args.query) return String(args.query).substring(0, 60);
@@ -539,6 +760,27 @@ export class ToolCardRenderer {
       element.appendChild(createJavaScriptCodeBlock(args.code));
       return element;
     }
+    if ((toolName === 'bash' || toolName === 'Bash') && isValidBashArgs(args)) {
+      const label = args.timeout != null ? `Bash · timeout ${args.timeout}s` : 'Bash';
+      const element = document.createElement('div');
+      element.className = 'tool-args tool-code-args';
+      element.appendChild(createCodeBlock(args.command, { language: 'bash', label }));
+      return element;
+    }
+    if (toolName === 'edit' || toolName === 'Edit') {
+      const edits = extractEdits(args);
+      if (edits) return this.renderDiff(edits);
+    }
+    if ((toolName === 'read' || toolName === 'Read') && isValidReadArgs(args)) {
+      return undefined;
+    }
+    if ((toolName === 'write' || toolName === 'Write') && isValidWriteArgs(args)) {
+      const filePath = String(args.path ?? args.file_path);
+      const element = document.createElement('div');
+      element.className = 'tool-args tool-code-args';
+      element.appendChild(createCodeBlock(args.content, getWriteCodeBlockOptions(filePath)));
+      return element;
+    }
     const text = this.formatJson(args);
     if (!text) return undefined;
     const element = document.createElement('div');
@@ -557,29 +799,28 @@ export class ToolCardRenderer {
     }
   }
 
-  /** Render a simple inline diff for Edit tool */
-  renderDiff(oldText: string, newText: string) {
+  /** Render an inline diff for the Edit tool */
+  renderDiff(editsOrOldText: EditBlock[] | string, newText = '') {
+    const edits: EditBlock[] = typeof editsOrOldText === 'string'
+      ? [{ oldText: editsOrOldText, newText }]
+      : editsOrOldText;
     const container = document.createElement('div');
     container.className = 'tool-diff';
 
-    const oldLines = oldText.split('\n');
-    const newLines = newText.split('\n');
-
-    // Removed lines
-    for (const line of oldLines) {
-      const el = document.createElement('div');
-      el.className = 'diff-line diff-removed';
-      el.textContent = '- ' + line;
-      container.appendChild(el);
-    }
-
-    // Added lines
-    for (const line of newLines) {
-      const el = document.createElement('div');
-      el.className = 'diff-line diff-added';
-      el.textContent = '+ ' + line;
-      container.appendChild(el);
-    }
+    edits.forEach((edit, index) => {
+      if (index > 0) {
+        const separator = document.createElement('div');
+        separator.className = 'diff-separator';
+        container.appendChild(separator);
+      }
+      for (const line of computeLineDiff(edit.oldText, edit.newText)) {
+        const el = document.createElement('div');
+        el.className = `diff-line diff-${line.type}`;
+        const prefix = line.type === 'removed' ? '- ' : line.type === 'added' ? '+ ' : '  ';
+        el.textContent = prefix + line.text;
+        container.appendChild(el);
+      }
+    });
 
     return container;
   }

@@ -1,27 +1,28 @@
+export type CodeBlockLanguage = 'javascript' | 'bash';
+
+export type CodeBlockOptions = {
+  language?: CodeBlockLanguage;
+  label?: string;
+};
+
 const highlighter = await loadHighlighter();
 
 async function loadHighlighter() {
   try {
-    const [{ default: core }, { default: javascript }] = await Promise.all([
+    const [{ default: core }, { default: javascript }, { default: bash }] = await Promise.all([
       import('./vendor/highlight/core.min.js'),
       import('./vendor/highlight/javascript.min.js'),
+      import('./vendor/highlight/bash.min.js'),
     ]);
     core.registerLanguage('javascript', javascript);
+    core.registerLanguage('bash', bash);
     return core;
   } catch {
     return undefined;
   }
 }
 
-/** Return highlighted HTML, or escaped source when highlighting is unavailable. */
-export function highlightJavaScript(source: string): string {
-  try {
-    if (highlighter) {
-      return highlighter.highlight(source, { language: 'javascript', ignoreIllegals: true }).value;
-    }
-  } catch {
-    // Keep source readable if the highlighter cannot process it.
-  }
+function escapeSource(source: string): string {
   return source
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -30,13 +31,38 @@ export function highlightJavaScript(source: string): string {
     .replace(/'/g, '&#x27;');
 }
 
-export function createJavaScriptCodeBlock(source: string): HTMLElement {
+function highlightSource(source: string, language?: CodeBlockLanguage): string {
+  if (language) {
+    try {
+      if (highlighter) {
+        return highlighter.highlight(source, { language, ignoreIllegals: true }).value;
+      }
+    } catch {
+      // Keep source readable if the highlighter cannot process it.
+    }
+  }
+  return escapeSource(source);
+}
+
+/** Return highlighted HTML, or escaped source when highlighting is unavailable. */
+export function highlightJavaScript(source: string): string {
+  return highlightSource(source, 'javascript');
+}
+
+/** Return highlighted HTML, or escaped source when highlighting is unavailable. */
+export function highlightBash(source: string): string {
+  return highlightSource(source, 'bash');
+}
+
+export function createCodeBlock(source: string, options: CodeBlockOptions = {}): HTMLElement {
+  const { language } = options;
+  const headerLabel = options.label ?? (language === 'javascript' ? 'JavaScript' : language === 'bash' ? 'Bash' : 'Text');
   const wrapper = document.createElement('div');
-  wrapper.className = 'code-block-wrapper javascript-code-block';
+  wrapper.className = language ? `code-block-wrapper ${language}-code-block` : 'code-block-wrapper';
   const header = document.createElement('div');
   header.className = 'code-block-header';
   const label = document.createElement('span');
-  label.textContent = 'JavaScript';
+  label.textContent = headerLabel;
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'copy-btn';
@@ -45,9 +71,9 @@ export function createJavaScriptCodeBlock(source: string): HTMLElement {
 
   const pre = document.createElement('pre');
   const code = document.createElement('code');
-  code.className = 'language-javascript';
+  if (language) code.className = `language-${language}`;
   // Character references preserve carriage returns when HTML is parsed.
-  code.innerHTML = highlightJavaScript(source).replace(/\r/g, '&#13;');
+  code.innerHTML = highlightSource(source, language).replace(/\r/g, '&#13;');
   pre.appendChild(code);
   wrapper.append(header, pre);
 
@@ -80,4 +106,8 @@ export function createJavaScriptCodeBlock(source: string): HTMLElement {
     }, 2000);
   });
   return wrapper;
+}
+
+export function createJavaScriptCodeBlock(source: string): HTMLElement {
+  return createCodeBlock(source, { language: 'javascript', label: 'JavaScript' });
 }

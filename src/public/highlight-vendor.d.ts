@@ -10,3 +10,8 @@ declare module '*vendor/highlight/javascript.min.js' {
   const grammar: (core: unknown) => unknown;
   export default grammar;
 }
+
+declare module '*vendor/highlight/bash.min.js' {
+  const grammar: (core: unknown) => unknown;
+  export default grammar;
+}

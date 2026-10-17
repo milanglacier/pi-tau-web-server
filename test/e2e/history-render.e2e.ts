@@ -640,6 +640,172 @@ test('codemode argument fallbacks preserve JSON, empty code, and omitted nested 
   await assertNoPageErrors(errors);
 });
 
+test('built-in bash, edit, read, and write tool calls render cleanly in live and reloaded history cards with JSON fallbacks', async (t: TestContext) => {
+  if (skipUnlessBrowser(t)) return;
+  const { page, errors, session, broadcast } = await openNestedPage();
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+
+  const bashCmd = '# Check files\nif [ -f "$HOME/.bashrc" ]; then\n  echo "found <script>"\nfi';
+  const writeJsContent = 'const greeting = "hello\\nworld";\nexport default greeting;\n';
+  const writeTxtContent = 'line one\nline two\n<img src=x onerror=alert(1)>';
+  const editBlocks = [
+    {
+      oldText: 'const a = 1;\nconst b = 2;\nconst c = 3;',
+      newText: 'const a = 1;\nconst b = 20;\nconst c = 3;',
+    },
+    {
+      oldText: 'remove me',
+      newText: '',
+    },
+  ];
+
+  const toolCalls = [
+    { id: 'builtin-bash-timeout', name: 'bash', arguments: { command: bashCmd, timeout: 30 } },
+    { id: 'builtin-bash-plain', name: 'bash', arguments: { command: 'echo ok' } },
+    { id: 'builtin-edit-multi', name: 'edit', arguments: { path: 'src/demo.ts', edits: editBlocks } },
+    { id: 'builtin-read-range', name: 'read', arguments: { path: 'src/demo.ts', offset: 10, limit: 25 } },
+    { id: 'builtin-write-js', name: 'write', arguments: { path: 'src/out.js', content: writeJsContent } },
+    { id: 'builtin-write-txt', name: 'write', arguments: { path: 'notes/todo.txt', content: writeTxtContent } },
+  ];
+
+  for (const tc of toolCalls) {
+    broadcast({ type: 'tool_execution_start', toolCallId: tc.id, toolName: tc.name, args: tc.arguments });
+    broadcast({
+      type: 'tool_execution_end',
+      toolCallId: tc.id,
+      toolName: tc.name,
+      result: { content: [{ type: 'text', text: `${tc.id}-output` }], details: {} },
+      isError: false,
+    });
+  }
+
+  const bashCard = page.locator('.tool-card[data-tool-call-id="builtin-bash-timeout"]');
+  const bashPlainCard = page.locator('.tool-card[data-tool-call-id="builtin-bash-plain"]');
+  const editCard = page.locator('.tool-card[data-tool-call-id="builtin-edit-multi"]');
+  const readCard = page.locator('.tool-card[data-tool-call-id="builtin-read-range"]');
+  const writeJsCard = page.locator('.tool-card[data-tool-call-id="builtin-write-js"]');
+  const writeTxtCard = page.locator('.tool-card[data-tool-call-id="builtin-write-txt"]');
+
+  await writeTxtCard.waitFor({ state: 'attached' });
+
+  const assertCards = async () => {
+    // 1. bash with and without timeout
+    assert.equal(await bashCard.locator('.tool-args .code-block-header span').textContent(), 'Bash · timeout 30s');
+    assert.equal(await bashCard.locator('.tool-args code').textContent(), bashCmd);
+    assert.ok(await bashCard.locator('.tool-args .hljs-keyword').count() > 0);
+    assert.ok(await bashCard.locator('.tool-args .hljs-variable').count() > 0);
+    assert.equal(await bashCard.locator('.tool-args script').count(), 0);
+    assert.equal(await bashPlainCard.locator('.tool-args .code-block-header span').textContent(), 'Bash');
+
+    // Copy exact bash command without the timeout label
+    await bashCard.locator('.tool-args .copy-btn').click();
+    await page.waitForFunction(() =>
+      document.querySelector('.tool-card[data-tool-call-id="builtin-bash-timeout"] .tool-args .copy-btn')?.textContent === 'Copied!'
+    );
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), bashCmd);
+
+    // 2. edit with edits[] (context lines, removed/added lines, empty replacement, separator)
+    assert.equal(await editCard.locator('.tool-args-preview').textContent(), 'src/demo.ts');
+    assert.equal(await editCard.locator('.tool-args').count(), 0);
+    assert.equal(await editCard.locator('.tool-diff .diff-separator').count(), 1);
+    assert.deepEqual(
+      await editCard.locator('.tool-diff .diff-line').evaluateAll(els =>
+        els.map(el => ({ cls: el.className, text: el.textContent }))
+      ),
+      [
+        { cls: 'diff-line diff-context', text: '  const a = 1;' },
+        { cls: 'diff-line diff-removed', text: '- const b = 2;' },
+        { cls: 'diff-line diff-added', text: '+ const b = 20;' },
+        { cls: 'diff-line diff-context', text: '  const c = 3;' },
+        { cls: 'diff-line diff-removed', text: '- remove me' },
+      ]
+    );
+
+    // 3. read with offset/limit in header and no .tool-args block
+    assert.equal(await readCard.locator('.tool-args-preview').textContent(), 'src/demo.ts:10-34');
+    assert.equal(await readCard.locator('.tool-args').count(), 0);
+    assert.equal(await readCard.locator('.tool-output').textContent(), 'builtin-read-range-output');
+
+    // 4. write with highlighted JS and plain text multi-line content + Copy code
+    assert.equal(await writeJsCard.locator('.tool-args .code-block-header span').textContent(), 'JavaScript');
+    assert.equal(await writeJsCard.locator('.tool-args code').textContent(), writeJsContent);
+    assert.ok(await writeJsCard.locator('.tool-args .hljs-keyword').count() > 0);
+
+    assert.equal(await writeTxtCard.locator('.tool-args .code-block-header span').textContent(), 'notes/todo.txt');
+    assert.equal(await writeTxtCard.locator('.tool-args code').textContent(), writeTxtContent);
+    assert.equal(await writeTxtCard.locator('.tool-args img').count(), 0);
+
+    await writeTxtCard.locator('.tool-args .copy-btn').click();
+    await page.waitForFunction(() =>
+      document.querySelector('.tool-card[data-tool-call-id="builtin-write-txt"] .tool-args .copy-btn')?.textContent === 'Copied!'
+    );
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), writeTxtContent);
+  };
+
+  for (const tc of toolCalls) {
+    await page.locator(`.tool-card[data-tool-call-id="${tc.id}"] .tool-card-header`).click();
+  }
+  await assertCards();
+
+  // Persist into session history and reload to verify history cards match live cards
+  session.entries.push({
+    type: 'message',
+    message: {
+      role: 'assistant',
+      content: toolCalls.map(tc => ({ type: 'toolCall', id: tc.id, name: tc.name, arguments: tc.arguments })),
+    },
+  });
+  for (const tc of toolCalls) {
+    session.entries.push({
+      type: 'message',
+      message: {
+        role: 'toolResult',
+        toolCallId: tc.id,
+        toolName: tc.name,
+        content: [{ type: 'text', text: `${tc.id}-output` }],
+        isError: false,
+        timestamp: Date.now(),
+      } satisfies ToolResultMessage,
+    });
+  }
+
+  await page.reload();
+  await writeTxtCard.waitFor({ state: 'attached' });
+  await toolCommand(page, 'Expand All Tools');
+  await assertCards();
+
+  // Verify JSON fallbacks when required fields are missing, invalid, or accompanied by unknown keys
+  const fallbacks = await page.evaluate(async () => {
+    const { ToolCardRenderer } = await import(new URL('/tool-card.js', location.href).href);
+    const host = document.createElement('div');
+    document.getElementById('messages')!.appendChild(host);
+    const renderer = new ToolCardRenderer(host);
+    const invalidCases = [
+      { toolCallId: 'fb-bash-missing', toolName: 'bash', args: { timeout: 10 } },
+      { toolCallId: 'fb-bash-extra', toolName: 'bash', args: { command: 'ls', extra: true } },
+      { toolCallId: 'fb-edit-empty', toolName: 'edit', args: { path: 'a.ts', edits: [] } },
+      { toolCallId: 'fb-read-extra', toolName: 'read', args: { path: 'a.ts', extra: true } },
+      { toolCallId: 'fb-read-bad-offset', toolName: 'read', args: { path: 'a.ts', offset: 'bad' } },
+      { toolCallId: 'fb-write-no-path', toolName: 'write', args: { content: 'abc' } },
+    ];
+    return invalidCases.map(item => {
+      const live = renderer.createToolCard({ ...item, status: 'pending' });
+      const hist = renderer.createHistoryCard({ ...item, toolCallId: `${item.toolCallId}-h` });
+      return {
+        expected: JSON.stringify(item.args, null, 2),
+        liveArgs: live.querySelector('.tool-args')?.textContent,
+        histArgs: hist.querySelector('.tool-args')?.textContent,
+      };
+    });
+  });
+  for (const fb of fallbacks) {
+    assert.equal(fb.liveArgs, fb.expected);
+    assert.equal(fb.histArgs, fb.expected);
+  }
+
+  await assertNoPageErrors(errors);
+});
+
 test('nested tool events leave root cards unchanged and match reloaded history', async (t: TestContext) => {
   if (skipUnlessBrowser(t)) return;
   const { page, errors } = await openPage();

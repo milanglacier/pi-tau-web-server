@@ -1,4 +1,4 @@
-// Copy the JavaScript highlighter into the served UI so it works offline.
+// Copy the JavaScript and Bash highlighters into the served UI so they work offline.
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -13,6 +13,7 @@ fs.mkdirSync(vendorDir, { recursive: true });
 for (const [source, target] of [
   ['es/core.min.js', 'core.min.js'],
   ['es/languages/javascript.min.js', 'javascript.min.js'],
+  ['es/languages/bash.min.js', 'bash.min.js'],
   ['LICENSE', 'LICENSE'],
 ]) {
   fs.copyFileSync(path.join(assets, source), path.join(vendorDir, target));
