@@ -4,7 +4,7 @@ Branch: `feat/builtin-tool-call-rendering`
 
 ## Goal
 
-Show built-in `bash`, `edit`, `read`, and `write` tool calls in clear, task-specific formats instead of dumping their raw JSON argument objects. Keep live cards and saved history cards consistent.
+Show built-in `bash`, `edit`, `read`, and `write` tool calls in clear, task-specific formats instead of dumping their raw JSON argument objects. Keep live cards, saved history cards, and nested tool calls inside `codemode` consistent.
 
 ## Agreed decisions
 
@@ -17,15 +17,20 @@ Show built-in `bash`, `edit`, `read`, and `write` tool calls in clear, task-spec
    - Compute a line-by-line diff within each `{ oldText, newText }` block so unchanged lines appear as neutral context (`  line`), removed lines appear with `- ` and red diff styling, and added lines appear with `+ ` and green diff styling.
    - Separate multiple blocks in `edits[]` with a subtle divider inside `.tool-diff`.
 3. **`read`**:
-   - Append the line range directly to the path preview in the card header as `:start` or `:start-end` (for example `src/foo.ts:1-100` when `offset: 1, limit: 100`, or `src/foo.ts:50` when `offset: 50`), matching Pi's compact range format.
-   - Omit the redundant `.tool-args` JSON box when `read` only has standard arguments (`path`/`file_path` and optional valid `offset`/`limit`), so expanding a `read` card shows the file output directly.
+   - Append the line range directly to the path preview in the card header (and in the nested-call row preview) as `:start` or `:start-end` (for example `src/foo.ts:1-100` when `offset: 1, limit: 100`, or `src/foo.ts:50` when `offset: 50`), matching Pi's compact range format.
+   - In top-level `read` cards, omit the redundant `.tool-args` JSON box when `read` only has standard arguments (`path`/`file_path` and optional valid `offset`/`limit`), so expanding a `read` card shows the file output directly.
+   - In nested `read` rows (where Pi does not store child output), show the full `path` or `path:start-end` string inside `.nested-call-arguments` when the row is expanded so long paths that were truncated in the row header remain readable without dumping raw JSON.
 4. **`write`**:
    - Do not bundle extra language grammars beyond JavaScript and Bash.
    - Render `args.content` in the multi-line code-block widget with a `Copy code` button instead of a single-line escaped JSON string.
    - Highlight the block when the target file path ends in `.js`/`.mjs`/`.cjs` (JavaScript) or `.sh`/`.bash`/`.zsh` (Bash); otherwise render it as plain monospace text with the file path/extension label in the code-block header.
-5. **Fallbacks & safety**:
+5. **Nested tool calls (`codemode` children)**:
+   - Reuse `renderArguments(toolName, args, 'nested-call-arguments')` when a nested call row is expanded so nested `bash`, `edit`, `read`, and `write` calls get the same task-specific rendering as top-level calls.
+   - Cache the rendered argument key on each nested row (`row.argumentsKey`) so live status/duration updates do not rebuild an already-open code block, diff, or `<pre>` element unless the call's arguments actually change.
+   - Keep `codemode` highlighting limited to root cards because `codemode` cannot call itself.
+6. **Fallbacks & safety**:
    - Treat all tool arguments as untrusted text (never raw HTML). If highlighting assets fail to load, show escaped plain source.
-   - Fall back to formatted JSON whenever a tool call is missing its expected primary field or carries unexpected extra fields.
+   - Fall back to formatted JSON (or the omitted-arguments notice for nested calls) whenever a tool call is missing its expected primary field or carries unexpected extra fields.
 
 ## Implementation
 
@@ -42,11 +47,11 @@ Show built-in `bash`, `edit`, `read`, and `write` tool calls in clear, task-spec
 
 - In `src/public/tool-card.ts`, when `toolName` is `bash` (or `Bash`), `typeof args?.command === 'string'`, and there are no unexpected argument keys beyond `command` and `timeout` (with `timeout` omitted/null or a finite number):
   - Build the header label as `Bash` or `Bash · timeout ${args.timeout}s`.
-  - Render `createCodeBlock(args.command, { language: 'bash', label })` inside `.tool-args.tool-code-args`.
+  - Render `createCodeBlock(args.command, { language: 'bash', label })` inside `.${className}.tool-code-args` (where `className` is `'tool-args'` for top-level cards and `'nested-call-arguments'` for nested call rows).
 
 ### 3. `edit` tool diff rendering
 
-- In `src/public/tool-card.ts`, unify argument rendering between `createToolCard` and `createHistoryCard` so both go through `renderArguments(toolName, args)`.
+- In `src/public/tool-card.ts`, unify argument rendering across `createToolCard`, `createHistoryCard`, and nested calls so all three go through `renderArguments(toolName, args, className)`.
 - Add an `extractEdits(args)` helper that normalizes:
   - `args.edits` array of `{ oldText, newText }` / `{ old_text, new_text }`
   - `args.edits` as a single edit object or JSON string
@@ -56,17 +61,27 @@ Show built-in `bash`, `edit`, `read`, and `write` tool calls in clear, task-spec
   - Compute a line-level LCS diff between `oldText.split('\n')` and `newText.split('\n')`.
   - Render removed lines (`.diff-line.diff-removed`, `- `), added lines (`.diff-line.diff-added`, `+ `), and unchanged context lines (`.diff-line.diff-context`, `  `).
   - Render a divider between multiple blocks when `edits.length > 1`.
+  - When used inside a nested call row, attach `.nested-call-arguments` to the `.tool-diff` element and style `.nested-call-arguments.tool-diff` with a clean border.
 
 ### 4. `read` and `write` tool rendering
 
 - **`read`**:
   - Add `formatReadLineRange(offset, limit)` (matching Pi's `:start` and `:start-end` calculation).
   - In `getArgsPreview(toolName, args)`, when `toolName` is `read`/`Read` and `path` (or `file_path`) is a string, return `${path}${formatReadLineRange(args.offset, args.limit)}`.
-  - In `renderArguments(toolName, args)`, when `toolName` is `read`/`Read` with a string `path`/`file_path`, no unexpected keys, and valid optional `offset`/`limit`, return `undefined` so no `.tool-args` element is inserted.
+  - In `renderArguments(toolName, args, className)`, when `toolName` is `read`/`Read` with a string `path`/`file_path`, no unexpected keys, and valid optional `offset`/`limit`:
+    - Return `undefined` for top-level cards (`className === 'tool-args'`) so no redundant `.tool-args` element is inserted above the file output.
+    - Return `<pre class="nested-call-arguments">${path}${formatReadLineRange(args.offset, args.limit)}</pre>` for nested call rows (`className === 'nested-call-arguments'`) so expanding a nested `read` row shows the full target path and line range.
 - **`write`**:
-  - In `renderArguments(toolName, args)`, when `toolName` is `write`/`Write`, `typeof args?.content === 'string'`, `typeof (args.path ?? args.file_path) === 'string'`, and there are no unexpected keys:
+  - In `renderArguments(toolName, args, className)`, when `toolName` is `write`/`Write`, `typeof args?.content === 'string'`, `typeof (args.path ?? args.file_path) === 'string'`, and there are no unexpected keys:
     - Detect whether the file path ends in `.js`/`.mjs`/`.cjs` (`language: 'javascript'`, label `'JavaScript'`) or `.sh`/`.bash`/`.zsh` (`language: 'bash'`, label `'Bash'`); otherwise use plain text with the file path (or extension) as the header label.
-    - Render `createCodeBlock(args.content, { language, label })` inside `.tool-args.tool-code-args`.
+    - Render `createCodeBlock(args.content, { language, label })` inside `.${className}.tool-code-args`.
+
+### 5. Nested tool call details rendering
+
+- In `updateDetails(row)` in `src/public/tool-card.ts`:
+  - Compute an argument cache key (`row.argumentsKey`) from the call name, presence of arguments, and serialized argument/omission text.
+  - When `row.argumentsKey` changes, render `this.renderArguments(row.call.name, row.call.arguments, 'nested-call-arguments')` (falling back to `<pre class="nested-call-arguments">` with `this.argumentsText(row.call)` when arguments are omitted, empty, or unsupported) and replace or insert the `.nested-call-arguments` node before `.nested-call-error`.
+  - Preserve the existing `.nested-call-arguments` DOM node in place across status and duration updates when the arguments have not changed.
 
 ## Verification
 
@@ -74,10 +89,10 @@ Show built-in `bash`, `edit`, `read`, and `write` tool calls in clear, task-spec
   - Bash syntax highlighting and whitespace preservation.
   - Line-level diff computation (context lines, added/removed lines, empty `oldText`/`newText`, multiple `edits[]` blocks).
   - `read` line range formatting (`:1-100`, `:50`, omitted range, malformed values).
-- Extend browser e2e tests in `test/e2e/history-render.e2e.ts` covering live and history cards for:
+- Extend browser e2e tests in `test/e2e/history-render.e2e.ts` covering live cards, saved history cards, and nested calls inside `codemode` for:
   - `bash` with and without `timeout`, verifying Bash highlighting, timeout label in the code-block header, and exact `Copy code` behavior.
   - `edit` with `edits: [{ oldText, newText }]` (including multi-line context and multiple edit blocks) as well as legacy `oldText`/`newText`.
-  - `read` with `offset` and `limit` showing `path:start-end` in the header and no redundant `.tool-args` block in the body.
+  - `read` with `offset` and `limit` showing `path:start-end` in the header, no redundant `.tool-args` block in top-level cards, and `path:start-end` in expanded nested call details.
   - `write` with multi-line `content`, verifying unescaped multi-line display and `Copy code`.
-  - JSON fallbacks when required fields are missing or invalid.
+  - Preservation of open nested argument DOM nodes across live status/duration updates and JSON/omitted fallbacks when required fields are missing or invalid.
 - Run `npm run typecheck`, `npm test`, and focused/full browser e2e tests.

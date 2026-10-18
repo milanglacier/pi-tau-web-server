@@ -640,7 +640,7 @@ test('codemode argument fallbacks preserve JSON, empty code, and omitted nested 
   await assertNoPageErrors(errors);
 });
 
-test('built-in bash, edit, read, and write tool calls render cleanly in live and reloaded history cards with JSON fallbacks', async (t: TestContext) => {
+test('built-in bash, edit, read, and write tool calls render cleanly in live, nested, and reloaded history cards with JSON fallbacks', async (t: TestContext) => {
   if (skipUnlessBrowser(t)) return;
   const { page, errors, session, broadcast } = await openNestedPage();
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
@@ -679,6 +679,74 @@ test('built-in bash, edit, read, and write tool calls render cleanly in live and
     });
   }
 
+  // Also test nested bash, edit, read, and write inside a codemode card
+  const nestedRootId = 'builtin-nested-root';
+  const nestedCallsList: NonNullable<ToolResultMessage['nestedCalls']>['calls'] = [
+    { id: `${nestedRootId}/1`, name: 'bash', arguments: { command: bashCmd, timeout: 15 }, status: 'ok', durationMs: 11 },
+    { id: `${nestedRootId}/2`, name: 'edit', arguments: { path: 'src/demo.ts', edits: editBlocks }, status: 'ok', durationMs: 14 },
+    { id: `${nestedRootId}/3`, name: 'read', arguments: { path: 'src/demo.ts', offset: 10, limit: 25 }, status: 'ok', durationMs: 5 },
+    { id: `${nestedRootId}/4`, name: 'write', arguments: { path: 'src/out.js', content: writeJsContent }, status: 'ok', durationMs: 8 },
+  ];
+
+  broadcast({ type: 'tool_execution_start', toolCallId: nestedRootId, toolName: 'codemode', args: { code: 'await tools.bash({ command: "echo hi" });' } });
+  for (const nc of nestedCallsList) {
+    broadcast({
+      type: 'tool_execution_start',
+      toolCallId: nc.id,
+      parentToolCallId: nestedRootId,
+      toolName: nc.name,
+      args: nc.arguments,
+    });
+  }
+
+  const nestedRootCard = page.locator(`.tool-card[data-tool-call-id="${nestedRootId}"]`);
+  await nestedRootCard.locator('.nested-call-row').nth(3).waitFor({ state: 'attached' });
+
+  // Open nested rows while still running and verify status updates preserve open DOM nodes
+  for (let i = 0; i < nestedCallsList.length; i++) {
+    await nestedRootCard.locator('.nested-call-row').nth(i).locator('.nested-call-toggle').click();
+  }
+  const nestedBashCodeHandle = await nestedRootCard.locator('.nested-call-row').nth(0).locator('code').elementHandle();
+
+  for (const nc of nestedCallsList) {
+    broadcast({
+      type: 'tool_execution_end',
+      toolCallId: nc.id,
+      parentToolCallId: nestedRootId,
+      toolName: nc.name,
+      result: { content: [], details: {} },
+      isError: false,
+    });
+  }
+  await page.waitForFunction(
+    (root: string) =>
+      document.querySelector(`.tool-card[data-tool-call-id="${root}"] .nested-call-row[data-call-id="${root}/4"] .nested-call-status`)?.textContent === 'succeeded',
+    nestedRootId,
+  );
+  assert.equal(
+    await nestedRootCard.locator('.nested-call-row').nth(0).locator('code').evaluate((current, previous) => current === previous, nestedBashCodeHandle),
+    true,
+    'nested status updates keep the same highlighted code block element',
+  );
+
+  broadcast({
+    type: 'tool_execution_end',
+    toolCallId: nestedRootId,
+    toolName: 'codemode',
+    result: { content: [{ type: 'text', text: 'nested-root-output' }], details: {} },
+    isError: false,
+  });
+  const nestedRootResultMsg = {
+    role: 'toolResult',
+    toolCallId: nestedRootId,
+    toolName: 'codemode',
+    content: [{ type: 'text', text: 'nested-root-output' }],
+    isError: false,
+    timestamp: Date.now(),
+    nestedCalls: { complete: true, calls: nestedCallsList },
+  } satisfies ToolResultMessage;
+  broadcast({ type: 'message_end', message: nestedRootResultMsg });
+
   const bashCard = page.locator('.tool-card[data-tool-call-id="builtin-bash-timeout"]');
   const bashPlainCard = page.locator('.tool-card[data-tool-call-id="builtin-bash-plain"]');
   const editCard = page.locator('.tool-card[data-tool-call-id="builtin-edit-multi"]');
@@ -687,6 +755,14 @@ test('built-in bash, edit, read, and write tool calls render cleanly in live and
   const writeTxtCard = page.locator('.tool-card[data-tool-call-id="builtin-write-txt"]');
 
   await writeTxtCard.waitFor({ state: 'attached' });
+
+  const expectedDiffLines = [
+    { cls: 'diff-line diff-context', text: '  const a = 1;' },
+    { cls: 'diff-line diff-removed', text: '- const b = 2;' },
+    { cls: 'diff-line diff-added', text: '+ const b = 20;' },
+    { cls: 'diff-line diff-context', text: '  const c = 3;' },
+    { cls: 'diff-line diff-removed', text: '- remove me' },
+  ];
 
   const assertCards = async () => {
     // 1. bash with and without timeout
@@ -712,13 +788,7 @@ test('built-in bash, edit, read, and write tool calls render cleanly in live and
       await editCard.locator('.tool-diff .diff-line').evaluateAll(els =>
         els.map(el => ({ cls: el.className, text: el.textContent }))
       ),
-      [
-        { cls: 'diff-line diff-context', text: '  const a = 1;' },
-        { cls: 'diff-line diff-removed', text: '- const b = 2;' },
-        { cls: 'diff-line diff-added', text: '+ const b = 20;' },
-        { cls: 'diff-line diff-context', text: '  const c = 3;' },
-        { cls: 'diff-line diff-removed', text: '- remove me' },
-      ]
+      expectedDiffLines,
     );
 
     // 3. read with offset/limit in header and no .tool-args block
@@ -740,19 +810,57 @@ test('built-in bash, edit, read, and write tool calls render cleanly in live and
       document.querySelector('.tool-card[data-tool-call-id="builtin-write-txt"] .tool-args .copy-btn')?.textContent === 'Copied!'
     );
     assert.equal(await page.evaluate(() => navigator.clipboard.readText()), writeTxtContent);
+
+    // 5. Nested bash, edit, read, and write inside codemode
+    const nestedBashRow = nestedRootCard.locator(`.nested-call-row[data-call-id="${nestedRootId}/1"]`);
+    const nestedEditRow = nestedRootCard.locator(`.nested-call-row[data-call-id="${nestedRootId}/2"]`);
+    const nestedReadRow = nestedRootCard.locator(`.nested-call-row[data-call-id="${nestedRootId}/3"]`);
+    const nestedWriteRow = nestedRootCard.locator(`.nested-call-row[data-call-id="${nestedRootId}/4"]`);
+
+    assert.equal(await nestedBashRow.locator('.nested-call-arguments .code-block-header span').textContent(), 'Bash · timeout 15s');
+    assert.equal(await nestedBashRow.locator('.nested-call-arguments code').textContent(), bashCmd);
+    assert.ok(await nestedBashRow.locator('.nested-call-arguments .hljs-keyword').count() > 0);
+    await nestedBashRow.locator('.nested-call-arguments .copy-btn').click();
+    await page.waitForFunction((root: string) =>
+      document.querySelector(`.tool-card[data-tool-call-id="${root}"] .nested-call-row[data-call-id="${root}/1"] .copy-btn`)?.textContent === 'Copied!',
+      nestedRootId,
+    );
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), bashCmd);
+
+    assert.equal(await nestedEditRow.locator('.nested-call-preview').textContent(), 'src/demo.ts');
+    assert.equal(await nestedEditRow.locator('.nested-call-arguments.tool-diff .diff-separator').count(), 1);
+    assert.deepEqual(
+      await nestedEditRow.locator('.nested-call-arguments.tool-diff .diff-line').evaluateAll(els =>
+        els.map(el => ({ cls: el.className, text: el.textContent }))
+      ),
+      expectedDiffLines,
+    );
+
+    assert.equal(await nestedReadRow.locator('.nested-call-preview').textContent(), 'src/demo.ts:10-34');
+    assert.equal(await nestedReadRow.locator('pre.nested-call-arguments').textContent(), 'src/demo.ts:10-34');
+
+    assert.equal(await nestedWriteRow.locator('.nested-call-preview').textContent(), 'src/out.js');
+    assert.equal(await nestedWriteRow.locator('.nested-call-arguments .code-block-header span').textContent(), 'JavaScript');
+    assert.equal(await nestedWriteRow.locator('.nested-call-arguments code').textContent(), writeJsContent);
+    assert.ok(await nestedWriteRow.locator('.nested-call-arguments .hljs-keyword').count() > 0);
   };
 
   for (const tc of toolCalls) {
     await page.locator(`.tool-card[data-tool-call-id="${tc.id}"] .tool-card-header`).click();
   }
+  await nestedRootCard.locator('.tool-card-header').click();
+  await nestedRootCard.locator('.nested-calls-toggle').click();
   await assertCards();
 
-  // Persist into session history and reload to verify history cards match live cards
+  // Persist into session history and reload to verify history cards and nested calls match live cards
   session.entries.push({
     type: 'message',
     message: {
       role: 'assistant',
-      content: toolCalls.map(tc => ({ type: 'toolCall', id: tc.id, name: tc.name, arguments: tc.arguments })),
+      content: [
+        ...toolCalls.map(tc => ({ type: 'toolCall', id: tc.id, name: tc.name, arguments: tc.arguments })),
+        { type: 'toolCall', id: nestedRootId, name: 'codemode', arguments: { code: 'await tools.bash({ command: "echo hi" });' } },
+      ],
     },
   });
   for (const tc of toolCalls) {
@@ -768,10 +876,14 @@ test('built-in bash, edit, read, and write tool calls render cleanly in live and
       } satisfies ToolResultMessage,
     });
   }
+  session.entries.push({ type: 'message', message: nestedRootResultMsg });
 
   await page.reload();
   await writeTxtCard.waitFor({ state: 'attached' });
   await toolCommand(page, 'Expand All Tools');
+  for (let i = 0; i < nestedCallsList.length; i++) {
+    await nestedRootCard.locator('.nested-call-row').nth(i).locator('.nested-call-toggle').click();
+  }
   await assertCards();
 
   // Verify JSON fallbacks when required fields are missing, invalid, or accompanied by unknown keys
@@ -788,7 +900,7 @@ test('built-in bash, edit, read, and write tool calls render cleanly in live and
       { toolCallId: 'fb-read-bad-offset', toolName: 'read', args: { path: 'a.ts', offset: 'bad' } },
       { toolCallId: 'fb-write-no-path', toolName: 'write', args: { content: 'abc' } },
     ];
-    return invalidCases.map(item => {
+    const topLevel = invalidCases.map(item => {
       const live = renderer.createToolCard({ ...item, status: 'pending' });
       const hist = renderer.createHistoryCard({ ...item, toolCallId: `${item.toolCallId}-h` });
       return {
@@ -797,10 +909,26 @@ test('built-in bash, edit, read, and write tool calls render cleanly in live and
         histArgs: hist.querySelector('.tool-args')?.textContent,
       };
     });
+    renderer.reconcileToolResult('fb-bash-missing', {
+      nestedCalls: {
+        complete: true,
+        calls: invalidCases.map((item, idx) => ({
+          id: `fb-bash-missing/${idx + 1}`,
+          name: item.toolName,
+          arguments: item.args,
+          status: 'ok' as const,
+        })),
+      },
+    }, false);
+    const nestedParent = host.querySelector('.tool-card[data-tool-call-id="fb-bash-missing"]')!;
+    for (const btn of nestedParent.querySelectorAll<HTMLButtonElement>('.nested-call-toggle')) btn.click();
+    const nestedArgs = Array.from(nestedParent.querySelectorAll('.nested-call-arguments'), el => el.textContent);
+    return { topLevel, nestedArgs };
   });
-  for (const fb of fallbacks) {
+  for (const [idx, fb] of fallbacks.topLevel.entries()) {
     assert.equal(fb.liveArgs, fb.expected);
     assert.equal(fb.histArgs, fb.expected);
+    assert.equal(fallbacks.nestedArgs[idx], fb.expected);
   }
 
   await assertNoPageErrors(errors);

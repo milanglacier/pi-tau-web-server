@@ -234,6 +234,7 @@ type CallsRow = {
   toggle: HTMLButtonElement;
   call: NestedCallSummary;
   details?: HTMLElement;
+  argumentsKey?: string;
 };
 
 type CallsView = {
@@ -593,17 +594,28 @@ export class ToolCardRenderer {
     if (!row.details) {
       row.details = document.createElement('div');
       row.details.className = 'nested-call-details';
-      const args = document.createElement('pre');
-      args.className = 'nested-call-arguments';
       const error = document.createElement('div');
       error.className = 'nested-call-error';
-      row.details.append(args, error);
+      row.details.appendChild(error);
       row.element.appendChild(row.details);
     }
-    const args = row.details.querySelector('.nested-call-arguments')!;
-    const text = this.argumentsText(row.call);
-    if (args.textContent !== text) args.textContent = text;
     const error = row.details.querySelector<HTMLElement>('.nested-call-error')!;
+    const text = this.argumentsText(row.call);
+    const key = JSON.stringify([row.call.name, row.call.arguments === undefined ? 'omitted' : 'present', text]);
+    if (row.argumentsKey !== key) {
+      let args = row.call.arguments !== undefined
+        ? this.renderArguments(row.call.name, row.call.arguments, 'nested-call-arguments')
+        : undefined;
+      if (!args) {
+        args = document.createElement('pre');
+        args.className = 'nested-call-arguments';
+        args.textContent = text;
+      }
+      const previous = row.details.querySelector('.nested-call-arguments');
+      if (previous) previous.replaceWith(args);
+      else row.details.insertBefore(args, error);
+      row.argumentsKey = key;
+    }
     if (error.textContent !== (row.call.error || '')) error.textContent = row.call.error || '';
     error.hidden = !row.call.error;
   }
@@ -753,8 +765,12 @@ export class ToolCardRenderer {
     return '';
   }
 
-  private renderArguments(toolName: string, args?: ToolArgs): HTMLElement | undefined {
-    if (toolName === 'codemode' && typeof args?.code === 'string') {
+  private renderArguments(
+    toolName: string,
+    args?: ToolArgs,
+    className: 'tool-args' | 'nested-call-arguments' = 'tool-args',
+  ): HTMLElement | undefined {
+    if (className === 'tool-args' && toolName === 'codemode' && typeof args?.code === 'string') {
       const element = document.createElement('div');
       element.className = 'tool-args tool-code-args';
       element.appendChild(createJavaScriptCodeBlock(args.code));
@@ -763,28 +779,38 @@ export class ToolCardRenderer {
     if ((toolName === 'bash' || toolName === 'Bash') && isValidBashArgs(args)) {
       const label = args.timeout != null ? `Bash · timeout ${args.timeout}s` : 'Bash';
       const element = document.createElement('div');
-      element.className = 'tool-args tool-code-args';
+      element.className = `${className} tool-code-args`;
       element.appendChild(createCodeBlock(args.command, { language: 'bash', label }));
       return element;
     }
     if (toolName === 'edit' || toolName === 'Edit') {
       const edits = extractEdits(args);
-      if (edits) return this.renderDiff(edits);
+      if (edits) {
+        const diff = this.renderDiff(edits);
+        if (className === 'nested-call-arguments') diff.classList.add('nested-call-arguments');
+        return diff;
+      }
     }
     if ((toolName === 'read' || toolName === 'Read') && isValidReadArgs(args)) {
+      if (className === 'nested-call-arguments') {
+        const element = document.createElement('pre');
+        element.className = 'nested-call-arguments';
+        element.textContent = this.getArgsPreview(toolName, args);
+        return element;
+      }
       return undefined;
     }
     if ((toolName === 'write' || toolName === 'Write') && isValidWriteArgs(args)) {
       const filePath = String(args.path ?? args.file_path);
       const element = document.createElement('div');
-      element.className = 'tool-args tool-code-args';
+      element.className = `${className} tool-code-args`;
       element.appendChild(createCodeBlock(args.content, getWriteCodeBlockOptions(filePath)));
       return element;
     }
     const text = this.formatJson(args);
     if (!text) return undefined;
-    const element = document.createElement('div');
-    element.className = 'tool-args';
+    const element = document.createElement(className === 'nested-call-arguments' ? 'pre' : 'div');
+    element.className = className;
     element.textContent = text;
     return element;
   }

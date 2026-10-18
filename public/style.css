@@ -1864,6 +1864,7 @@ pre {
 .nested-call-arguments.tool-code-args { white-space: normal; }
 .tool-args.tool-code-args { padding: 0; }
 .tool-args.tool-code-args > .code-block-wrapper { margin: 0; border: 0; border-radius: 0; }
+.nested-call-arguments.tool-code-args > .code-block-wrapper { margin: 4px 0; }
 .code-block-wrapper pre { white-space: pre; }
 
 pre code {
@@ -2203,6 +2204,13 @@ body.hide-thinking .thinking-block { display: none !important; }
   max-height: 300px;
   overflow-y: auto;
   border-bottom: 1px solid var(--border);
+}
+
+.nested-call-arguments.tool-diff {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  white-space: normal;
+  margin: 4px 0;
 }
 
 .diff-line {
