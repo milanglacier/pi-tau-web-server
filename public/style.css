@@ -1790,12 +1790,23 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   padding: 6px 12px;
   background: var(--bg-glass);
   border-bottom: 1px solid var(--border);
   font-size: 11px;
   color: var(--text-dim);
   font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+}
+
+.code-block-header > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.code-block-header > .copy-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .copy-btn {
@@ -2162,6 +2173,17 @@ body.hide-thinking .thinking-block { display: none !important; }
 :root[data-theme="clean"] .tool-args,
 :root[data-theme="terracotta"] .tool-args,
 :root[data-theme="sage"] .tool-args { background: rgba(0, 0, 0, 0.03); }
+
+.tool-file-target {
+  margin: 0;
+  padding: 8px 12px;
+  font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
 
 .tool-output-wrapper { position: relative; }
 

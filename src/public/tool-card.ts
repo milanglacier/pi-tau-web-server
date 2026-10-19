@@ -765,6 +765,13 @@ export class ToolCardRenderer {
     return '';
   }
 
+  private renderFileTarget(target: string): HTMLElement {
+    const element = document.createElement('pre');
+    element.className = 'tool-file-target';
+    element.textContent = target;
+    return element;
+  }
+
   private renderArguments(
     toolName: string,
     args?: ToolArgs,
@@ -787,24 +794,22 @@ export class ToolCardRenderer {
       const edits = extractEdits(args);
       if (edits) {
         const diff = this.renderDiff(edits);
+        const filePath = args?.path ?? args?.file_path;
+        if (typeof filePath === 'string' && filePath.length > 0) diff.prepend(this.renderFileTarget(filePath));
         if (className === 'nested-call-arguments') diff.classList.add('nested-call-arguments');
         return diff;
       }
     }
     if ((toolName === 'read' || toolName === 'Read') && isValidReadArgs(args)) {
-      if (className === 'nested-call-arguments') {
-        const element = document.createElement('pre');
-        element.className = 'nested-call-arguments';
-        element.textContent = this.getArgsPreview(toolName, args);
-        return element;
-      }
-      return undefined;
+      const element = this.renderFileTarget(this.getArgsPreview(toolName, args));
+      if (className === 'nested-call-arguments') element.classList.add('nested-call-arguments');
+      return element;
     }
     if ((toolName === 'write' || toolName === 'Write') && isValidWriteArgs(args)) {
       const filePath = String(args.path ?? args.file_path);
       const element = document.createElement('div');
       element.className = `${className} tool-code-args`;
-      element.appendChild(createCodeBlock(args.content, getWriteCodeBlockOptions(filePath)));
+      element.append(this.renderFileTarget(filePath), createCodeBlock(args.content, getWriteCodeBlockOptions(filePath)));
       return element;
     }
     const text = this.formatJson(args);

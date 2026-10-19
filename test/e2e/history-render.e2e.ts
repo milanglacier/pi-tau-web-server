@@ -934,6 +934,119 @@ test('built-in bash, edit, read, and write tool calls render cleanly in live, ne
   await assertNoPageErrors(errors);
 });
 
+test('expanded file tool cards show full targets on narrow screens', async (t: TestContext) => {
+  if (skipUnlessBrowser(t)) return;
+  const { page, errors } = await openNestedPage();
+  await page.locator('#sidebar-toggle').click();
+  await page.setViewportSize({ width: 380, height: 780 });
+
+  const targets = await page.evaluate(async () => {
+    const { ToolCardRenderer } = await import(new URL('/tool-card.js', location.href).href);
+    const host = document.createElement('div');
+    document.getElementById('messages')!.appendChild(host);
+    const renderer = new ToolCardRenderer(host);
+    const longPath = '/home/user/projects/' + 'long-directory/'.repeat(4) + 'target<file>';
+    const cases = [
+      { toolName: 'read', args: { path: longPath + '.ts', offset: 50, limit: 20 }, target: longPath + '.ts:50-69' },
+      { toolName: 'Read', args: { file_path: longPath + '.txt', offset: 10 }, target: longPath + '.txt:10' },
+      { toolName: 'edit', args: { path: longPath + '.ts', edits: [{ oldText: 'old', newText: 'new' }] }, target: longPath + '.ts' },
+      { toolName: 'write', args: { path: longPath + '.js', content: 'const value = 1;' }, target: longPath + '.js' },
+      { toolName: 'Write', args: { file_path: longPath + '.sh', content: 'echo ok' }, target: longPath + '.sh' },
+      { toolName: 'write', args: { path: longPath + '.txt', content: 'notes' }, target: longPath + '.txt' },
+    ];
+    const cards: Array<{ card: HTMLElement; expected: string }> = cases.flatMap((item, index) => [
+      { card: renderer.createToolCard({ ...item, toolCallId: `target-live-${index}`, status: 'pending' }), expected: item.target },
+      { card: renderer.createHistoryCard({ ...item, toolCallId: `target-history-${index}` }), expected: item.target },
+    ]);
+    const root: HTMLElement = renderer.createHistoryCard({ toolCallId: 'target-root', toolName: 'codemode', args: { code: 'await tools.read({ path: "file" });' } });
+    renderer.reconcileToolResult('target-root', {
+      nestedCalls: {
+        complete: true,
+        calls: cases.map((item, index) => ({
+          id: `target-root/${index + 1}`, name: item.toolName, arguments: item.args, status: 'ok' as const,
+        })),
+      },
+    }, false);
+    renderer.expandAll();
+    for (const toggle of root.querySelectorAll<HTMLButtonElement>('.nested-call-toggle')) toggle.click();
+    const views = [
+      ...cards.map(({ card, expected }) => ({ view: card.querySelector('.tool-card-body')!, expected })),
+      ...Array.from(root.querySelectorAll('.nested-call-details'), (view, index) => ({ view, expected: cases[index].target })),
+    ];
+    return views.map(({ view, expected }) => {
+      const target = view.querySelector<HTMLElement>('.tool-file-target');
+      return {
+        expected,
+        actual: target?.textContent,
+        fits: !!target && target.scrollWidth <= target.clientWidth + 1,
+        selectable: !!target && getComputedStyle(target).userSelect !== 'none',
+        injectedElements: target?.querySelectorAll('*').length,
+      };
+    });
+  });
+  for (const target of targets) {
+    assert.equal(target.actual, target.expected, 'expanded cards show the full path and read range');
+    assert.equal(target.fits, true, 'full targets wrap within narrow cards');
+    assert.equal(target.selectable, true);
+    assert.equal(target.injectedElements, 0, 'file paths are text, not HTML');
+  }
+  await assertNoPageErrors(errors);
+});
+
+test('long write labels keep Copy code visible and usable on narrow screens', async (t: TestContext) => {
+  if (skipUnlessBrowser(t)) return;
+  const { page, errors } = await openNestedPage();
+  await page.locator('#sidebar-toggle').click();
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  const content = 'first line\nsecond line\n';
+  const selectors = await page.evaluate(async (content: string) => {
+    const { ToolCardRenderer } = await import(new URL('/tool-card.js', location.href).href);
+    const host = document.createElement('div');
+    document.getElementById('messages')!.appendChild(host);
+    const renderer = new ToolCardRenderer(host);
+    const args = { path: 'notes/' + 'x'.repeat(80) + '.txt', content };
+    renderer.createToolCard({ toolCallId: 'copy-long-live', toolName: 'write', args, status: 'pending' });
+    renderer.createHistoryCard({ toolCallId: 'copy-long-history', toolName: 'write', args });
+    const root: HTMLElement = renderer.createHistoryCard({ toolCallId: 'copy-long-root', toolName: 'codemode', args: { code: 'await tools.write({ path: "notes.txt", content: "notes" });' } });
+    renderer.reconcileToolResult('copy-long-root', {
+      nestedCalls: { complete: true, calls: [{ id: 'copy-long-root/1', name: 'write', arguments: args, status: 'ok' }] },
+    }, false);
+    renderer.expandAll();
+    root.querySelector<HTMLButtonElement>('.nested-call-toggle')!.click();
+    return [
+      '.tool-card[data-tool-call-id="copy-long-live"] .tool-args',
+      '.tool-card[data-tool-call-id="copy-long-history"] .tool-args',
+      '.tool-card[data-tool-call-id="copy-long-root"] .nested-call-arguments',
+    ];
+  }, content);
+
+  for (const width of [380, 360]) {
+    await page.setViewportSize({ width, height: 780 });
+    for (const selector of selectors) {
+      const view = page.locator(selector);
+      const layout = await view.evaluate(element => {
+        const wrapper = element.querySelector('.code-block-wrapper')!;
+        const button = wrapper.querySelector('.copy-btn')!.getBoundingClientRect();
+        const bounds = wrapper.getBoundingClientRect();
+        const label = wrapper.querySelector<HTMLElement>('.code-block-header span')!;
+        return {
+          buttonFits: button.left >= bounds.left && button.right <= bounds.right + 1,
+          labelFits: label.scrollWidth <= label.clientWidth + 1,
+          labelText: label.textContent,
+        };
+      });
+      assert.equal(layout.buttonFits, true, 'Copy code stays inside the visible block');
+      assert.equal(layout.labelFits, true, 'long labels wrap within the header');
+      assert.equal(layout.labelText, 'notes/' + 'x'.repeat(80) + '.txt');
+      await view.locator('.copy-btn').click();
+      await page.waitForFunction((selector: string) =>
+        document.querySelector(`${selector} .copy-btn`)?.textContent === 'Copied!', selector);
+      assert.equal(await page.evaluate(() => navigator.clipboard.readText()), content);
+    }
+  }
+  await assertNoPageErrors(errors);
+});
+
 test('nested tool events leave root cards unchanged and match reloaded history', async (t: TestContext) => {
   if (skipUnlessBrowser(t)) return;
   const { page, errors } = await openPage();
