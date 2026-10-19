@@ -173,6 +173,12 @@ const launcherPanel = setupLauncherPanel({
 // State tracking
 let currentStreamingElement: HTMLElement | null = null;
 let currentStreamingText = '';
+let currentStreamingThinking = '';
+// A failed assistant reply is kept here until the whole turn settles. Pi may
+// still retry it, and an error the user never saw as final should not appear.
+type PendingAssistantError = { element: HTMLElement | null; errorMessage: string };
+let pendingAssistantError: PendingAssistantError | null = null;
+let retryStatusElement: HTMLElement | null = null;
 let sessionTotalCost = 0;
 let lastInputTokens = 0;
 let contextWindowSize = 0;  // fetched from model info
@@ -505,6 +511,8 @@ function handleLiveSessionClosed(closedId: string) {
     currentStreamingElement = null;
     currentStreamingThinking = '';
     currentStreamingText = '';
+    pendingAssistantError = null;
+    retryStatusElement = null;
     state.reset();
     showTypingIndicator(false);
     if (wasViewingActive) {
@@ -645,6 +653,8 @@ async function selectLiveSession(id: string) {
   currentStreamingElement = null;
   currentStreamingThinking = '';
   currentStreamingText = '';
+  pendingAssistantError = null;
+  retryStatusElement = null;
   state.reset();
   state.setStreaming(!!session.isStreaming);
   clearConversation();
@@ -798,6 +808,62 @@ newLiveSessionForm?.addEventListener('submit', async (e) => {
 // RPC event handlers
 // ═══════════════════════════════════════
 
+function clearRetryStatus() {
+  retryStatusElement?.remove();
+  retryStatusElement = null;
+}
+
+function showRetryStatus(event: AppEvent) {
+  clearRetryStatus();
+  const attempt = event.attempt ?? 1;
+  const maxAttempts = event.maxAttempts ?? attempt;
+  const delaySeconds = Math.max(1, Math.ceil((event.delayMs ?? 0) / 1000));
+  const detail = event.errorMessage ? `\n${event.errorMessage}` : '';
+  const element = document.createElement('div');
+  element.className = 'system-message retry-message';
+  element.textContent = `⚠️ Request failed. Retrying in ${delaySeconds}s (attempt ${attempt}/${maxAttempts})…${detail}`;
+  messagesContainer.appendChild(element);
+  retryStatusElement = element;
+  messageRenderer.scrollToBottom();
+}
+
+function flushPendingAssistantError() {
+  const pending = pendingAssistantError;
+  pendingAssistantError = null;
+  if (!pending) return;
+  if (pending.element?.isConnected) {
+    messageRenderer.appendMessageError(pending.element, pending.errorMessage);
+    return;
+  }
+  // A snapshot might already have rendered this error from session history.
+  const alreadyShown = Array.from(messagesContainer.querySelectorAll('.message-error'))
+    .some(element => (element.textContent || '').includes(pending.errorMessage));
+  if (!alreadyShown) messageRenderer.renderError(pending.errorMessage);
+}
+
+function handleAutoRetryStart(event: AppEvent) {
+  // The failed reply is not final yet, so show retry progress instead of a
+  // red error the user would see even when the retry succeeds. A failed reply
+  // with no visible content would otherwise leave an empty bubble behind.
+  const emptyContent = pendingAssistantError?.element?.querySelector('.message-content');
+  if (pendingAssistantError?.element?.isConnected && emptyContent && !emptyContent.textContent?.trim()) {
+    pendingAssistantError.element.remove();
+  }
+  pendingAssistantError = null;
+  showRetryStatus(event);
+}
+
+function handleAutoRetryEnd(event: AppEvent) {
+  clearRetryStatus();
+  // "Retry cancelled" is the user stopping the retry, not a provider failure.
+  const finalError = event.success === false && event.finalError !== 'Retry cancelled'
+    ? event.finalError
+    : undefined;
+  if (finalError && !pendingAssistantError) {
+    pendingAssistantError = { element: null, errorMessage: finalError };
+  }
+}
+
 function handleRPCEvent(event: AppEvent, sessionId: string | null = null) {
   if (event.parentToolCallId !== undefined && (
     event.type === 'tool_execution_start' ||
@@ -810,6 +876,10 @@ function handleRPCEvent(event: AppEvent, sessionId: string | null = null) {
 
   switch (event.type) {
     case 'agent_start':
+      pendingAssistantError = null;
+      clearRetryStatus();
+      handleAgentStart();
+      break;
     case 'turn_start':
       handleAgentStart();
       break;
@@ -824,6 +894,12 @@ function handleRPCEvent(event: AppEvent, sessionId: string | null = null) {
       break;
     case 'message_end':
       handleMessageEnd(event.message as AppMessage);
+      break;
+    case 'auto_retry_start':
+      handleAutoRetryStart(event);
+      break;
+    case 'auto_retry_end':
+      handleAutoRetryEnd(event);
       break;
     case 'tool_execution_start':
       handleToolExecutionStart(event);
@@ -889,6 +965,8 @@ function handleAgentStart() {
 function handleAgentSettled() {
   toolCardRenderer.settleNestedCalls();
   const wasStreaming = state.isStreaming;
+  clearRetryStatus();
+  flushPendingAssistantError();
   state.setStreaming(false);
   showTypingIndicator(false);
   currentStreamingElement = null;
@@ -908,8 +986,6 @@ function handleAgentSettled() {
   }
 }
 
-let currentStreamingThinking = '';
-
 function rememberToolDefinitions(message: AppMessage) {
   if (message?.role !== 'assistant' || !Array.isArray(message.content)) return;
   for (const block of message.content) {
@@ -922,6 +998,8 @@ function rememberToolDefinitions(message: AppMessage) {
 function handleMessageStart(message: AppMessage) {
   rememberToolDefinitions(message);
   if (message.role === 'assistant') {
+    pendingAssistantError = null;
+    clearRetryStatus();
     currentStreamingText = '';
     currentStreamingThinking = '';
     currentStreamingElement = messageRenderer.renderAssistantMessage(
@@ -997,24 +1075,24 @@ function handleMessageEnd(message: AppMessage) {
   }
   if (message?.role !== 'assistant') return;
   rememberToolDefinitions(message);
-  if (!currentStreamingElement && message?.role === 'assistant') {
-    messageRenderer.renderAssistantMessage(message, false, true);
+  let finishedElement = currentStreamingElement;
+  if (!currentStreamingElement) {
+    finishedElement = messageRenderer.renderAssistantMessage(message, false, true);
   }
   if (currentStreamingElement) {
+    finishedElement = currentStreamingElement;
     // If this client attached mid-stream, local deltas may be incomplete. The
     // message_end payload is authoritative, so refresh the streaming DOM from it
     // before finalizing.
-    if (message?.role === 'assistant') {
-      const finalText = getMessageText(message);
-      const finalThinking = getMessageThinking(message);
-      if (finalText && finalText.length >= currentStreamingText.length) {
-        currentStreamingText = finalText;
-        messageRenderer.updateStreamingMessage(currentStreamingElement, currentStreamingText);
-      }
-      if (finalThinking && finalThinking.length >= currentStreamingThinking.length) {
-        currentStreamingThinking = finalThinking;
-        messageRenderer.updateStreamingThinking(currentStreamingElement, currentStreamingThinking);
-      }
+    const finalText = getMessageText(message);
+    const finalThinking = getMessageThinking(message);
+    if (finalText && finalText.length >= currentStreamingText.length) {
+      currentStreamingText = finalText;
+      messageRenderer.updateStreamingMessage(currentStreamingElement, currentStreamingText);
+    }
+    if (finalThinking && finalThinking.length >= currentStreamingThinking.length) {
+      currentStreamingThinking = finalThinking;
+      messageRenderer.updateStreamingThinking(currentStreamingElement, currentStreamingThinking);
     }
 
     // Pass usage info for cost display
@@ -1035,6 +1113,14 @@ function handleMessageEnd(message: AppMessage) {
     }
     updateContextPill();
     showNewMessageBadge();
+  }
+
+  // Hold the error until agent_settled: an auto-retry may still replace this
+  // failed reply, and only the final failure should be shown inline.
+  if (message.stopReason === 'error') {
+    pendingAssistantError = { element: finishedElement, errorMessage: message.errorMessage || 'Request failed' };
+  } else {
+    pendingAssistantError = null;
   }
 }
 
@@ -1851,6 +1937,8 @@ async function switchSession(sessionFile: string | null | undefined, session: Si
     currentStreamingElement = null;
     currentStreamingThinking = '';
     currentStreamingText = '';
+    pendingAssistantError = null;
+    retryStatusElement = null;
     dialogHandler.clearCurrentDialog();
     viewingActiveSession = false;
     
@@ -1960,6 +2048,7 @@ function applyLiveSessionSnapshot(data: LiveSessionSnapshotData, requestedAtRevi
   currentStreamingThinking = '';
   currentStreamingText = '';
   clearConversation();
+  retryStatusElement = null;
   sessionTotalCost = 0;
   lastInputTokens = 0;
   lastUsage = null;
@@ -2079,7 +2168,7 @@ function renderHistoryItem(item: HistoryItem, target: ParentNode) {
   if (item.kind === 'user') {
     messageRenderer.renderUserMessage({ content: item.content, images: item.images }, true, target);
   } else if (item.kind === 'assistant') {
-    messageRenderer.renderAssistantMessage({ content: item.content, usage: item.usage }, false, true, target);
+    messageRenderer.renderAssistantMessage({ content: item.content, usage: item.usage, error: item.error }, false, true, target);
   } else {
     toolCardRenderer.createHistoryCard(
       {

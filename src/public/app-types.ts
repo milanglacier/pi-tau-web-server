@@ -84,6 +84,9 @@ export type AppMessage = {
   toolCallId?: string;
   isError?: boolean;
   nestedCalls?: NestedCallsRecord;
+  stopReason?: string;
+  errorMessage?: string;
+  timestamp?: number;
 };
 
 export type AppEvent = {
@@ -106,6 +109,14 @@ export type AppEvent = {
   summary?: string;
   contextUsage?: UsageRecord;
   sessionFile?: string;
+  attempt?: number;
+  maxAttempts?: number;
+  delayMs?: number;
+  success?: boolean;
+  finalError?: string;
+  errorMessage?: string;
+  aborted?: boolean;
+  reason?: string;
   [key: string]: unknown;
 };
 

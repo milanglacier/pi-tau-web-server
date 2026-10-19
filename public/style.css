@@ -3287,6 +3287,40 @@ body.hide-thinking .thinking-block { display: none !important; }
   backdrop-filter: blur(8px);
 }
 
+/* Provider failure shown inside the assistant message where the reply stopped. */
+.message-error {
+  margin-top: 10px;
+  padding: 10px 14px;
+  background: rgba(248, 113, 113, 0.06);
+  border: 1px solid rgba(248, 113, 113, 0.18);
+  border-radius: var(--radius);
+  color: var(--error);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.message-error-title {
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+
+.message-error-detail {
+  font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+/* Temporary progress notice while Pi retries a failed request. */
+.retry-message {
+  text-align: left;
+  border-left: 2px solid rgba(248, 113, 113, 0.45);
+  padding-left: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .system-message {
   text-align: center;
   padding: 10px 16px;

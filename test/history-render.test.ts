@@ -65,6 +65,58 @@ test('thinking-only assistant message still produces an item', () => {
   assert.equal(items[0].kind, 'assistant');
 });
 
+test('assistant error with no content becomes an item with the provider message', () => {
+  const { items } = buildHistoryItems([
+    msg({ role: 'assistant', content: [], stopReason: 'error', errorMessage: '401: API key expired' }),
+  ]);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].kind, 'assistant');
+  assert.deepEqual(items[0].content, '');
+  assert.equal(items[0].error, '401: API key expired');
+});
+
+test('assistant error with partial content keeps both the text and the error', () => {
+  const { items } = buildHistoryItems([
+    msg({ role: 'assistant', content: [{ type: 'text', text: 'partial answer' }], stopReason: 'error', errorMessage: '500: upstream failed' }),
+  ]);
+  assert.equal(items.length, 1);
+  assert.deepEqual(items[0].content, [{ type: 'text', text: 'partial answer' }]);
+  assert.equal(items[0].error, '500: upstream failed');
+});
+
+test('error that a later assistant reply recovered from is not shown', () => {
+  const { items } = buildHistoryItems([
+    msg({ role: 'user', content: 'question' }),
+    msg({ role: 'assistant', content: [], stopReason: 'error', errorMessage: '503: try again' }),
+    msg({ role: 'assistant', content: [{ type: 'text', text: 'recovered answer' }], stopReason: 'stop' }),
+  ]);
+  assert.deepEqual(items.map((item: { kind: string }) => item.kind), ['user', 'assistant']);
+  assert.equal(items[1].error, undefined);
+  assert.deepEqual(items[1].content, [{ type: 'text', text: 'recovered answer' }]);
+});
+
+test('only the last error in a turn is kept when several retries fail', () => {
+  const { items } = buildHistoryItems([
+    msg({ role: 'user', content: 'question' }),
+    msg({ role: 'assistant', content: [], stopReason: 'error', errorMessage: 'first failure' }),
+    msg({ role: 'assistant', content: [], stopReason: 'error', errorMessage: 'final failure' }),
+  ]);
+  assert.deepEqual(items.map((item: { kind: string }) => item.kind), ['user', 'assistant']);
+  assert.equal(items[1].error, 'final failure');
+});
+
+test('a new user turn keeps the previous turn\'s final error', () => {
+  const { items } = buildHistoryItems([
+    msg({ role: 'user', content: 'first question' }),
+    msg({ role: 'assistant', content: [], stopReason: 'error', errorMessage: '401: API key expired' }),
+    msg({ role: 'user', content: 'second question' }),
+    msg({ role: 'assistant', content: [{ type: 'text', text: 'second answer' }], stopReason: 'stop' }),
+  ]);
+  assert.deepEqual(items.map((item: { kind: string }) => item.kind), ['user', 'assistant', 'user', 'assistant']);
+  assert.equal(items[1].error, '401: API key expired');
+  assert.equal(items[3].error, undefined);
+});
+
 test('tool-call-only assistant message produces toolCall items but no assistant item', () => {
   const { items } = buildHistoryItems([
     msg({

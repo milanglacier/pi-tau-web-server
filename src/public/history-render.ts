@@ -21,6 +21,8 @@ export type HistoryAssistantItem = {
   kind: 'assistant';
   content: MessageContentBlock[] | string;
   usage?: UsageRecord;
+  /** Final provider error for this reply, shown inside the message. */
+  error?: string;
 };
 export type HistoryToolCallItem = {
   kind: 'toolCall';
@@ -40,14 +42,40 @@ export type HistoryBuildResult = {
   lastUsage: UsageRecord | null;
 };
 
+/**
+ * Mark failed assistant replies that a later assistant reply replaced within
+ * the same turn. Pi keeps the failed attempt in the session file while it
+ * retries, so reopening the session must not show errors the user never saw
+ * as final.
+ */
+function findRecoveredErrorEntries(entries: SessionHistoryEntry[]): Set<number> {
+  const recovered = new Set<number>();
+  let laterAssistantReply = false;
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (entry.type !== 'message' || !entry.message) continue;
+    const message = entry.message;
+    if (message.role === 'user') {
+      laterAssistantReply = false;
+      continue;
+    }
+    if (message.role !== 'assistant') continue;
+    if (message.stopReason === 'error' && laterAssistantReply) recovered.add(index);
+    laterAssistantReply = true;
+  }
+  return recovered;
+}
+
 export function buildHistoryItems(entries: SessionHistoryEntry[]): HistoryBuildResult {
   const items: HistoryItem[] = [];
   const toolCallItems = new Map<string, HistoryToolCallItem>();
+  const recoveredErrorEntries = findRecoveredErrorEntries(entries);
   let totalCost = 0;
   let lastInputTokens = 0;
   let lastUsage: UsageRecord | null = null;
 
-  for (const entry of entries) {
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index];
     if (entry.type !== 'message') continue;
 
     const msg = entry.message;
@@ -75,12 +103,16 @@ export function buildHistoryItems(entries: SessionHistoryEntry[]): HistoryBuildR
       const thinkingBlocks = blocks.filter((b) => b.type === 'thinking');
       const contentBlocks = blocks.filter((b) => b.type === 'text' || b.type === 'thinking');
       const text = textBlocks.map((b) => b.text).join('\n');
+      const error = msg.stopReason === 'error' && !recoveredErrorEntries.has(index)
+        ? (msg.errorMessage || 'Request failed')
+        : undefined;
 
-      if (text || thinkingBlocks.length > 0) {
+      if (text || thinkingBlocks.length > 0 || error) {
         items.push({
           kind: 'assistant',
           content: contentBlocks.length > 0 ? contentBlocks : text,
           usage: msg.usage,
+          ...(error ? { error } : {}),
         });
 
         if (msg.usage?.cost?.total) {
