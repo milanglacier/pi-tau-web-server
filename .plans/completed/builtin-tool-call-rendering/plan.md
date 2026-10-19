@@ -2,6 +2,8 @@
 
 Branch: `feat/builtin-tool-call-rendering`
 
+Status: Completed.
+
 ## Goal
 
 Show built-in `bash`, `edit`, `read`, and `write` tool calls in clear, task-specific formats instead of dumping their raw JSON argument objects. Keep live cards, saved history cards, and nested tool calls inside `codemode` consistent.
@@ -96,3 +98,11 @@ Show built-in `bash`, `edit`, `read`, and `write` tool calls in clear, task-spec
   - `write` with multi-line `content`, verifying unescaped multi-line display and `Copy code`.
   - Preservation of open nested argument DOM nodes across live status/duration updates and JSON/omitted fallbacks when required fields are missing or invalid.
 - Run `npm run typecheck`, `npm test`, and focused/full browser e2e tests.
+
+## Completion results
+
+Built-in tool calls use task-specific views in live cards, history cards, and nested calls. Expanded file-tool views show full, selectable paths and read ranges. Long code-block labels wrap while keeping Copy code visible and usable.
+
+Both findings in [the review](review.md) are fixed. The original review is preserved, with fix summaries and validation results appended.
+
+Validation passed: `npm run typecheck`, all 265 tests in `npm test`, and all 70 browser tests in `npm run test:e2e`.
