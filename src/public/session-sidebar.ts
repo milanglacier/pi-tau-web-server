@@ -151,11 +151,10 @@ export class SessionSidebar {
   }
 
   renderSearchResults() {
-    if (!this._searchResults || this._searchResults.length === 0) return;
-
     // Remove previous search results section
     const existing = this.container.querySelector('.search-results-group');
     if (existing) existing.remove();
+    if (!this.searchQuery || !this._searchResults?.length) return;
 
     const group = document.createElement('div');
     group.className = 'search-results-group';
@@ -417,6 +416,7 @@ export class SessionSidebar {
         for (const project of this.projects) {
           project.sessions = (project.sessions || []).filter(s => s.filePath !== session.filePath);
         }
+        this._searchResults = this._searchResults?.filter(result => result.filePath !== session.filePath) ?? null;
         // Remove from favourites if present
         if (session.filePath) {
           const favIdx = this.favourites.indexOf(session.filePath);
@@ -567,7 +567,10 @@ export class SessionSidebar {
       this.container.appendChild(group);
     }
 
-    if (this.searchQuery) this.applySearch();
+    if (this.searchQuery) {
+      this.applySearch();
+      this.renderSearchResults();
+    }
     this.onRendered?.();
   }
 

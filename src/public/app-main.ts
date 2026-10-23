@@ -419,6 +419,8 @@ wsClient.addEventListener('stateUpdate', (e: Event) => {
   } else {
     if (activeLiveSessionId && !liveSessions.some(s => s.id === activeLiveSessionId)) {
       activeLiveSessionId = null;
+      activeLiveSessionFile = null;
+      sidebar.clearActive();
       localStorage.removeItem('tau-active-live-session-id');
       renderQueuedMessages();
       renderLiveTabs();
@@ -510,6 +512,7 @@ function handleLiveSessionClosed(closedId: string) {
     activeLiveSessionId = null;
     localStorage.removeItem('tau-active-live-session-id');
     activeLiveSessionFile = null;
+    sidebar.clearActive();
     currentStreamingElement = null;
     currentStreamingThinking = '';
     currentStreamingText = '';
@@ -632,6 +635,7 @@ function restoreActiveLiveSession() {
     activeLiveSessionId = null;
     viewingActiveSession = false;
     activeLiveSessionFile = null;
+    sidebar.clearActive();
     localStorage.removeItem('tau-active-live-session-id');
     state.reset();
     renderQueuedMessages();
@@ -648,7 +652,6 @@ async function selectLiveSession(id: string) {
   activeLiveSessionId = id;
   localStorage.setItem('tau-active-live-session-id', id);
   viewingActiveSession = true;
-  activeLiveSessionFile = session.sessionFile || null;
   renderLiveTabs();
   renderQueuedMessages();
   applyActiveSessionMetadata(session);
@@ -681,6 +684,8 @@ async function selectLiveSession(id: string) {
 
 function applyActiveSessionMetadata(session: LiveSession) {
   if (!session) return;
+  activeLiveSessionFile = session.sessionFile || null;
+  sidebar.setActive(activeLiveSessionFile);
   // Server is canonical: session.model is always null or a full {provider,id}
   // object, so assign directly. No modelLabel/modelSpec string fallbacks.
   modelPickerController.setModelState(session.model || '', session.thinkingLevel || 'off');
@@ -2025,6 +2030,7 @@ function applyLiveSessionSnapshot(data: LiveSessionSnapshotData, requestedAtRevi
   if (!staleMetadata) {
     if (data.session) upsertLiveSession(data.session);
     activeLiveSessionFile = data.sessionFile || data.session?.sessionFile || null;
+    sidebar.setActive(activeLiveSessionFile);
     state.setStreaming(!!data.isStreaming);
     showTypingIndicator(!!data.isStreaming);
   }

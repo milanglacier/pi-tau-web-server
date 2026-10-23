@@ -4,11 +4,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { chromium } from 'playwright';
 import type { Browser, Page } from 'playwright';
 
-// The real browser and Tau server, with session files written to disk. The
-// "big" project has more sessions than the sidebar shows by default.
+// The real browser and Tau server, with session files written to disk and Pi
+// replaced at its stdio boundary. The "big" project has more than 10 sessions.
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-sidebar-e2e-'));
 const projects = path.join(tmp, 'projects');
 const sessionsDir = path.join(tmp, 'sessions');
@@ -16,7 +18,7 @@ process.env.TAU_HOST = '127.0.0.1';
 process.env.PI_CODING_AGENT_DIR = tmp;
 process.env.PI_CODING_AGENT_SESSION_DIR = sessionsDir;
 process.env.TAU_PROJECTS_DIR = projects;
-const { server, computeUrls, liveManager } = (await import('../../bin/tau.js')) as any;
+const { server, computeUrls, liveManager, _setSpawnPiForTest, _setExecFileForTest } = (await import('../../bin/tau.js')) as any;
 
 const BIG = path.join(projects, 'big');
 const SMALL = path.join(projects, 'small');
@@ -45,6 +47,31 @@ function writeSession(projectPath: string, name: string, title: string, ageSecon
 }
 
 before(async () => {
+  _setSpawnPiForTest((_command: string, args: string[]) => {
+    const child: any = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.pid = 12345;
+    child.kill = () => { queueMicrotask(() => child.emit('exit', 0)); };
+    const sessionIndex = args.indexOf('--session');
+    const sessionFile = sessionIndex >= 0 ? args[sessionIndex + 1] : null;
+    let buffer = '';
+    child.stdin.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString();
+      while (buffer.includes('\n')) {
+        const end = buffer.indexOf('\n');
+        const command = JSON.parse(buffer.slice(0, end));
+        buffer = buffer.slice(end + 1);
+        child.stdout.write(JSON.stringify({
+          type: 'response', id: command.id, command: command.type, success: true,
+          data: command.type === 'get_state' ? { sessionFile, isStreaming: false } : {},
+        }) + '\n');
+      }
+    });
+    return child;
+  });
+  _setExecFileForTest((_file: string, _args: string[], _opts: object, cb: (err: Error | null, stdout: string, stderr: string) => void) => cb(null, '', ''));
   fs.mkdirSync(BIG, { recursive: true });
   fs.mkdirSync(SMALL, { recursive: true });
   fs.mkdirSync(TRASH, { recursive: true });
@@ -68,6 +95,8 @@ before(async () => {
 after(async () => {
   if (browser) await browser.close();
   await liveManager.shutdown();
+  _setSpawnPiForTest(null);
+  _setExecFileForTest(null);
   await new Promise<void>((resolve) => server.close(() => resolve()));
   fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -114,35 +143,45 @@ test('Show all expands only that project and Show fewer limits it again', async 
   assert.equal((await titles(page, 'big')).length, 10);
 });
 
-test('the open session stays listed after the 10 newest, and leaves when another one is opened', async (t) => {
+test('live-tab selection, reload, and closing tabs keep the open session listed', async (t) => {
   const page = await openSidebar(t);
   if (!page) return;
-  // A separate sidebar on the same data lets the test open sessions without
-  // starting a Pi process.
-  const result = await page.evaluate(async (bigPath: string) => {
-    const modulePath = '/session-sidebar.js';
-    const { SessionSidebar } = await import(modulePath);
-    const data = await (await fetch('/api/sessions')).json();
-    const project = data.projects.find((p: { path: string }) => p.path === bigPath);
-    const container = document.createElement('div');
-    document.body.appendChild(container);
-    const sidebar = new SessionSidebar(container, () => {});
-    sidebar.projects = [project];
-    const titlesNow = () => Array.from(container.querySelectorAll('.session-title')).map((el) => el.textContent);
-    sidebar.render();
-    const initial = titlesNow();
-    sidebar.setActive(project.sessions[12].filePath);
-    const withOld = titlesNow();
-    const activeRows = container.querySelectorAll('.session-item.active').length;
-    sidebar.setActive(project.sessions[2].filePath);
-    const afterSwitch = titlesNow();
-    return { initial: initial.length, withOld, activeRows, afterSwitch };
-  }, BIG);
-  assert.equal(result.initial, 10);
-  assert.equal(result.withOld.length, 11);
-  assert.equal(result.withOld[10], 'big session 12');
-  assert.equal(result.activeRows, 1);
-  assert.equal(result.afterSwitch.length, 10);
+  const resume = async (index: number) => {
+    const response = await fetch(`${base}/api/live-sessions/resume`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filePath: path.join(sessionsDir, '--big--', `big-${index}.jsonl`) }),
+    });
+    assert.equal(response.status, 200);
+    const { session } = await response.json() as { session: { id: string } };
+    t.after(async () => { await fetch(`${base}/api/live-sessions/${session.id}`, { method: 'DELETE' }); });
+    return page.locator(`.live-tab[data-session-id="${session.id}"]`);
+  };
+  const oldest = await resume(12);
+  const recent = await resume(2);
+  const activeTitle = group(page, 'big').locator('.session-item.active .session-title');
+
+  await oldest.click();
+  await activeTitle.filter({ hasText: 'big session 12' }).waitFor();
+  assert.deepEqual(await titles(page, 'big'), [
+    ...Array.from({ length: 10 }, (_, i) => `big session ${i}`), 'big session 12',
+  ]);
+
+  await page.reload();
+  await activeTitle.filter({ hasText: 'big session 12' }).waitFor();
+  assert.equal((await titles(page, 'big')).length, 11);
+
+  await recent.click();
+  await activeTitle.filter({ hasText: 'big session 2' }).waitFor();
+  assert.equal((await titles(page, 'big')).length, 10);
+
+  await recent.locator('.live-tab-close').click();
+  await activeTitle.filter({ hasText: 'big session 12' }).waitFor();
+  assert.equal((await titles(page, 'big')).length, 11);
+
+  await oldest.locator('.live-tab-close').click();
+  await page.waitForFunction(() => document.querySelectorAll('.live-tab').length === 0);
+  assert.equal((await titles(page, 'big')).length, 10);
+  assert.equal(await activeTitle.count(), 0);
 });
 
 test('searching finds sessions beyond the 10 shown, and clearing the search limits the project again', async (t) => {
@@ -157,7 +196,7 @@ test('searching finds sessions beyond the 10 shown, and clearing the search limi
   assert.equal(await group(page, 'big').locator('.project-more-btn span:last-child').textContent(), `Show all ${BIG_COUNT}`);
 });
 
-test('a project + opens the new tab popup with that project directory without collapsing the project', async (t) => {
+test('a project + opens the popup without collapsing the project and creates a tab in that directory', async (t) => {
   const page = await openSidebar(t);
   if (!page) return;
   await group(page, 'big').locator('.project-add-btn').click();
@@ -171,6 +210,16 @@ test('a project + opens the new tab popup with that project directory without co
   await group(page, 'small').locator('.project-add-btn').click();
   await page.waitForSelector('#new-live-session-modal:not(.hidden)');
   assert.equal(await page.inputValue('#new-live-session-cwd'), SMALL);
+
+  const createdResponse = page.waitForResponse(response => response.url() === `${base}/api/live-sessions` && response.request().method() === 'POST');
+  await page.click('#new-live-session-submit');
+  const response = await createdResponse;
+  assert.equal(response.status(), 200);
+  const { session } = await response.json() as { session: { id: string; cwd: string } };
+  t.after(async () => { await fetch(`${base}/api/live-sessions/${session.id}`, { method: 'DELETE' }); });
+  await page.waitForSelector(`.live-tab.active[data-session-id="${session.id}"]`);
+  assert.equal(session.cwd, SMALL);
+  assert.equal(await page.locator('#new-live-session-modal').isVisible(), false);
 });
 
 test('only project headers have a +, not the favourites or search result headers', async (t) => {
@@ -192,4 +241,27 @@ test('deleting a session in a limited project brings in the next older one', asy
   assert.deepEqual(shown, Array.from({ length: 10 }, (_, i) => `trash session ${i + 1}`));
   // Ten sessions are left, so the toggle is gone.
   assert.equal(await group(page, 'trash').locator('.project-more-btn').count(), 0);
+});
+
+test('deleting during full-text search keeps the remaining message matches', async (t) => {
+  const page = await openSidebar(t);
+  if (!page) return;
+  page.on('dialog', (dialog) => dialog.accept());
+  await page.fill('#session-search-input', 'small session');
+  const matches = page.locator('.search-results-group .session-title');
+  await matches.nth(1).waitFor();
+
+  for (let index = 0; index < 2; index++) {
+    const title = group(page, 'small').locator('.session-title').filter({ hasText: `small session ${index}` });
+    await title.click({ button: 'right' });
+    await page.click('.context-menu-item:has-text("Delete")');
+    await title.waitFor({ state: 'detached' });
+    assert.deepEqual(await matches.allTextContents(), index === 0 ? ['small session 1'] : []);
+    assert.equal(await page.inputValue('#session-search-input'), 'small session');
+    if (index === 0) {
+      assert.equal(await page.locator('.search-results-header .project-count').textContent(), '1');
+    } else {
+      assert.equal(await page.locator('.search-results-group').count(), 0);
+    }
+  }
 });
