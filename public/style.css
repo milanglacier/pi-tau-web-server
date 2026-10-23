@@ -605,6 +605,63 @@ body {
 
 .project-sessions.collapsed { display: none; }
 
+/* "+" on a project header: start a new session in that project */
+.project-add-btn {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  margin: -4px -4px -4px 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--accent-text);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  opacity: 0.6;
+  transition: all var(--duration) var(--ease);
+}
+
+.project-add-btn:hover {
+  opacity: 1;
+  background: var(--bg-glass-hover);
+}
+
+.project-add-btn:active { opacity: 0.7; }
+
+/* Row under a project's sessions that shows all of them or fewer */
+.project-more-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 12px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: all var(--duration) var(--ease);
+}
+
+.project-more-btn:hover {
+  background: var(--bg-glass-hover);
+  color: var(--text-secondary);
+}
+
+.project-more-btn .chevron {
+  font-size: 8px;
+  opacity: 0.6;
+  transition: transform var(--duration) var(--ease);
+}
+
+.project-more-btn.expanded .chevron { transform: rotate(180deg); }
+
 /* Session items */
 .session-item {
   display: flex;
@@ -3644,6 +3701,17 @@ body.hide-thinking .thinking-block { display: none !important; }
   .project-count {
     font-size: 11px;
     font-weight: 400;
+  }
+
+  .project-add-btn {
+    width: 32px;
+    height: 32px;
+    margin: -8px 0;
+  }
+
+  .project-more-btn {
+    padding: 12px 4px;
+    font-size: 14px;
   }
 
   .search-snippet {

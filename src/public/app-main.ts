@@ -60,8 +60,10 @@ const dialogHandler = new DialogHandler(document.getElementById('dialog-containe
 // Session sidebar
 const sidebar = new SessionSidebar(
   document.getElementById('session-list')!,
-  handleSessionSelect
+  handleSessionSelect,
+  (project) => openNewLiveSessionModal(project.path)
 );
+sidebar.onRendered = () => updateLiveSessionIndicators();
 
 // UI elements
 const messageInput = document.getElementById('message-input')!;
@@ -757,11 +759,12 @@ const modelCompletion = attachCompletionList({
   },
 });
 
-function openNewLiveSessionModal() {
+function openNewLiveSessionModal(cwd?: string) {
   newLiveSessionOverlay?.classList.remove('hidden');
   newLiveSessionModal?.classList.remove('hidden');
   newLiveSessionSubmit.disabled = false;
-  if (!newLiveSessionCwd.value) newLiveSessionCwd.value = liveSessions.find(s => s.id === activeLiveSessionId)?.cwd || '';
+  if (cwd) newLiveSessionCwd.value = cwd;
+  else if (!newLiveSessionCwd.value) newLiveSessionCwd.value = liveSessions.find(s => s.id === activeLiveSessionId)?.cwd || '';
   loadProjectChips();
   loadNewLiveSessionModels();
   requestAnimationFrame(() => newLiveSessionCwd?.focus());
@@ -774,7 +777,7 @@ function closeNewLiveSessionModal() {
   newLiveSessionModal?.classList.add('hidden');
 }
 
-liveTabAddBtn?.addEventListener('click', openNewLiveSessionModal);
+liveTabAddBtn?.addEventListener('click', () => openNewLiveSessionModal());
 document.getElementById('new-live-session-close')?.addEventListener('click', closeNewLiveSessionModal);
 document.getElementById('new-live-session-cancel')?.addEventListener('click', closeNewLiveSessionModal);
 newLiveSessionOverlay?.addEventListener('click', closeNewLiveSessionModal);
@@ -925,8 +928,7 @@ function handleRPCEvent(event: AppEvent, sessionId: string | null = null) {
     case 'session_name':
       // Auto-title: update sidebar with new session name
       if (event.name) {
-        const activeItem = document.querySelector('.session-item.active .session-title');
-        if (activeItem) activeItem.textContent = event.name;
+        sidebar.setActiveSessionName(event.name);
       }
       break;
   }
@@ -1844,7 +1846,7 @@ sidebarOverlay.addEventListener('click', () => {
 
 
 const newSessionBtn = document.getElementById('new-session-btn')!;
-newSessionBtn.addEventListener('click', openNewLiveSessionModal);
+newSessionBtn.addEventListener('click', () => openNewLiveSessionModal());
 
 refreshSessionsBtn.addEventListener('click', () => {
   if (isMobile()) {
