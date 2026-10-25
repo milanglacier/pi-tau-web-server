@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 const {
   parseArgs,
   expandHome,
+  resolvePiCommand,
   modelLabel,
   makeId,
   isWithinPath,
@@ -25,6 +26,20 @@ test('parseArgs parses --key value pairs and boolean --open', () => {
 
 test('parseArgs ignores non-flag tokens', () => {
   assert.deepEqual(parseArgs(['positional', '--port', '9']), { port: '9' });
+});
+
+test('resolvePiCommand prefers --pi-command, then TAU_PI_COMMAND, then pi', () => {
+  assert.equal(resolvePiCommand({}, {}), 'pi');
+  assert.equal(resolvePiCommand({}, { TAU_PI_COMMAND: 'pi-bolt' }), 'pi-bolt');
+  assert.equal(resolvePiCommand({ 'pi-command': 'pig' }, { TAU_PI_COMMAND: 'pi-bolt' }), 'pig');
+  // blank values fall through to the next source
+  assert.equal(resolvePiCommand({ 'pi-command': '  ' }, { TAU_PI_COMMAND: '' }), 'pi');
+  assert.equal(parseArgs(['--pi-command', 'pi-bolt'])['pi-command'], 'pi-bolt');
+});
+
+test('resolvePiCommand expands a leading tilde', () => {
+  const home = process.env.HOME || process.env.USERPROFILE;
+  assert.equal(resolvePiCommand({ 'pi-command': '~/bin/pig' }, {}), `${home}/bin/pig`);
 });
 
 test('expandHome expands a leading tilde and passes through others', () => {

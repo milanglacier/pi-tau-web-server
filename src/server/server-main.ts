@@ -20,7 +20,7 @@ import type { Stats, Dirent } from 'node:fs';
 import type { Socket } from 'node:net';
 import type { WebSocket as WsType } from 'ws';
 import type { JsonRecord, RpcCommand, RpcResponse, StatusError } from './types.js';
-import { ARGS, AUTH_CONFIGURED, HOST, MIME_TYPES, PI_AGENT_DIR, PORT, SESSIONS_DIR, STATIC_DIR, TAU_SETTINGS, USER_HOME, expandHome, loadTauSettings, parseArgs, saveTauSetting } from './config.js';
+import { ARGS, AUTH_CONFIGURED, HOST, MIME_TYPES, PI_AGENT_DIR, PI_COMMAND, PORT, SESSIONS_DIR, STATIC_DIR, TAU_SETTINGS, USER_HOME, expandHome, loadTauSettings, parseArgs, resolvePiCommand, saveTauSetting } from './config.js';
 import { SESSION_COOKIE_NAME, SESSION_REFRESH_THRESHOLD_SECONDS, buildSessionCookie, issueSessionToken, parseCookies, verifySessionToken } from './auth.js';
 import { completeDirectories } from './path-completion.js';
 import { getAvailableModels, modelLabel, normalizeModel, parseModelSpecToModel, parsePiListModels, _clearModelListCacheForTest, _setExecFileForTest } from './model-utils.js';
@@ -263,7 +263,7 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
       const args = ['--export', sf];
       if (command.outputPath) args.push(resolveExportOutputPath(command.outputPath, sf));
       const output = await new Promise<string>((resolve, reject) => {
-        execFile('pi', args, { cwd: session?.cwd || path.dirname(sf), timeout: 30000, encoding: 'utf8' }, (err: ExecException | null, stdout: string, stderr: string) => {
+        execFile(PI_COMMAND, args, { cwd: session?.cwd || path.dirname(sf), timeout: 30000, encoding: 'utf8' }, (err: ExecException | null, stdout: string, stderr: string) => {
           if (err) reject(new Error(stderr || err.message)); else resolve(stdout);
         });
       });
@@ -928,6 +928,7 @@ function listen(port: number, attemptsLeft = 10) {
     computeUrls(port);
     console.log(`[Tau] Server running on ${lanUrl}${tailscaleUrl ? `  •  Tailscale: ${tailscaleUrl}` : ''}`);
     console.log(`[Tau] Static assets: ${STATIC_DIR}`);
+    console.log(`[Tau] Pi command: ${PI_COMMAND}`);
     if (ARGS.open) openUrl(lanUrl).catch(() => {});
   });
 }
@@ -963,13 +964,15 @@ function _setAuthForTest(enabled: boolean) { authEnabled = !!enabled; }
 function _setCredentialsForTest(user: string, pass: string) { TAU_SETTINGS.user = user; TAU_SETTINGS.pass = pass; }
 function _issueSessionTokenForTest(expiresAtSeconds?: number) { return issueSessionToken(expiresAtSeconds); }
 
-// Test-only hook to substitute the `pi` spawn so LiveSessionManager.create()
+// Test-only hook to substitute the Pi spawn so LiveSessionManager.create()
 // can be exercised without launching a real Pi process.
 
 export {
   parseArgs,
   expandHome,
   loadTauSettings,
+  resolvePiCommand,
+  PI_COMMAND,
   modelLabel,
   normalizeModel,
   parseModelSpecToModel,

@@ -28,6 +28,17 @@ export function expandHome(p: string) {
   return p.startsWith('~') ? path.join(USER_HOME, p.slice(1)) : p;
 }
 
+// The executable Tau runs for every Pi call: RPC tabs, the model list, and
+// HTML export. It can be a name on PATH or a path, such as a Pi fork
+// (`pi-bolt`) or a wrapper script. It runs without a shell, so the value is
+// one executable with no extra arguments.
+export function resolvePiCommand(args: TauArgs, env: NodeJS.ProcessEnv = process.env): string {
+  const flag = typeof args['pi-command'] === 'string' ? args['pi-command'].trim() : '';
+  return expandHome(flag || (env.TAU_PI_COMMAND || '').trim() || 'pi');
+}
+
+export const PI_COMMAND = resolvePiCommand(ARGS);
+
 export function loadTauSettings(): TauSettings {
   let settings: TauSettingsFile['tau'] = {};
   try {

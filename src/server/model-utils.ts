@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 
+import { PI_COMMAND } from './config.js';
 import type { JsonRecord, ModelIdentity, ParsedModelSpec, StatusError } from './types.js';
 
 type ExecFileCallback = (err: NodeJS.ErrnoException | null, stdout: string, stderr: string) => void;
@@ -109,7 +110,7 @@ export async function getAvailableModels() {
     return modelListCache.models;
   }
   try {
-    const { stdout } = await execFileAsync('pi', ['--list-models'], { timeout: 30000, encoding: 'utf8' });
+    const { stdout } = await execFileAsync(PI_COMMAND, ['--list-models'], { timeout: 30000, encoding: 'utf8' });
     const models = parsePiListModels(stdout);
     modelListCache = { at: now, models };
     return models;

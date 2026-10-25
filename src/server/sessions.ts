@@ -5,7 +5,7 @@ import { WebSocket } from 'ws';
 
 import type { ChildProcess } from 'node:child_process';
 import type { AbortState, JsonRecord, LiveClient, ModelIdentity, PendingCommand, PendingDialog, RpcCommand, RpcResponse } from './types.js';
-import { expandHome } from './config.js';
+import { PI_COMMAND, expandHome } from './config.js';
 import { modelLabel, normalizeModel, parseModelSpecToModel } from './model-utils.js';
 import { NAVIGATE_COMMAND } from './tree.js';
 
@@ -211,7 +211,7 @@ export class PiRpcSession {
     if (this.modelSpec) args.push('--model', this.modelSpec);
     this.navigateCommandChecked = false;
     const spawnFn: SpawnFn = _spawnPiForTest || spawn;
-    const child = spawnFn('pi', args, {
+    const child = spawnFn(PI_COMMAND, args, {
       cwd: this.cwd,
       env: { ...process.env, TAU_DISABLED: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -234,11 +234,13 @@ export class PiRpcSession {
         child.off('error', onError);
         child.off('exit', onExit);
       };
-      const onError = (err: Error) => {
+      const onError = (err: NodeJS.ErrnoException) => {
         if (settled) return;
         settled = true;
         cleanup();
-        reject(err);
+        reject(err.code === 'ENOENT'
+          ? new Error(`Could not start Pi: the command "${PI_COMMAND}" was not found. Set --pi-command or TAU_PI_COMMAND to a Pi executable.`)
+          : err);
       };
       const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
         if (settled) return;

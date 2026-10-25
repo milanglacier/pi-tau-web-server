@@ -188,6 +188,7 @@ Six built-in themes: Dusk (clean neutral dark, default), Dawn (warm blue dark), 
 | `--port` / `TAU_PORT`                 |                                Server port (default: `3001`) |
 | `--host` / `TAU_HOST`                 |                            Bind address (default: `0.0.0.0`) |
 | `--projects-dir` / `TAU_PROJECTS_DIR` | Directory scanned for project chips in the new-session modal; also the base for relative paths typed in the project field |
+| `--pi-command` / `TAU_PI_COMMAND`     |                     Pi executable that Tau runs (default: `pi`) |
 
 ### Environment variables
 
@@ -196,6 +197,7 @@ Six built-in themes: Dusk (clean neutral dark, default), Dawn (warm blue dark), 
 | `TAU_PORT`         |      `3001` |                                              Server port |
 | `TAU_HOST`         |   `0.0.0.0` |                                             Bind address |
 | `TAU_PROJECTS_DIR` |    _(none)_ | Directory scanned for project chips in the new-tab modal |
+| `TAU_PI_COMMAND`   |        `pi` |                              Pi executable that Tau runs |
 | `TAU_STATIC_DIR`   | _(bundled)_ |                               Override static files path |
 | `TAU_USER`         |    _(none)_ |                                 HTTP Basic Auth username |
 | `TAU_PASS`         |    _(none)_ |                                 HTTP Basic Auth password |
@@ -203,6 +205,17 @@ Six built-in themes: Dusk (clean neutral dark, default), Dawn (warm blue dark), 
 | `TAU_INTERACTION_DIAGNOSTICS` | _(off)_ | Set to `1` to log dialog/Abort lifecycle IDs, reasons, and timestamps to stderr |
 
 Tau also reads matching values from `~/.pi/agent/settings.json` under the `tau` key (`host`, `port`, `projectsDir`, `user`, `pass`, `authEnabled`, `cookieSecret`).
+
+### Using a different Pi command
+
+To run a Pi fork or wrapper instead of `pi`, pass `--pi-command` or set
+`TAU_PI_COMMAND` (the flag wins). The value is a single executable with no
+arguments. If it keeps its config outside `~/.pi/agent`, also set
+`PI_CODING_AGENT_DIR`.
+
+```bash
+pi-tau-web-server --pi-command pi-bolt
+```
 
 ### Authentication
 
