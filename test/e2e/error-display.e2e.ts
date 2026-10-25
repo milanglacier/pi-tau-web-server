@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { chromium } from 'playwright';
 import type { TestContext } from 'node:test';
-import type { Browser, BrowserContext, Page } from 'playwright';
+import type { Browser, Page } from 'playwright';
 
 // Real-browser test for provider errors: a failed reply must show the error
 // where the reply stopped, and an error Pi recovered from with a retry must
@@ -23,7 +23,6 @@ const { server, computeUrls, SESSIONS_DIR, liveManager, _setSpawnPiForTest, _set
 let base = '';
 let browser: Browser | null = null;
 let browserUnavailable = '';
-const contexts: BrowserContext[] = [];
 
 const PROJ_DIR = path.join(SESSIONS_DIR, '--tmp--error-e2e');
 const FINAL_ERROR = '401: {"type":"authentication_error","code":"api_key_expired","message":"This API key has expired."}';
@@ -73,9 +72,9 @@ function writeSession(cwd: string) {
   fs.writeFileSync(sessionFile, entries.map((entry) => JSON.stringify(entry)).join('\n') + '\n');
 }
 
-async function openPage() {
+async function openPage(t: TestContext) {
   const context = await browser!.newContext();
-  contexts.push(context);
+  t.after(() => context.close());
   const page = await context.newPage();
   const errors: string[] = [];
   page.on('pageerror', (err: Error) => errors.push(`pageerror: ${err.message}`));
@@ -136,7 +135,6 @@ before(async () => {
 });
 
 after(async () => {
-  for (const context of contexts) await context.close().catch(() => {});
   if (browser) await browser.close().catch(() => {});
   await liveManager.shutdown();
   _setSpawnPiForTest(null);
@@ -146,7 +144,7 @@ after(async () => {
 
 test('reopened history shows the final provider error and hides an error Pi recovered from', async (t: TestContext) => {
   if (skipUnlessBrowser(t)) return;
-  const { page, errors } = await openPage();
+  const { page, errors } = await openPage(t);
   await openErrorSession(page);
 
   const visibleErrors = await page.evaluate(() =>
@@ -161,7 +159,7 @@ test('reopened history shows the final provider error and hides an error Pi reco
 
 test('a failed reply shows a retry notice, then only the final failure stays inline', async (t: TestContext) => {
   if (skipUnlessBrowser(t)) return;
-  const { page, errors } = await openPage();
+  const { page, errors } = await openPage(t);
   await openErrorSession(page);
 
   const session = liveManager.findBySessionFile(sessionFile);
