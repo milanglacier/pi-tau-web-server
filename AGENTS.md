@@ -62,6 +62,15 @@ Expected content:
 
 Avoid turning the note into a step-by-step implementation plan. Do not include granular patch instructions.
 
+## Record pitfalls, not a description of the code
+
+This file records only pitfalls that the code does not make obvious. Do not note
+implementation details, repeat what the code already shows, or write long
+descriptions. Those details go stale and bury the warning. Record an outcome
+only when it is a hard contract that must be preserved, not when the code
+already makes it clear. Do not fill the file with obvious outcomes, and do not
+spell out an obvious outcome at length.
+
 ## Model strings are two separate fields — don't parse or split them
 
 Pi's API always sends the model as a structured object with separate `provider`
@@ -76,8 +85,9 @@ naturally produces `openrouter/z-ai/glm-5.2`. When adding a thinking level for
 the model input box, append `:level` to the full string:
 `openrouter/z-ai/glm-5.2:high`.
 
-## End-to-end tests take over 250000 ms, so allow for that
+## Keep the end-to-end suite near 35 seconds
 
-A full `npm run test:e2e` run takes more than 250000 ms. A tool with a shorter
-default timeout will kill it partway, so set the timeout or run it as a
-background command and wait for it to finish.
+A full `npm run test:e2e` run takes about 35 seconds. Files run in parallel,
+so one slow file decides the total. Give the command a long enough timeout or
+run it as a background task. A file that takes minutes usually leaves browser
+pages open after each test or slows the CPU when it does not need to.
