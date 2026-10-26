@@ -43,6 +43,8 @@ export type LiveSession = {
   isStreaming?: boolean;
   pendingInteractionCount?: number;
   abortState?: 'idle' | 'stopping' | 'timed_out' | 'failed';
+  /** The compaction Pi is running, or null. `startedAt` is a Unix time in milliseconds. */
+  compaction?: { reason: string; startedAt: number } | null;
   createdAt?: string;
   lastActiveAt?: string;
   contextUsage?: UsageRecord;
@@ -122,6 +124,6 @@ export type AppEvent = {
 
 export type PendingImage = { data: string; mimeType: string };
 export type PendingFilePath = { path: string; name: string; ext: string; sessionId?: string | null };
-export type QueuedCommand = { type: string; message?: string; images?: PendingImage[]; sessionId?: string; error?: string };
+export type QueuedCommand = { type: string; id?: string; message?: string; images?: PendingImage[]; sessionId?: string; error?: string };
 export type ExtensionUIRequest = { sessionId: string; event: AppEvent };
 export type RpcCommand = { type: string; sessionId?: string; filePath?: string; [key: string]: unknown };

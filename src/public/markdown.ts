@@ -343,6 +343,20 @@ function extractDisplayMath(text: string, blocks: string[]) {
   return text;
 }
 
+/**
+ * Render markdown from text that must not inject HTML, such as a compaction
+ * summary. HTML tags in the text show as text. Code keeps its exact content,
+ * because the renderer already escapes code blocks and inline code.
+ */
+export function renderMarkdownText(text: string) {
+  if (!text) return '';
+  const escapeText = (segment: string) => segment.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const escapeOutsideInlineCode = (segment: string) =>
+    segment.split(/(`[^`\n]+`)/).map((part, index) => (index % 2 ? part : escapeText(part))).join('');
+  const parts = text.replace(/\r\n/g, '\n').split(/(```\w*\n[\s\S]*?```)/);
+  return renderMarkdown(parts.map((part, index) => (index % 2 ? part : escapeOutsideInlineCode(part))).join(''));
+}
+
 function escapeHtml(text: string) {
   return text
     .replace(/&/g, '&amp;')

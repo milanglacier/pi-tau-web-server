@@ -20,6 +20,8 @@ import { setupCommandPalette } from './command-palette.js';
 import { setupSessionStatsCard, type SessionStats } from './session-stats-card.js';
 import { isImeComposition } from './keyboard.js';
 import { buildHistoryItems, type HistoryItem, type SessionHistoryEntry } from './history-render.js';
+import { parseCompactCommand } from './compact-command.js';
+import { formatElapsed, renderCompactionRow, type CompactionRowState, type SummaryRetry } from './compaction-row.js';
 
 import type { AppEvent, AppMessage, ExtensionUIRequest, InteractionState, LiveInstance, LiveSession, MessageContentBlock, ModelRecord, PendingDialog, PendingFilePath, PendingImage, QueuedCommand, RpcCommand, UsageRecord } from './app-types.js';
 
@@ -33,7 +35,11 @@ type LiveSessionSnapshotData = {
   entries?: SessionHistoryEntry[];
   pendingDialogs?: PendingDialog[];
   interactionRevision?: number;
+  compaction?: LiveSession['compaction'];
 };
+
+type CompactionResult = { summary?: string; tokensBefore?: number; estimatedTokensAfter?: number };
+type RunningCompaction = Extract<CompactionRowState, { status: 'running' }>;
 
 type RpcEventDetail = { sessionId?: string; event?: AppEvent };
 
@@ -183,6 +189,12 @@ let pendingAssistantError: PendingAssistantError | null = null;
 let retryStatusElement: HTMLElement | null = null;
 let sessionTotalCost = 0;
 let lastInputTokens = 0;
+// True while lastInputTokens is Pi's estimate after a compaction. The next
+// reply that reports usage replaces it with a real count.
+let contextTokensEstimated = false;
+// The transcript row of the compaction running in the viewed tab.
+let compactionRow: { element: HTMLElement; state: RunningCompaction } | null = null;
+let compactionElapsedTimer: ReturnType<typeof setInterval> | null = null;
 let contextWindowSize = 0;  // fetched from model info
 let originalTitle = document.title;
 let hasFocus = true;
@@ -216,6 +228,14 @@ type QueuedDispatch = {
   retryTimer?: ReturnType<typeof setTimeout>;
 };
 const queuedPrompts = new Map<string, QueuedDispatch>();
+// Tabs that asked Pi to compact and have not seen it start yet. They count as
+// compacting, so a message sent in that gap is queued instead of rejected.
+const compactRequests = new Set<string>();
+// Counts compaction_start events per tab, so a compact request can tell
+// whether Pi began compacting before it failed.
+const compactionStarts = new Map<string, number>();
+// WebSocket prompts by command id, so a rejection can be shown in its tab.
+const sentPrompts = new Map<string, string>();
 dialogHandler.onIdle = () => processQueuedExtensionUIRequest();
 
 // File browser
@@ -380,10 +400,16 @@ wsClient.addEventListener('rpcEvent', (e: Event) => {
       if (abortState(sessionId) === 'stopping') settledWhileStopping.add(sessionId);
       localAbortStates.delete(sessionId);
     }
+    if (event.type === 'compaction_start') {
+      compactRequests.delete(sessionId);
+      compactionStarts.set(sessionId, (compactionStarts.get(sessionId) || 0) + 1);
+    }
     if (session) {
       session.lastActiveAt = new Date().toISOString();
       if (event.type === 'agent_start' || event.type === 'turn_start') session.isStreaming = true;
       if (event.type === 'agent_settled') session.isStreaming = false;
+      if (event.type === 'compaction_start') session.compaction = { reason: String(event.reason || 'manual'), startedAt: Date.now() };
+      if (event.type === 'compaction_end') session.compaction = null;
       if (event.type === 'agent_start' || event.type === 'turn_start' || event.type === 'agent_settled') {
         // Keep an open tree modal honest: disable its rows while the turn
         // runs, and refetch the tree (re-enabling the rows) when it ends.
@@ -401,6 +427,22 @@ wsClient.addEventListener('rpcEvent', (e: Event) => {
     }
   }
   handleRPCEvent(event, sessionId);
+});
+
+// Replies to prompts sent over the WebSocket. A rejected message must never
+// look sent without a word, for example when Pi is busy compacting.
+wsClient.addEventListener('rpcResponse', (e: Event) => {
+  const response = (e as CustomEvent<{ id?: string; command?: string; success?: boolean; error?: string; delivery?: string }>).detail || {};
+  if (response.command !== 'prompt') return;
+  const sessionId = response.id ? sentPrompts.get(response.id) : undefined;
+  if (response.id) sentPrompts.delete(response.id);
+  if (response.success !== false) return;
+  const reason = response.error || 'Pi did not accept the message';
+  const text = response.delivery === 'uncertain'
+    ? `The message may not have been sent: ${reason}`
+    : `The message was not sent: ${reason}`;
+  if (!sessionId || (viewingActiveSession && sessionId === activeLiveSessionId)) messageRenderer.renderError(text);
+  else flashStatusError(text, 5000);
 });
 
 wsClient.addEventListener('serverError', (e: Event) => {
@@ -502,6 +544,8 @@ function handleLiveSessionClosed(closedId: string) {
   localAbortStates.delete(closedId);
   settledWhileStopping.delete(closedId);
   queuedPrompts.delete(closedId);
+  compactRequests.delete(closedId);
+  compactionStarts.delete(closedId);
   if (dialogHandler.currentRequest?.sessionId === closedId) {
     dialogHandler.clearCurrentDialog();
     processQueuedExtensionUIRequest();
@@ -579,9 +623,14 @@ function liveTabSignature(session: LiveSession) {
     compactModelLabel(session),
     session.cwd || '',
     session.modelSpec || '',
-    session.isStreaming ? 'streaming' : 'idle',
+    sessionIsBusy(session) ? 'streaming' : 'idle',
     pendingInteractionCount(session.id),
   ].join('\u001f');
+}
+
+/** Whether the tab shows activity: a reply or a compaction is running. */
+function sessionIsBusy(session: LiveSession) {
+  return !!session.isStreaming || !!session.compaction || compactRequests.has(session.id);
 }
 
 function renderLiveTabs() {
@@ -607,7 +656,7 @@ function renderLiveTabs() {
     if (tab.dataset.signature !== signature) {
       tab.dataset.signature = signature;
       tab.innerHTML = `
-        ${session.isStreaming ? '<span class="live-tab-streaming-dot"></span>' : ''}
+        ${sessionIsBusy(session) ? '<span class="live-tab-streaming-dot"></span>' : ''}
         ${pendingInteractionCount(session.id) ? `<span class="live-tab-ui-dot" title="Waiting for approval" aria-label="${pendingInteractionCount(session.id)} pending approvals">${pendingInteractionCount(session.id)}</span>` : ''}
         <span class="live-tab-title">${escapeHtml(session.sessionName || basename(session.cwd || ''))}</span>
         <span class="live-tab-model">${escapeHtml(compactModelLabel(session))}</span>
@@ -918,11 +967,17 @@ function handleRPCEvent(event: AppEvent, sessionId: string | null = null) {
     case 'tool_execution_end':
       handleToolExecutionEnd(event);
       break;
-    case 'auto_compaction_start':
-      handleCompactionStart();
+    case 'compaction_start':
+      handleCompactionStart(event);
       break;
-    case 'auto_compaction_end':
+    case 'compaction_end':
       handleCompactionEnd(event);
+      break;
+    case 'summarization_retry_scheduled':
+      handleSummaryRetryScheduled(event);
+      break;
+    case 'summarization_retry_attempt_start':
+      handleSummaryRetryAttemptStart();
       break;
     case 'extension_ui_request':
       handleExtensionUIRequest(event, sessionId);
@@ -939,27 +994,90 @@ function handleRPCEvent(event: AppEvent, sessionId: string | null = null) {
   }
 }
 
-function handleCompactionStart() {
-  const el = document.createElement('div');
-  el.className = 'system-message compaction-message';
-  el.id = 'compaction-indicator';
-  el.innerHTML = '<span class="compaction-spinner">⟳</span> Compacting context…';
-  messagesContainer.appendChild(el);
+function stopCompactionElapsedTimer() {
+  if (compactionElapsedTimer !== null) clearInterval(compactionElapsedTimer);
+  compactionElapsedTimer = null;
+}
+
+/** Forget the running row. Callers that clear the transcript also drop it. */
+function resetCompactionRow() {
+  stopCompactionElapsedTimer();
+  compactionRow = null;
+}
+
+/** Draw the running row at the end of the transcript, replacing an earlier one. */
+function showRunningCompaction(reason: string, startedAt: number) {
+  const state: RunningCompaction = { status: 'running', reason, startedAt };
+  const element = compactionRow?.element.isConnected ? compactionRow.element : document.createElement('div');
+  messagesContainer.querySelector('.welcome')?.remove();
+  renderCompactionRow(state, element);
+  messagesContainer.appendChild(element);
+  compactionRow = { element, state };
+  stopCompactionElapsedTimer();
+  // Show how long it has been running, so a slow compaction does not look stuck.
+  compactionElapsedTimer = setInterval(() => {
+    const elapsed = compactionRow?.element.querySelector('.compaction-elapsed');
+    if (!compactionRow?.element.isConnected || !elapsed) return stopCompactionElapsedTimer();
+    elapsed.textContent = formatElapsed(Date.now() - startedAt);
+  }, 1000);
   scrollToBottom();
 }
 
-function handleCompactionEnd(event: AppEvent) {
-  const indicator = document.getElementById('compaction-indicator');
-  if (indicator) {
-    const summary = event.summary ? ` — ${event.summary}` : '';
-    indicator.innerHTML = `✓ Context compacted${summary}`;
-    indicator.classList.add('compaction-done');
-  }
-  // Reset token tracking — the stats refresh below and the next message
-  // bring in fresh post-compaction numbers.
-  lastInputTokens = 0;
-  updateContextPill();
+function updateRunningCompaction(retry: SummaryRetry) {
+  if (!compactionRow?.element.isConnected) return;
+  compactionRow.state = { ...compactionRow.state, retry };
+  renderCompactionRow(compactionRow.state, compactionRow.element);
+}
+
+function handleCompactionStart(event: AppEvent) {
   hideCompactButton();
+  showRunningCompaction(String(event.reason || 'manual'), Date.now());
+  updateUI();
+}
+
+function handleSummaryRetryScheduled(event: AppEvent) {
+  updateRunningCompaction({
+    attempt: Number(event.attempt) || 1,
+    maxAttempts: Number(event.maxAttempts) || Number(event.attempt) || 1,
+    delayMs: Number(event.delayMs) || 0,
+  });
+}
+
+function handleSummaryRetryAttemptStart() {
+  const retry = compactionRow?.state.retry;
+  if (retry) updateRunningCompaction({ ...retry, started: true });
+}
+
+function handleCompactionEnd(event: AppEvent) {
+  const result = event.result as CompactionResult | undefined;
+  let finished: CompactionRowState;
+  if (result && event.aborted !== true) {
+    finished = {
+      status: 'done',
+      summary: typeof result.summary === 'string' ? result.summary : '',
+      tokensBefore: result.tokensBefore,
+      estimatedTokensAfter: result.estimatedTokensAfter,
+      willRetry: event.willRetry === true,
+    };
+  } else if (event.aborted === true) {
+    finished = { status: 'cancelled' };
+  } else {
+    finished = { status: 'failed', errorMessage: event.errorMessage };
+  }
+  const element = compactionRow?.element.isConnected ? compactionRow.element : null;
+  resetCompactionRow();
+  const row = renderCompactionRow(finished, element ?? undefined);
+  if (!element) messagesContainer.appendChild(row);
+  messageRenderer.scrollToBottom();
+  if (finished.status === 'done') {
+    // Usage from before the compaction no longer describes the context.
+    // Show Pi's estimate until the next reply reports real usage.
+    const estimate = typeof result?.estimatedTokensAfter === 'number' ? result.estimatedTokensAfter : 0;
+    lastInputTokens = estimate;
+    contextTokensEstimated = estimate > 0;
+  }
+  updateContextPill();
+  updateUI();
   void sessionStatsCard.refresh();
 }
 
@@ -1116,6 +1234,7 @@ function handleMessageEnd(message: AppMessage) {
     }
     if (usage?.input) {
       lastInputTokens = usage.input + (usage.cacheRead || 0);
+      contextTokensEstimated = false;
       lastUsage = usage;
     }
     updateContextPill();
@@ -1462,6 +1581,22 @@ function sendMessage() {
   const message = messageInput.value.trim();
   if (!message && pendingImages.length === 0) return;
 
+  // Pi runs /compact only in its terminal UI, so Tau runs it here instead
+  // of sending the text to the model.
+  const compactCommand = parseCompactCommand(message);
+  if (compactCommand) {
+    if (pendingImages.length > 0 || pendingFilePaths.length > 0) {
+      showCompactionNote('Compaction cannot use attached images or files. Remove them to compact.');
+      return;
+    }
+    // A refused /compact stays in the input so the user can send it again.
+    if (requestCompaction(compactCommand.customInstructions)) {
+      messageInput.value = '';
+      messageInput.style.height = 'auto';
+    }
+    return;
+  }
+
   messageInput.value = '';
   messageInput.style.height = 'auto';
 
@@ -1496,7 +1631,78 @@ function sendMessage() {
 
   lastSentMessage = message;
   messageRenderer.renderUserMessage({ content: message, images: cmd.images });
+  cmd.id = `prompt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  sentPrompts.set(cmd.id, activeLiveSessionId);
   wsClient.send(cmd);
+}
+
+/** A short note in the transcript. A newer note replaces the previous one. */
+function showCompactionNote(text: string) {
+  messagesContainer.querySelector('.compaction-refused')?.remove();
+  const note = document.createElement('div');
+  note.className = 'system-message compaction-refused';
+  note.textContent = text;
+  messagesContainer.appendChild(note);
+  messageRenderer.scrollToBottom();
+}
+
+function isCompacting(sessionId: string) {
+  return compactRequests.has(sessionId) || !!liveSessions.find(session => session.id === sessionId)?.compaction;
+}
+
+/**
+ * Ask Pi to compact the viewed tab. Used by the palette, the header button
+ * and `/compact`. Returns false, after showing why, when the tab is busy:
+ * Pi's compact would abort a running reply, and a click must never throw a
+ * reply away. The transcript row is driven by Pi's compaction events.
+ */
+function requestCompaction(customInstructions?: string) {
+  if (!viewingActiveSession || !activeLiveSessionId) {
+    messageRenderer.renderError('Select a live Tau tab first.');
+    return false;
+  }
+  const sessionId = activeLiveSessionId;
+  if (isCompacting(sessionId)) {
+    showCompactionNote('Compaction is already running.');
+    return false;
+  }
+  if (state.isStreaming || sessionHasPendingWork(sessionId)) {
+    showCompactionNote('Wait for the reply to finish, or stop it first.');
+    return false;
+  }
+  messagesContainer.querySelector('.compaction-refused')?.remove();
+  compactRequests.add(sessionId);
+  hideCompactButton();
+  renderLiveTabs();
+  updateUI();
+  void sendCompactRequest(sessionId, customInstructions);
+  return true;
+}
+
+// Pi answers only after compaction ends. Once Pi has started, its events
+// already report the outcome, so the reply only reports a failure to start.
+async function sendCompactRequest(sessionId: string, customInstructions?: string) {
+  const startsBefore = compactionStarts.get(sessionId) || 0;
+  let failure: string | null = null;
+  try {
+    const response = await fetch('/api/rpc', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'compact', sessionId, ...(customInstructions ? { customInstructions } : {}) }),
+    });
+    const data = await response.json();
+    if (!data.success && !data.compactionStarted) failure = data.error || 'Pi did not start compacting';
+  } catch (error) {
+    failure = error instanceof Error && error.message ? error.message : 'Could not reach the server';
+  } finally {
+    compactRequests.delete(sessionId);
+  }
+  if (failure && (compactionStarts.get(sessionId) || 0) !== startsBefore) failure = null;
+  renderLiveTabs();
+  if (viewingActiveSession && activeLiveSessionId === sessionId) {
+    if (failure) messageRenderer.renderError(`Could not compact: ${failure}`);
+    updateContextPill();
+    updateUI();
+  }
 }
 
 const queuedMessagesEl = document.getElementById('queued-messages')!;
@@ -1651,7 +1857,7 @@ function abortState(sessionId: string) {
 }
 
 function sessionHasPendingWork(sessionId: string) {
-  return queuedPrompts.has(sessionId) || pendingInteractionCount(sessionId) > 0 || (abortState(sessionId) === 'stopping' && !settledWhileStopping.has(sessionId));
+  return queuedPrompts.has(sessionId) || isCompacting(sessionId) || pendingInteractionCount(sessionId) > 0 || (abortState(sessionId) === 'stopping' && !settledWhileStopping.has(sessionId));
 }
 
 function abortActiveSession() {
@@ -1702,7 +1908,7 @@ abortBtn.addEventListener('click', abortActiveSession);
 // Command Palette
 const commandPaletteController = setupCommandPalette([
   { icon: '🌳', label: 'Session tree', desc: 'Jump to any earlier point in the session tree', action: () => { void treeViewController.open(); } },
-  { icon: '🗜️', label: 'Compact', desc: 'Compact context to save tokens', action: () => rpcCommand({ type: 'compact' }, 'Compacting...') },
+  { icon: '🗜️', label: 'Compact', desc: 'Compact context to save tokens', action: () => { requestCompaction(); } },
   { icon: '📋', label: 'Export HTML', desc: 'Export session as HTML file', action: () => rpcExportHtml() },
   { icon: '📊', label: 'Session Stats', desc: 'Show session statistics', action: () => showSessionStats() },
   { icon: '⬇️', label: 'Expand All Tools', desc: 'Expand all tool cards', action: () => toolCardRenderer.expandAll() },
@@ -2059,6 +2265,7 @@ function applyLiveSessionSnapshot(data: LiveSessionSnapshotData, requestedAtRevi
   retryStatusElement = null;
   sessionTotalCost = 0;
   lastInputTokens = 0;
+  contextTokensEstimated = false;
   lastUsage = null;
 
   if (data.entries && data.entries.length > 0) {
@@ -2066,6 +2273,10 @@ function applyLiveSessionSnapshot(data: LiveSessionSnapshotData, requestedAtRevi
   } else {
     messageRenderer.renderWelcome();
   }
+  // A compaction still running when the tab is opened or reloaded. The tab's
+  // metadata already holds the newest of the snapshot and live events.
+  const runningCompaction = liveSessions.find(session => session.id === sessionId)?.compaction;
+  if (runningCompaction) showRunningCompaction(runningCompaction.reason, runningCompaction.startedAt);
 
   updateContextPill();
   // A snapshot means the session's entries/leaf may have moved (e.g. another
@@ -2167,6 +2378,7 @@ function cancelHistoryRender() {
 // later toolCallId lookups (expand/collapse, live tool results).
 function clearConversation() {
   cancelHistoryRender();
+  resetCompactionRow();
   messageRenderer.clear();
   toolCardRenderer.clear();
   state.toolExecutions.clear();
@@ -2177,6 +2389,10 @@ function renderHistoryItem(item: HistoryItem, target: ParentNode) {
     messageRenderer.renderUserMessage({ content: item.content, images: item.images }, true, target);
   } else if (item.kind === 'assistant') {
     messageRenderer.renderAssistantMessage({ content: item.content, usage: item.usage, error: item.error }, false, true, target);
+  } else if (item.kind === 'compaction') {
+    target.appendChild(renderCompactionRow({
+      status: 'done', summary: item.summary, tokensBefore: item.tokensBefore, estimatedTokensAfter: item.estimatedTokensAfter,
+    }));
   } else {
     toolCardRenderer.createHistoryCard(
       {
@@ -2193,7 +2409,7 @@ function renderHistoryItem(item: HistoryItem, target: ParentNode) {
 
 function renderSessionHistory(entries: SessionHistoryEntry[]) {
   const token = ++historyRenderToken;
-  const { items, totalCost, lastInputTokens: builtInputTokens, lastUsage: builtUsage } = buildHistoryItems(entries);
+  const { items, totalCost, lastInputTokens: builtInputTokens, contextTokensEstimated: builtEstimated, lastUsage: builtUsage } = buildHistoryItems(entries);
   console.log(`[History] Rendering ${items.length} items from ${entries.length} entries`);
   for (const item of items) {
     if (item.kind === 'toolCall') {
@@ -2208,6 +2424,7 @@ function renderSessionHistory(entries: SessionHistoryEntry[]) {
   // immediately, even though the DOM fills in newest-first below.
   sessionTotalCost = totalCost;
   lastInputTokens = builtInputTokens;
+  contextTokensEstimated = builtEstimated;
   lastUsage = builtUsage;
   updateContextPill();
   fetchContextWindow();
@@ -2288,9 +2505,12 @@ function showTypingIndicator(show: boolean) {
 // (no context window info yet) or session cost (no context data yet).
 // Clicking it opens the session stats card.
 function updateContextPill() {
+  // After a compaction the count is Pi's estimate until the next reply.
+  const approx = contextTokensEstimated ? '~' : '';
+  const estimateNote = contextTokensEstimated ? ' (estimated after compaction)' : '';
   if (lastInputTokens > 0 && contextWindowSize > 0) {
     const pct = Math.round((lastInputTokens / contextWindowSize) * 100);
-    contextPillEl.textContent = pct === 0 ? '<1%' : `${pct}%`;
+    contextPillEl.textContent = pct === 0 ? '<1%' : `${approx}${pct}%`;
     contextPillEl.classList.add('visible');
     contextPillEl.classList.remove('warning', 'critical');
     if (pct >= 80) {
@@ -2298,18 +2518,19 @@ function updateContextPill() {
     } else if (pct >= 60) {
       contextPillEl.classList.add('warning');
     }
-    contextPillEl.title = `Context: ${(lastInputTokens / 1000).toFixed(1)}k / ${(contextWindowSize / 1000).toFixed(0)}k tokens — click for session stats`;
-    if (pct >= 80) {
+    contextPillEl.title = `Context: ${approx}${(lastInputTokens / 1000).toFixed(1)}k / ${(contextWindowSize / 1000).toFixed(0)}k tokens${estimateNote} — click for session stats`;
+    const activeCompacting = !!activeLiveSessionId && isCompacting(activeLiveSessionId);
+    if (pct >= 80 && viewingActiveSession && !activeCompacting) {
       showCompactButton();
     } else {
       hideCompactButton();
     }
   } else if (lastInputTokens > 0) {
     // No context window info yet, just show raw tokens
-    contextPillEl.textContent = `${(lastInputTokens / 1000).toFixed(1)}k`;
+    contextPillEl.textContent = `${approx}${(lastInputTokens / 1000).toFixed(1)}k`;
     contextPillEl.classList.add('visible');
     contextPillEl.classList.remove('warning', 'critical');
-    contextPillEl.title = 'Context tokens — click for session stats';
+    contextPillEl.title = `Context tokens${estimateNote} — click for session stats`;
   } else if (sessionTotalCost > 0) {
     // No context data yet — show the session cost as a fallback.
     contextPillEl.textContent = `$${sessionTotalCost.toFixed(3)} (sub)`;
@@ -2328,10 +2549,7 @@ function showCompactButton() {
   btn.className = 'compact-btn';
   btn.textContent = 'Compact';
   btn.title = 'Context is over 80% — compact to save tokens';
-  btn.addEventListener('click', () => {
-    rpcCommand({ type: 'compact' }, 'Compacting...');
-    hideCompactButton();
-  });
+  btn.addEventListener('click', () => { requestCompaction(); });
   // Insert next to the context pill in the header
   const pillParent = contextPillEl.parentElement;
   if (pillParent) pillParent.insertBefore(btn, contextPillEl.nextSibling);
@@ -2378,6 +2596,7 @@ function currentStatusText() {
     if (stopping === 'timed_out') return 'Stop timed out — completion not confirmed';
     if (stopping === 'failed') return 'Stop failed — completion not confirmed';
     if (pendingInteractionCount(activeLiveSessionId)) return 'Waiting for approval';
+    if (isCompacting(activeLiveSessionId)) return 'Compacting…';
     if (state.isStreaming) return 'Working...';
   }
   return tailscaleUrl ? 'Connected • TS' : 'Connected';
@@ -2388,6 +2607,7 @@ function updateUI() {
   const isStreaming = state.isStreaming && hasLiveSession;
   const hasPendingInteraction = hasLiveSession && pendingInteractionCount(activeLiveSessionId!) > 0;
   const stopping = hasLiveSession && abortState(activeLiveSessionId!) === 'stopping';
+  const compacting = hasLiveSession && isCompacting(activeLiveSessionId!);
   abortBtn.disabled = !!stopping;
   abortBtn.title = stopping ? 'Stopping…' : 'Abort';
   abortBtn.setAttribute('aria-label', stopping ? 'Stopping…' : 'Abort');
@@ -2405,7 +2625,7 @@ function updateUI() {
   messageInput.disabled = !hasLiveSession;
   sendBtn.disabled = !hasLiveSession;
 
-  if (isStreaming || hasPendingInteraction || stopping) {
+  if (isStreaming || hasPendingInteraction || stopping || compacting) {
     abortBtn.classList.remove('hidden');
     sendBtn.classList.add('hidden');
   } else {
@@ -2466,18 +2686,20 @@ async function openSettings() {
   settingsPanel.classList.remove('hidden');
   settingsOverlay.classList.remove('hidden');
 
-  // Fetch current state for toggles
+  // Fetch current state for toggles. Ask Pi directly so the auto-compaction
+  // toggle shows the value the viewed tab's Pi process really uses.
   try {
     const resp = await fetch('/api/rpc', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'get_state', sessionId: activeLiveSessionId }),
+      body: JSON.stringify({ type: 'get_state', sessionId: activeLiveSessionId, refresh: true }),
     });
     const data = await resp.json();
     if (data.success && data.data) {
       const s = data.data;
-      // Auto-compaction toggle
-      toggleAutoCompact.className = `settings-toggle${s.autoCompactionEnabled ? ' on' : ''}`;
+      if (typeof s.autoCompactionEnabled === 'boolean') {
+        toggleAutoCompact.className = `settings-toggle${s.autoCompactionEnabled ? ' on' : ''}`;
+      }
       // Thinking level
       btnThinkingLevel.textContent = s.thinkingLevel || 'off';
       modelPickerController.setThinkingLevel(s.thinkingLevel || 'off');
@@ -2511,10 +2733,13 @@ settingsClose.addEventListener('click', closeSettings);
 settingsOverlay.addEventListener('click', closeSettings);
 
 // Auto-compaction toggle
+// Pi saves this setting to the user's Pi settings file, so it applies to every
+// Pi session, including the terminal UI.
 toggleAutoCompact.addEventListener('click', async () => {
   const isOn = toggleAutoCompact.classList.contains('on');
   toggleAutoCompact.className = `settings-toggle${isOn ? '' : ' on'}`;
-  await rpcCommand({ type: 'set_auto_compaction', enabled: !isOn });
+  const data = await rpcCommand({ type: 'set_auto_compaction', enabled: !isOn });
+  if (!data?.success) toggleAutoCompact.className = `settings-toggle${isOn ? ' on' : ''}`;
 });
 
 // Thinking level cycle (settings panel button)
@@ -2591,6 +2816,7 @@ async function fetchSessionStats(): Promise<SessionStats | null> {
     }
     if (cu && typeof cu.tokens === 'number') {
       lastInputTokens = cu.tokens;
+      contextTokensEstimated = false;
     }
     updateContextPill();
     return stats;

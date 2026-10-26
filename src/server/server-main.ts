@@ -292,14 +292,19 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
       isStreaming: session.isStreaming,
       sessionFile: session.sessionFile,
       sessionName: session.sessionName,
-      autoCompactionEnabled: true,
+      isCompacting: !!session.compaction,
+      ...(session.autoCompactionEnabled !== null ? { autoCompactionEnabled: session.autoCompactionEnabled } : {}),
     });
   }
   if (cmd === 'get_messages') return success({ entries: session.entries });
   if (cmd === 'live_session_snapshot_request') return { type: 'live_session_snapshot', sessionId: session.id, ...session.snapshot() };
-  if (cmd === 'set_auto_compaction') return success({ enabled: !!command.enabled });
+  if (cmd === 'set_auto_compaction' && typeof command.enabled !== 'boolean') return error('enabled must be true or false');
+  // Pi's compact aborts a running reply before it compacts. Never throw a
+  // reply away from a click; the user can stop the reply first.
+  if (cmd === 'compact' && session.compaction) return { ...error('Compaction is already running.'), compactionStarted: false };
+  if (cmd === 'compact' && session.isStreaming) return { ...error('Wait for the reply to finish, or stop it first.'), compactionStarted: false };
 
-  const native = new Set(['prompt', 'steer', 'follow_up', 'abort', 'compact', 'set_model', 'cycle_model', 'set_thinking_level', 'cycle_thinking_level', 'get_session_stats', 'get_tree', 'get_entries', 'extension_ui_response']);
+  const native = new Set(['prompt', 'steer', 'follow_up', 'abort', 'compact', 'set_auto_compaction', 'set_model', 'cycle_model', 'set_thinking_level', 'cycle_thinking_level', 'get_session_stats', 'get_tree', 'get_entries', 'extension_ui_response']);
   if (!native.has(cmd ?? '')) return error(`Unknown command: ${cmd}`);
 
   // While navigate_tree is moving the child's leaf (pi's stdin loop does not
@@ -323,14 +328,26 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
     if (command.level) session.thinkingLevel = command.level;
   }
 
+  // Pi answers compact only after the summary is written, which can take
+  // minutes on a large context with a slow model.
+  const timeoutMs = cmd === 'prompt' ? 10000 : cmd === 'compact' ? 10 * 60000 : 60000;
+  const compactionRevision = session.compactionRevision;
+  // Tells the browser whether Pi began compacting. Once it has, the
+  // compaction events report the outcome, so a failed reply is not a
+  // second error.
+  const compactionStarted = () => (cmd === 'compact' ? { compactionStarted: session.compactionRevision !== compactionRevision } : {});
   try {
     const resp = cmd === 'extension_ui_response'
       ? await session.respondToDialog(command)
       : cmd === 'abort'
         ? await session.abort(command)
-        : await session.send(command, { timeoutMs: cmd === 'prompt' ? 10000 : 60000 });
+        : await session.send(command, { timeoutMs });
     if (isSetThinkingLevel && resp.success === false && prevThinkingLevel !== null) {
       session.thinkingLevel = prevThinkingLevel;
+    }
+    if (cmd === 'set_auto_compaction' && resp.success !== false) {
+      session.autoCompactionEnabled = command.enabled === true;
+      return success({ enabled: session.autoCompactionEnabled });
     }
     // Extension-driven model/thinking changes (e.g. the pi-session-model
     // `/session-model` slash command) call pi.setModel/pi.setThinkingLevel
@@ -341,11 +358,11 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
     if (resp.success !== false && (cmd === 'prompt' || cmd === 'steer' || cmd === 'follow_up')) {
       refreshSessionModel(session).catch(() => {});
     }
-    return { ...resp, success: resp.success !== false, ...(cmd === 'prompt' && resp.success === false ? { delivery: 'rejected' } : {}) };
+    return { ...resp, success: resp.success !== false, ...(cmd === 'prompt' && resp.success === false ? { delivery: 'rejected' } : {}), ...compactionStarted() };
   } catch (e) {
     if (isSetThinkingLevel && prevThinkingLevel !== null) session.thinkingLevel = prevThinkingLevel;
     // A timeout or broken transport does not establish whether Pi ran a prompt.
-    return { ...error(errorMessage(e)), ...(cmd === 'prompt' ? { delivery: 'uncertain' } : {}) };
+    return { ...error(errorMessage(e)), ...(cmd === 'prompt' ? { delivery: 'uncertain' } : {}), ...compactionStarted() };
   }
 }
 

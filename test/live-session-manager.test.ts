@@ -9,7 +9,7 @@ import { WebSocket } from 'ws';
 
 // The built server module is a plain JS artifact without declarations; the
 // old require() call typed these as any, so keep that contract here.
-const { LiveSessionManager, _setSpawnPiForTest } = (await import('../bin/tau.js')) as any;
+const { LiveSessionManager, PiRpcSession, _setSpawnPiForTest } = (await import('../bin/tau.js')) as any;
 import type { TestContext } from 'node:test';
 
 interface StubClient {
@@ -295,5 +295,73 @@ test('create() rejects when the cwd does not exist', async (t: TestContext) => {
     () => mgr.create({ cwd: '/definitely/not/a/real/path/tau' }),
     /Directory not found/,
   );
+  assert.equal(mgr.sessions.size, 0);
+});
+
+// A live session wired to a manager with one open browser, driven by the
+// JSONL lines Pi writes on stdout.
+function liveSessionWithClient() {
+  const mgr = new LiveSessionManager();
+  const client = openClient();
+  mgr.addClient(client);
+  const session = new PiRpcSession(mgr, { cwd: '/tmp' });
+  mgr.sessions.set(session.id, session);
+  const piSays = (event: Record<string, unknown>) => session.handleLine(JSON.stringify(event));
+  const lastMetadata = () => {
+    const updates = client.sent.map(data => JSON.parse(data)).filter(msg => msg.type === 'live_session_updated');
+    return updates.at(-1)?.session;
+  };
+  return { mgr, session, piSays, lastMetadata };
+}
+
+const RESULT = { summary: 'What happened so far.', firstKeptEntryId: 'k1', tokensBefore: 150000, estimatedTokensAfter: 32000, usage: {}, details: {} };
+
+test('a running compaction is part of the metadata and snapshot until it ends', () => {
+  const { session, piSays, lastMetadata } = liveSessionWithClient();
+  piSays({ type: 'compaction_start', reason: 'threshold' });
+  assert.equal(session.compaction.reason, 'threshold');
+  assert.equal(typeof session.compaction.startedAt, 'number');
+  assert.deepEqual(lastMetadata().compaction, session.compaction);
+  assert.deepEqual(session.snapshot().session.compaction, session.compaction);
+  assert.deepEqual(session.snapshot().compaction, session.compaction);
+
+  piSays({ type: 'compaction_end', reason: 'threshold', result: RESULT, aborted: false, willRetry: false });
+  assert.equal(session.compaction, null);
+  assert.equal(lastMetadata().compaction, null);
+  assert.equal(session.snapshot().compaction, null);
+});
+
+test('a successful compaction adds a compaction entry so snapshots show the divider', () => {
+  const { session, piSays } = liveSessionWithClient();
+  piSays({ type: 'message_start', message: { role: 'user', content: 'hello' } });
+  piSays({ type: 'compaction_start', reason: 'manual' });
+  piSays({ type: 'compaction_end', reason: 'manual', result: RESULT, aborted: false, willRetry: false });
+  const entry = session.entries.at(-1);
+  assert.equal(entry.type, 'compaction');
+  assert.equal(entry.summary, RESULT.summary);
+  assert.equal(entry.firstKeptEntryId, 'k1');
+  assert.equal(entry.tokensBefore, 150000);
+  assert.equal(entry.estimatedTokensAfter, 32000);
+  assert.equal(entry.reason, 'manual');
+  assert.equal(typeof entry.timestamp, 'string');
+  assert.deepEqual(session.snapshot().entries.at(-1), entry);
+});
+
+test('a failed or cancelled compaction adds no entry and clears the running state', () => {
+  const { session, piSays } = liveSessionWithClient();
+  piSays({ type: 'compaction_start', reason: 'manual' });
+  piSays({ type: 'compaction_end', reason: 'manual', aborted: false, willRetry: false, errorMessage: 'Compaction failed: Nothing to compact (session too small)' });
+  assert.equal(session.compaction, null);
+  piSays({ type: 'compaction_start', reason: 'overflow' });
+  piSays({ type: 'compaction_end', reason: 'overflow', aborted: true, willRetry: false });
+  assert.equal(session.compaction, null);
+  assert.equal(session.entries.length, 0);
+});
+
+test('a Pi process that exits never leaves its tab compacting', () => {
+  const { mgr, session, piSays } = liveSessionWithClient();
+  piSays({ type: 'compaction_start', reason: 'manual' });
+  session.handleExit(1, null);
+  assert.equal(session.compaction, null);
   assert.equal(mgr.sessions.size, 0);
 });

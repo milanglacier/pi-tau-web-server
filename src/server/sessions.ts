@@ -14,6 +14,9 @@ type DialogEntry = { request: PendingDialog; timer?: ReturnType<typeof setTimeou
 type SpawnFn = (cmd: string, args: string[], opts: JsonRecord) => ChildProcess;
 type PiMessageContent = string | Array<{ type: string; text?: string }>;
 type PiMessage = { role?: string; content?: PiMessageContent; usage?: JsonRecord; model?: string };
+/** A compaction Pi is running right now. `startedAt` is a Unix time in milliseconds. */
+export type CompactionState = { reason: string; startedAt: number };
+type PiCompactionResult = { summary?: unknown; firstKeptEntryId?: unknown; tokensBefore?: unknown; estimatedTokensAfter?: unknown };
 type PiRpcPayload = {
   command?: string;
   id?: string;
@@ -77,6 +80,12 @@ export class PiRpcSession {
   lastExtensionError: string | null;
   /** Whether navigateTree has confirmed this child loaded tau's tree extension (reset per spawn). */
   navigateCommandChecked: boolean;
+  /** The compaction Pi is running, from compaction_start until compaction_end. */
+  compaction: CompactionState | null = null;
+  /** Counts compaction_start events, so a compact command can tell whether Pi began compacting. */
+  compactionRevision = 0;
+  /** Pi's auto-compaction setting as last reported by this Pi process. */
+  autoCompactionEnabled: boolean | null = null;
   pendingDialogs = new Map<string, DialogEntry>();
   interactionRevision = 0;
   abortState: AbortState = 'idle';
@@ -130,6 +139,7 @@ export class PiRpcSession {
       contextUsage: this.contextUsage,
       pendingInteractionCount: this.pendingDialogs.size,
       abortState: this.abortState,
+      compaction: this.compaction,
     };
   }
 
@@ -142,6 +152,7 @@ export class PiRpcSession {
       model: this.model,
       thinkingLevel: this.thinkingLevel,
       isStreaming: this.isStreaming,
+      compaction: this.compaction,
       sessionFile: this.sessionFile,
       sessionName: this.sessionName,
       contextUsage: this.contextUsage,
@@ -439,6 +450,7 @@ export class PiRpcSession {
     if (data.thinkingLevel) this.thinkingLevel = data.thinkingLevel;
     if (data.level) this.thinkingLevel = data.level;
     if (data.tokens) this.contextUsage = { ...(this.contextUsage || {}), tokens: data.tokens };
+    if (typeof data.autoCompactionEnabled === 'boolean') this.autoCompactionEnabled = data.autoCompactionEnabled;
     if (command === 'set_model' || command === 'cycle_model') {
       if (data.model) this.model = normalizeModel(data.model);
       else if (data.provider && data.id) this.model = normalizeModel(data);
@@ -462,6 +474,14 @@ export class PiRpcSession {
     }
     if (type === 'agent_start') this.operationRevision++;
     if (type === 'agent_start' || type === 'turn_start') this.isStreaming = true;
+    if (type === 'compaction_start') {
+      this.compactionRevision++;
+      this.compaction = { reason: typeof event.reason === 'string' ? event.reason : 'manual', startedAt: Date.now() };
+    }
+    if (type === 'compaction_end') {
+      this.recordCompaction(event);
+      this.compaction = null;
+    }
     // Extension command handlers report their errors as extension_error
     // events while the triggering prompt still acks with success. Keep the
     // last one so navigate_tree can explain WHY a leaf verification failed
@@ -506,6 +526,25 @@ export class PiRpcSession {
     }
   }
 
+  /**
+   * Keep a successful compaction in the live entries, with the fields Pi saves
+   * in the session file plus the token estimate and the reason. Snapshots then
+   * show it the same way as a compaction loaded from the session file.
+   */
+  recordCompaction(event: PiRpcMessage) {
+    const result = event.result as PiCompactionResult | undefined;
+    if (!result || event.aborted === true || typeof result.summary !== 'string') return;
+    this.entries.push({
+      type: 'compaction',
+      timestamp: new Date().toISOString(),
+      summary: result.summary,
+      ...(typeof result.firstKeptEntryId === 'string' ? { firstKeptEntryId: result.firstKeptEntryId } : {}),
+      ...(typeof result.tokensBefore === 'number' ? { tokensBefore: result.tokensBefore } : {}),
+      ...(typeof result.estimatedTokensAfter === 'number' ? { estimatedTokensAfter: result.estimatedTokensAfter } : {}),
+      ...(typeof event.reason === 'string' ? { reason: event.reason } : {}),
+    });
+  }
+
   messageText(message: PiMessage) {
     if (typeof message.content === 'string') return message.content;
     if (Array.isArray(message.content)) return message.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
@@ -541,6 +580,7 @@ export class PiRpcSession {
   async terminate(reason = 'closed') {
     if (this.terminating) return;
     this.terminating = true;
+    this.compaction = null;
     this.clearDialogs('terminated');
     for (const [, pending] of this.pending) {
       clearTimeout(pending.timer);
@@ -558,6 +598,7 @@ export class PiRpcSession {
   handleExit(code: number | null, signal: string | null, err?: { message?: string }) {
     if (this.exitCode !== null) return;
     this.exitCode = code;
+    this.compaction = null;
     this.clearDialogs('process_exit');
     for (const [, pending] of this.pending) {
       clearTimeout(pending.timer);

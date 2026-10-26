@@ -230,15 +230,74 @@ test('live_session_snapshot_request returns a live_session_snapshot payload', as
   assert.deepEqual(resp.entries, session.entries);
 });
 
-test('set_auto_compaction echoes the enabled flag without persisting state', async () => {
-  // current implementation gates this behind the active-session check
-  const session = injectSession();
+test('set_auto_compaction changes the setting in Pi and get_state reports Pi\'s value', async () => {
+  const calls: Record<string, unknown>[] = [];
+  const session = injectSession({
+    send: async (cmd) => {
+      calls.push(cmd);
+      return { type: 'response', id: cmd.id, success: true, data: {} };
+    },
+  });
+  (session as unknown as { autoCompactionEnabled: boolean }).autoCompactionEnabled = true;
   const resp = await handleRpcCommand({ type: 'set_auto_compaction', sessionId: session.id, enabled: false });
   assert.equal(resp.success, true);
   assert.equal(resp.data.enabled, false);
-  // the echo persists nothing: get_state still reports the hardcoded default
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].type, 'set_auto_compaction');
+  assert.equal(calls[0].enabled, false);
+  const state = await handleRpcCommand({ type: 'get_state', sessionId: session.id });
+  assert.equal(state.data.autoCompactionEnabled, false);
+});
+
+test('set_auto_compaction keeps the old value when Pi refuses it', async () => {
+  const session = injectSession({
+    send: async (cmd) => ({ type: 'response', id: cmd.id, success: false, data: {}, error: 'settings are read-only' }),
+  });
+  (session as unknown as { autoCompactionEnabled: boolean }).autoCompactionEnabled = true;
+  const resp = await handleRpcCommand({ type: 'set_auto_compaction', sessionId: session.id, enabled: false });
+  assert.equal(resp.success, false);
   const state = await handleRpcCommand({ type: 'get_state', sessionId: session.id });
   assert.equal(state.data.autoCompactionEnabled, true);
+});
+
+test('compact is refused while a reply runs, so the reply is never aborted', async () => {
+  const calls: Record<string, unknown>[] = [];
+  const session = injectSession({
+    isStreaming: true,
+    send: async (cmd) => { calls.push(cmd); return { type: 'response', id: cmd.id, success: true, data: {} }; },
+  });
+  const resp = await handleRpcCommand({ type: 'compact', sessionId: session.id });
+  assert.equal(resp.success, false);
+  assert.match(resp.error, /stop it first/);
+  assert.equal(resp.compactionStarted, false);
+  assert.deepEqual(calls, []);
+});
+
+test('compact allows a slow summary up to ten minutes and passes the instructions to Pi', async () => {
+  const sent: Array<{ cmd: Record<string, unknown>; opts: { timeoutMs?: number } }> = [];
+  const session = injectSession();
+  (session as unknown as { send: unknown }).send = async (cmd: Record<string, unknown>, opts: { timeoutMs?: number }) => {
+    sent.push({ cmd, opts });
+    return { type: 'response', id: cmd.id, success: true, data: { summary: 'S' } };
+  };
+  const resp = await handleRpcCommand({ type: 'compact', sessionId: session.id, customInstructions: 'keep the API notes' });
+  assert.equal(resp.success, true);
+  assert.equal(resp.compactionStarted, false);
+  assert.equal(sent[0].cmd.customInstructions, 'keep the API notes');
+  assert.equal(sent[0].opts.timeoutMs, 10 * 60000);
+});
+
+test('a failed compact says whether Pi had started compacting', async () => {
+  const session = injectSession();
+  const fake = session as unknown as { compactionRevision: number; send: unknown };
+  fake.compactionRevision = 0;
+  fake.send = async (cmd: Record<string, unknown>) => {
+    fake.compactionRevision++; // Pi emitted compaction_start before it failed.
+    return { type: 'response', id: cmd.id, success: false, error: 'Nothing to compact (session too small)' };
+  };
+  const resp = await handleRpcCommand({ type: 'compact', sessionId: session.id });
+  assert.equal(resp.success, false);
+  assert.equal(resp.compactionStarted, true);
 });
 
 test('native commands require an active live session', async () => {

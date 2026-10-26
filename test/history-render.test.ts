@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 // the old require() call typed these as any, so keep that contract here.
 const { buildHistoryItems } = (await import('../public/history-render.js')) as any;
 
-type Entry = { type?: string; message?: Record<string, unknown> };
+type Entry = { type?: string; message?: Record<string, unknown>; summary?: string; tokensBefore?: number; estimatedTokensAfter?: number; firstKeptEntryId?: string };
 
 function msg(message: Record<string, unknown>): Entry {
   return { type: 'message', message };
@@ -261,4 +261,39 @@ test('items preserve conversation order', () => {
     items.map((i: { kind: string }) => i.kind),
     ['user', 'assistant', 'toolCall', 'user', 'assistant']
   );
+});
+
+test('a compaction entry becomes a divider with its summary at the point where it happened', () => {
+  const { items } = buildHistoryItems([
+    msg({ role: 'user', content: 'before' }),
+    { type: 'compaction', summary: 'What happened so far.', tokensBefore: 150000, firstKeptEntryId: 'k1' } as Entry,
+    msg({ role: 'user', content: 'after' }),
+  ]);
+  assert.deepEqual(items.map((item: { kind: string }) => item.kind), ['user', 'compaction', 'user']);
+  assert.deepEqual(items[1], { kind: 'compaction', summary: 'What happened so far.', tokensBefore: 150000 });
+});
+
+test('the context count after a compaction is the estimate until a reply reports usage', () => {
+  const usage = { input: 120000, cost: { total: 0 } };
+  let result = buildHistoryItems([
+    msg({ role: 'assistant', content: [{ type: 'text', text: 'a' }], usage }),
+    { type: 'compaction', summary: 'S', tokensBefore: 120000, estimatedTokensAfter: 30000 } as Entry,
+  ]);
+  assert.equal(result.lastInputTokens, 30000);
+  assert.equal(result.contextTokensEstimated, true);
+
+  // A compaction loaded from a session file has no estimate.
+  result = buildHistoryItems([
+    msg({ role: 'assistant', content: [{ type: 'text', text: 'a' }], usage }),
+    { type: 'compaction', summary: 'S', tokensBefore: 120000 } as Entry,
+  ]);
+  assert.equal(result.lastInputTokens, 0);
+  assert.equal(result.contextTokensEstimated, false);
+
+  result = buildHistoryItems([
+    { type: 'compaction', summary: 'S', tokensBefore: 120000, estimatedTokensAfter: 30000 } as Entry,
+    msg({ role: 'assistant', content: [{ type: 'text', text: 'b' }], usage: { input: 31000 } }),
+  ]);
+  assert.equal(result.lastInputTokens, 31000);
+  assert.equal(result.contextTokensEstimated, false);
 });

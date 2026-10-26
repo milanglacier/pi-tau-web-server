@@ -33,7 +33,7 @@ test('nested tool events leave root cards unchanged and match reloaded history',
   assert.ok(session, 'small fixture should have a resumed live session');
   const toolCallId = 'root-with-nested-calls';
   const card = page.locator(`.tool-card[data-tool-call-id="${toolCallId}"]`);
-  const broadcast = (event: JsonAgentSessionEvent | { type: 'auto_compaction_start'; parentToolCallId: string }) => liveManager.broadcast({ type: 'event', sessionId: session.id, event });
+  const broadcast = (event: JsonAgentSessionEvent | { type: 'compaction_start'; reason: 'manual'; parentToolCallId: string }) => liveManager.broadcast({ type: 'event', sessionId: session.id, event });
   broadcast({ type: 'tool_execution_start', toolCallId, toolName: 'codemode', args: { code: 'tools.read()' } });
   await card.waitFor({ state: 'attached' });
   broadcast({ type: 'tool_execution_update', toolCallId, toolName: 'codemode', args: { code: 'tools.read()' }, partialResult: { content: [{ type: 'text', text: 'root partial output' }], details: {} } });
@@ -50,8 +50,8 @@ test('nested tool events leave root cards unchanged and match reloaded history',
   broadcast({ type: 'tool_execution_end', parentToolCallId, toolCallId, toolName: 'read', result: { content: [{ type: 'text', text: 'nested overwrite' }], details: {} }, isError: true });
   // This ordered event confirms that the browser consumed the nested events
   // and still handles other event types carrying the parent field.
-  broadcast({ type: 'auto_compaction_start', parentToolCallId });
-  await page.waitForSelector('#compaction-indicator');
+  broadcast({ type: 'compaction_start', reason: 'manual', parentToolCallId });
+  await page.waitForSelector('#messages .compaction-running');
   assert.equal(await page.locator('#messages > .tool-card').count(), 1);
   assert.equal(await card.locator('.tool-output').textContent(), 'root partial output');
   assert.equal(await card.locator('.nested-calls').count(), 1);

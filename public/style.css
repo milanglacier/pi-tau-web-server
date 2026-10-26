@@ -1100,23 +1100,86 @@ body {
   border-color: rgba(248, 113, 113, 0.4);
 }
 
-/* Compaction system messages */
+/* Compaction row: one per compaction. It runs in place, then stays in the
+   transcript as a divider marking where the context was compacted. */
 .compaction-message {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin: 14px 0;
+  padding: 8px 16px;
+  border-top: 1px dashed var(--border);
+  border-bottom: 1px dashed var(--border);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
   text-align: center;
-  padding: 12px;
-  font-size: 13px;
-  color: var(--text-dim);
-  opacity: 0.7;
 }
+
+.compaction-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.compaction-running .compaction-line {
+  color: var(--text-primary);
+}
+
+.compaction-elapsed {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.compaction-note {
+  color: var(--text-dim);
+}
+
+.compaction-done .compaction-line::before {
+  content: '\2713';
+  color: var(--accent);
+}
+
+.compaction-failed {
+  color: var(--error);
+  border-color: rgba(248, 113, 113, 0.3);
+}
+
+.compaction-summary {
+  width: 100%;
+  max-width: 720px;
+  text-align: left;
+}
+
+.compaction-summary > summary {
+  cursor: pointer;
+  text-align: center;
+  color: var(--text-dim);
+  list-style-position: inside;
+}
+
+.compaction-summary-body {
+  margin-top: 6px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  background: var(--bg-glass);
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.compaction-summary-body p { margin-bottom: 6px; }
+.compaction-summary-body ul,
+.compaction-summary-body ol { margin: 4px 0; padding-left: 18px; }
+.compaction-summary-body h1,
+.compaction-summary-body h2,
+.compaction-summary-body h3 { font-size: 13px; font-weight: 600; margin: 8px 0 4px; }
 
 .compaction-spinner {
   display: inline-block;
   animation: spin 1s linear infinite;
-}
-
-.compaction-done {
-  color: var(--accent);
-  opacity: 0.8;
 }
 
 @keyframes spin {

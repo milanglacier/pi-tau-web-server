@@ -12,7 +12,14 @@
 import type { AppMessage, MessageContentBlock, UsageRecord } from './app-types.js';
 import type { ToolResult } from './tool-card.js';
 
-export type SessionHistoryEntry = { type?: string; message?: AppMessage };
+export type SessionHistoryEntry = {
+  type?: string;
+  message?: AppMessage;
+  /** Fields of a `compaction` entry. Entries from a session file have no estimate. */
+  summary?: string;
+  tokensBefore?: number;
+  estimatedTokensAfter?: number;
+};
 
 export type HistoryImage = { data: string; mimeType: string };
 
@@ -33,12 +40,22 @@ export type HistoryToolCallItem = {
   isError?: boolean;
 };
 
-export type HistoryItem = HistoryUserItem | HistoryAssistantItem | HistoryToolCallItem;
+/** The divider for a finished compaction, at the point where it happened. */
+export type HistoryCompactionItem = {
+  kind: 'compaction';
+  summary: string;
+  tokensBefore?: number;
+  estimatedTokensAfter?: number;
+};
+
+export type HistoryItem = HistoryUserItem | HistoryAssistantItem | HistoryToolCallItem | HistoryCompactionItem;
 
 export type HistoryBuildResult = {
   items: HistoryItem[];
   totalCost: number;
   lastInputTokens: number;
+  /** True when lastInputTokens is Pi's estimate after a compaction, not usage a reply reported. */
+  contextTokensEstimated: boolean;
   lastUsage: UsageRecord | null;
 };
 
@@ -72,10 +89,23 @@ export function buildHistoryItems(entries: SessionHistoryEntry[]): HistoryBuildR
   const recoveredErrorEntries = findRecoveredErrorEntries(entries);
   let totalCost = 0;
   let lastInputTokens = 0;
+  let contextTokensEstimated = false;
   let lastUsage: UsageRecord | null = null;
 
   for (let index = 0; index < entries.length; index++) {
     const entry = entries[index];
+    if (entry.type === 'compaction') {
+      items.push({
+        kind: 'compaction',
+        summary: typeof entry.summary === 'string' ? entry.summary : '',
+        ...(typeof entry.tokensBefore === 'number' ? { tokensBefore: entry.tokensBefore } : {}),
+        ...(typeof entry.estimatedTokensAfter === 'number' ? { estimatedTokensAfter: entry.estimatedTokensAfter } : {}),
+      });
+      // Usage from before the compaction no longer describes the context.
+      lastInputTokens = typeof entry.estimatedTokensAfter === 'number' ? entry.estimatedTokensAfter : 0;
+      contextTokensEstimated = lastInputTokens > 0;
+      continue;
+    }
     if (entry.type !== 'message') continue;
 
     const msg = entry.message;
@@ -120,6 +150,7 @@ export function buildHistoryItems(entries: SessionHistoryEntry[]): HistoryBuildR
         }
         if (msg.usage?.input) {
           lastInputTokens = msg.usage.input + (msg.usage.cacheRead || 0);
+          contextTokensEstimated = false;
           lastUsage = msg.usage;
         }
       }
@@ -150,5 +181,5 @@ export function buildHistoryItems(entries: SessionHistoryEntry[]): HistoryBuildR
     }
   }
 
-  return { items, totalCost, lastInputTokens, lastUsage };
+  return { items, totalCost, lastInputTokens, contextTokensEstimated, lastUsage };
 }
