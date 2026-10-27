@@ -331,11 +331,33 @@ test('a running compaction is part of the metadata and snapshot until it ends', 
   assert.equal(session.snapshot().compaction, null);
 });
 
+for (const reason of ['threshold', 'overflow']) {
+  test(`${reason} compaction keeps the tab busy before agent_start until the reply settles`, () => {
+    const { session, piSays, lastMetadata } = liveSessionWithClient();
+    piSays({ type: 'compaction_start', reason });
+    assert.equal(lastMetadata().isStreaming, true);
+    assert.equal(session.snapshot().isStreaming, true);
+
+    piSays({ type: 'compaction_end', reason, result: RESULT, aborted: false, willRetry: false });
+    assert.equal(lastMetadata().compaction, null);
+    assert.equal(lastMetadata().isStreaming, true);
+    assert.equal(session.snapshot().session.isStreaming, true);
+    assert.equal(session.snapshot().isStreaming, true);
+
+    piSays({ type: 'agent_start' });
+    piSays({ type: 'agent_settled' });
+    assert.equal(lastMetadata().isStreaming, false);
+    assert.equal(session.snapshot().isStreaming, false);
+  });
+}
+
 test('a successful compaction adds a compaction entry so snapshots show the divider', () => {
   const { session, piSays } = liveSessionWithClient();
   piSays({ type: 'message_start', message: { role: 'user', content: 'hello' } });
   piSays({ type: 'compaction_start', reason: 'manual' });
+  assert.equal(session.isStreaming, false);
   piSays({ type: 'compaction_end', reason: 'manual', result: RESULT, aborted: false, willRetry: false });
+  assert.equal(session.isStreaming, false);
   const entry = session.entries.at(-1);
   assert.equal(entry.type, 'compaction');
   assert.equal(entry.summary, RESULT.summary);

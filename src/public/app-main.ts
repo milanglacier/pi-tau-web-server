@@ -408,7 +408,10 @@ wsClient.addEventListener('rpcEvent', (e: Event) => {
       session.lastActiveAt = new Date().toISOString();
       if (event.type === 'agent_start' || event.type === 'turn_start') session.isStreaming = true;
       if (event.type === 'agent_settled') session.isStreaming = false;
-      if (event.type === 'compaction_start') session.compaction = { reason: String(event.reason || 'manual'), startedAt: Date.now() };
+      if (event.type === 'compaction_start') {
+        session.compaction = { reason: String(event.reason || 'manual'), startedAt: Date.now() };
+        if (event.reason === 'threshold' || event.reason === 'overflow') session.isStreaming = true;
+      }
       if (event.type === 'compaction_end') session.compaction = null;
       if (event.type === 'agent_start' || event.type === 'turn_start' || event.type === 'agent_settled') {
         // Keep an open tree modal honest: disable its rows while the turn
@@ -1030,6 +1033,12 @@ function updateRunningCompaction(retry: SummaryRetry) {
 }
 
 function handleCompactionStart(event: AppEvent) {
+  // A reply can compact before agent_start. Keep its queue waiting until
+  // agent_settled, not just until the compaction finishes.
+  if (event.reason === 'threshold' || event.reason === 'overflow') {
+    state.setStreaming(true);
+    showTypingIndicator(true);
+  }
   hideCompactButton();
   showRunningCompaction(String(event.reason || 'manual'), Date.now());
   updateUI();

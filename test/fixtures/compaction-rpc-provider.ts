@@ -10,6 +10,7 @@ import type { ExtensionAPI, ProviderConfig } from '@earendil-works/pi-coding-age
 // - `big:` reports a nearly full context, so Pi compacts on its own as soon
 //   as the reply ends.
 // - `slow-reply:` keeps the reply running until it is stopped.
+// - `gated-reply:` holds the reply until the test creates RELEASE_REPLY_FILE.
 // - `gated-summary` anywhere in the conversation holds the summary request
 //   until the test creates RELEASE_FILE in Pi's working directory, or until
 //   it is stopped.
@@ -24,6 +25,7 @@ export const CONTEXT_WINDOW = 100_000;
 export const BIG_CONTEXT_TOKENS = 90_000;
 export const SUMMARY_TEXT = 'Fixture summary of the earlier conversation.';
 export const RELEASE_FILE = 'release-summary';
+export const RELEASE_REPLY_FILE = 'release-reply';
 export const SLOW_REPLY_MS = 20_000;
 
 type StreamSimple = NonNullable<ProviderConfig['streamSimple']>;
@@ -66,6 +68,10 @@ export default async function compactionRpcProvider(pi: ExtensionAPI): Promise<v
         text = focus ? `${SUMMARY_TEXT} Focus: ${focus}.` : SUMMARY_TEXT;
       } else {
         if (prompt.startsWith('slow-reply:')) await delay(SLOW_REPLY_MS, undefined, { signal });
+        if (prompt.startsWith('gated-reply:')) {
+          const gate = path.join(process.cwd(), RELEASE_REPLY_FILE);
+          while (!fs.existsSync(gate)) await delay(50, undefined, { signal });
+        }
         text = `Reply to ${prompt}`;
       }
       const input = !isSummary && prompt.startsWith('big:') ? BIG_CONTEXT_TOKENS : Math.ceil(whole.length / 4);

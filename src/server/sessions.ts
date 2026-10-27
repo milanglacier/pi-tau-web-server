@@ -477,6 +477,9 @@ export class PiRpcSession {
     if (type === 'compaction_start') {
       this.compactionRevision++;
       this.compaction = { reason: typeof event.reason === 'string' ? event.reason : 'manual', startedAt: Date.now() };
+      // Automatic compaction belongs to a reply, even before agent_start.
+      // Only agent_settled confirms that the whole reply has finished.
+      if (event.reason === 'threshold' || event.reason === 'overflow') this.isStreaming = true;
     }
     if (type === 'compaction_end') {
       this.recordCompaction(event);

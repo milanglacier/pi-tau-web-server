@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import type { Browser, Page } from 'playwright';
-import { MODEL, PROVIDER, RELEASE_FILE, SUMMARY_TEXT } from '../fixtures/compaction-rpc-provider.ts';
+import { MODEL, PROVIDER, RELEASE_FILE, RELEASE_REPLY_FILE, SUMMARY_TEXT } from '../fixtures/compaction-rpc-provider.ts';
 
 // The real browser, the Tau server and a real Pi RPC process. Only the model
 // is fake (see fixtures/compaction-rpc-provider.ts), so Pi's own compaction,
@@ -86,7 +86,8 @@ async function createSession(t: TestContext) {
   const { session } = await response.json() as { session: { id: string } };
   t.after(async () => { await fetch(`${base}/api/live-sessions/${session.id}`, { method: 'DELETE' }); });
   const releaseSummary = () => fs.writeFileSync(path.join(cwd, RELEASE_FILE), '');
-  return { sessionId: session.id, releaseSummary };
+  const releaseReply = () => fs.writeFileSync(path.join(cwd, RELEASE_REPLY_FILE), '');
+  return { sessionId: session.id, releaseSummary, releaseReply };
 }
 
 async function openPage(t: TestContext, sessionId: string) {
@@ -204,6 +205,50 @@ test('a message sent during compaction waits in the queue and is sent afterwards
   await page.waitForSelector('#queued-messages.hidden', { state: 'attached' });
   assert.equal(await page.locator('#messages .error-message').count(), 0);
 });
+
+for (const reload of [false, true]) {
+  test(`a message queued during automatic compaction before a reply waits for that reply to finish${reload ? ' after reloading' : ''}`, async (t) => {
+    if (skipUnlessBrowser(t)) return;
+    const { sessionId, releaseSummary, releaseReply } = await createSession(t);
+    const page = await openPage(t, sessionId);
+    const setAutoCompaction = async (enabled: boolean) => {
+      const response = await fetch(`${base}/api/rpc`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'set_auto_compaction', sessionId, enabled }),
+      });
+      assert.equal((await response.json()).success, true);
+    };
+
+    await setAutoCompaction(false);
+    try {
+      await chat(page, sessionId, 'big: gated-summary fill the context');
+    } finally {
+      await setAutoCompaction(true);
+    }
+    await send(page, 'gated-reply: original question');
+    await runningRow(page).waitFor();
+    if (reload) {
+      await page.reload();
+      await runningRow(page).waitFor();
+    }
+    await send(page, 'queued question');
+    await page.locator('#queued-messages .queued-msg', { hasText: 'queued question' }).waitFor();
+
+    releaseSummary();
+    await finishedRow(page).waitFor();
+    await page.waitForFunction(() => document.getElementById('status-text')?.textContent === 'Working...');
+    assert.equal(await page.locator('#abort-btn').isVisible(), true, 'the original reply is still running');
+    assert.equal(await page.locator('#queued-messages .queued-msg-label').textContent(), 'Queued');
+
+    releaseReply();
+    await page.locator('#messages .message.assistant', { hasText: 'Reply to gated-reply: original question' }).waitFor();
+    await page.locator('#messages .message.assistant', { hasText: 'Reply to queued question' }).waitFor();
+    await waitIdle(page, sessionId);
+    assert.equal(await page.locator('#queued-messages .queued-msg').count(), 0);
+    assert.equal(await page.locator('#messages .error-message').count(), 0);
+    assert.equal(await page.locator('#messages .message.user', { hasText: 'queued question' }).count(), 1);
+  });
+}
 
 test('Compact during a running reply asks the user to wait and leaves the reply running', async (t) => {
   if (skipUnlessBrowser(t)) return;
