@@ -83,3 +83,48 @@ test('falls back to escaped source when katex throws', () => {
   const html = renderMarkdown('$a+b$');
   assert.match(html, /<code class="math-fallback">a\+b<\/code>/);
 });
+
+// Matches a generated tag with an event handler attribute or a script URL.
+// Quoted attribute values are skipped whole, so escaped text inside a value
+// does not count as an attribute.
+const UNSAFE = /<(img|a)\b(\s+[\w-]+="[^"]*")*\s*(on\w+=|(src|href)="\s*javascript:)/i;
+
+test('HTML in assistant text shows as text, except <br>', () => {
+  const html = renderMarkdown('hi <img src=x onerror=alert(1)> and a <div> wrapper\n\n| a | b |\n|---|---|\n| one<br>two | x<BR />y |\n\nbad <br onclick=alert(1)>');
+  assert.doesNotMatch(html, /<img|<div>/);
+  assert.match(html, /hi &lt;img src=x onerror=alert\(1\)&gt; and a &lt;div&gt; wrapper/);
+  assert.match(html, /<td style="text-align:left">one<br>two<\/td>/);
+  assert.match(html, /x<br>y/);
+  assert.match(html, /bad &lt;br onclick=alert\(1\)&gt;/);
+});
+
+test('markdown links and images cannot add event handlers or script URLs', () => {
+  for (const render of [renderMarkdown, renderUserMarkdown]) {
+    for (const text of [
+      '![x](x" onerror="alert(1))',
+      '[click](javascript:alert(1))',
+      '[click](JavaScript:alert(1))',
+      '[click](java\tscript:alert(1))',
+      '[click](javascript&#58;alert(1))',
+      '![x](javascript:alert(1))',
+      'see https://a.com/"onmouseover="alert(1)',
+    ]) {
+      assert.doesNotMatch(render(text), UNSAFE, text);
+    }
+  }
+});
+
+test('safe links and images still render', () => {
+  assert.match(renderMarkdown('[a](https://a.com/?a=1&b=2)'), /<a href="https:\/\/a\.com\/\?a=1&amp;b=2" target="_blank" rel="noopener">a<\/a>/);
+  assert.match(renderUserMarkdown('[a](https://a.com/?a=1&b=2)'), /href="https:\/\/a\.com\/\?a=1&amp;b=2"/);
+  assert.match(renderMarkdown('[doc](docs/a.md) and [top](#top) and [me](mailto:a@b.c)'), /href="docs\/a\.md".*href="#top".*href="mailto:a@b\.c"/);
+  assert.match(renderMarkdown('![cat](https://a.com/cat.png)'), /<img src="https:\/\/a\.com\/cat\.png" alt="cat" class="inline-image">/);
+  assert.match(renderMarkdown('see https://a.com/x?y=1'), /<a href="https:\/\/a\.com\/x\?y=1"/);
+});
+
+test('math and code keep their source when HTML is escaped', () => {
+  const html = renderMarkdown('a & b, $x < y & z$, and `<b>`');
+  assert.match(html, /a &amp; b/);
+  assert.match(html, /data-display="false">x < y & z</);
+  assert.match(html, /<code>&lt;b&gt;<\/code>/);
+});

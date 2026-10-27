@@ -3,6 +3,10 @@
  * Handles: headings, bold, italic, inline code, code blocks with language,
  * links, unordered/ordered lists, blockquotes, horizontal rules, tables,
  * task lists, images, paragraphs.
+ *
+ * HTML in the text shows as text, so assistant replies and compaction
+ * summaries cannot inject markup. The one exception is `<br>`, which models
+ * use for line breaks inside table cells.
  */
 
 export function renderMarkdown(text: string) {
@@ -225,7 +229,8 @@ export function renderMarkdown(text: string) {
 
 /**
  * Lightweight user-message renderer — inline formatting + blockquotes only.
- * Preserves whitespace/newlines for everything else.
+ * Preserves whitespace/newlines for everything else. HTML the user typed is
+ * kept as HTML.
  */
 export function renderUserMarkdown(text: string) {
   if (!text) return '';
@@ -241,7 +246,7 @@ export function renderUserMarkdown(text: string) {
 
   function flushBq() {
     if (inBlockquote) {
-      html += '<blockquote>' + bqLines.map(l => renderInline(l)).join('<br>') + '</blockquote>';
+      html += '<blockquote>' + bqLines.map(l => renderInline(l, false)).join('<br>') + '</blockquote>';
       inBlockquote = false;
       bqLines = [];
     }
@@ -260,14 +265,32 @@ export function renderUserMarkdown(text: string) {
       continue;
     }
     flushBq();
-    html += renderInline(line) + '\n';
+    html += renderInline(line, false) + '\n';
   }
   flushBq();
 
   return html.replace(/\n$/, '');
 }
 
-function renderInline(text: string) {
+/**
+ * A link or image URL is safe if it is http(s), mailto, or has no scheme at
+ * all (a relative path or #fragment). Browsers ignore whitespace and control
+ * characters inside a scheme, so those are removed before checking. An `&`
+ * before the first `/`, `?` or `#` is rejected because an HTML entity there
+ * could spell out a colon.
+ */
+function isSafeUrl(url: string) {
+  const compact = url.replace(/[\u0000-\u0020\u007f]/g, '');
+  if (/^(https?:\/\/|mailto:)/i.test(compact)) return true;
+  return !/[:&]/.test(compact.split(/[/?#]/)[0]);
+}
+
+/**
+ * With `escapeRawHtml`, HTML in the text shows as text, except `<br>`.
+ * Without it, HTML passes through, but link and image attributes are still
+ * escaped and their URLs checked.
+ */
+function renderInline(text: string, escapeRawHtml = true) {
   // Inline code (must come first to protect content)
   const codeSpans: string[] = [];
   text = text.replace(/`([^`]+)`/g, (_, code: string) => {
@@ -286,8 +309,15 @@ function renderInline(text: string) {
   // whitespace, not followed by a digit ("$5 and $10" stays text).
   text = text.replace(/(?<![\\$])\$(?!\s)((?:\\.|[^$])+?)(?<![\s\\])\$(?!\d)/g, (_, src: string) => putMath(src));
 
+  // Escape after code and math are taken out, so their source reaches the
+  // code and KaTeX renderers unchanged. Escaped text is already safe inside
+  // an attribute; raw text is escaped when it is put into one.
+  if (escapeRawHtml) text = escapeHtml(text).replace(/&lt;br\s*\/?&gt;/gi, '<br>');
+  const attr = escapeRawHtml ? (value: string) => value : escapeHtml;
+
   // Images (before links so ![...](...) isn't caught by link regex)
-  text = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" class="inline-image">');
+  text = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt: string, url: string) =>
+    isSafeUrl(url) ? `<img src="${attr(url)}" alt="${attr(alt)}" class="inline-image">` : match);
 
   // Bold + italic
   text = text.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
@@ -304,10 +334,11 @@ function renderInline(text: string) {
   text = text.replace(/~~(.+?)~~/g, '<del>$1</del>');
 
   // Links
-  text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label: string, url: string) =>
+    isSafeUrl(url) ? `<a href="${attr(url)}" target="_blank" rel="noopener">${label}</a>` : match);
 
-  // Auto-link bare URLs
-  text = text.replace(/(^|[^"'])(https?:\/\/[^\s<]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+  // Auto-link bare URLs. A URL stops at a quote so it cannot close the href.
+  text = text.replace(/(^|[^"'])(https?:\/\/[^\s<"']+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
 
   // Restore inline math and inline code last so the regexes above never see
   // the generated HTML.
@@ -341,20 +372,6 @@ function extractDisplayMath(text: string, blocks: string[]) {
   text = text.replace(/\$\$([\s\S]+?)\$\$/g, put);
   text = text.replace(/\\\[([\s\S]+?)\\\]/g, put);
   return text;
-}
-
-/**
- * Render markdown from text that must not inject HTML, such as a compaction
- * summary. HTML tags in the text show as text. Code keeps its exact content,
- * because the renderer already escapes code blocks and inline code.
- */
-export function renderMarkdownText(text: string) {
-  if (!text) return '';
-  const escapeText = (segment: string) => segment.replace(/&/g, '&amp;').replace(/</g, '&lt;');
-  const escapeOutsideInlineCode = (segment: string) =>
-    segment.split(/(`[^`\n]+`)/).map((part, index) => (index % 2 ? part : escapeText(part))).join('');
-  const parts = text.replace(/\r\n/g, '\n').split(/(```\w*\n[\s\S]*?```)/);
-  return renderMarkdown(parts.map((part, index) => (index % 2 ? part : escapeOutsideInlineCode(part))).join(''));
 }
 
 function escapeHtml(text: string) {

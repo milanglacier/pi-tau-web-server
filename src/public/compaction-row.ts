@@ -8,10 +8,10 @@
  *
  * The text and HTML builders are pure so they can be unit tested without a
  * DOM. The summary is markdown written by a model, so it is rendered with
- * renderMarkdownText, which shows any HTML in it as text.
+ * renderMarkdown, which shows any HTML in it as text.
  */
 
-import { renderMarkdownText } from './markdown.js';
+import { renderMarkdown } from './markdown.js';
 
 /** A failed summary request that Pi will retry. */
 export type SummaryRetry = { attempt: number; maxAttempts: number; delayMs?: number; started?: boolean };
@@ -83,7 +83,7 @@ export function compactionRowHtml(state: CompactionRowState, now = Date.now()) {
   if (state.status === 'done') {
     const note = state.willRetry ? '<div class="compaction-note">Retrying the reply…</div>' : '';
     const summary = state.summary
-      ? `<details class="compaction-summary"><summary>Summary</summary><div class="compaction-summary-body">${renderMarkdownText(state.summary)}</div></details>`
+      ? `<details class="compaction-summary"><summary>Summary</summary><div class="compaction-summary-body">${renderMarkdown(state.summary)}</div></details>`
       : '';
     return `<div class="compaction-line"><span class="compaction-text">${escapeHtml(compactionDoneText(state))}</span></div>${note}${summary}`;
   }

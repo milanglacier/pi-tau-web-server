@@ -23,7 +23,8 @@ Reviewed `fix/compaction-behavior` against its merge base with `main`,
 
 **Location:** `src/public/markdown.ts:353-357`
 
-**Status:** Deferred to the next step; passed for this step by user decision.
+**Status:** Fixed. The user also chose to show HTML as text in assistant
+replies, since they had the same problem with raw HTML.
 
 Escaping raw HTML does not prevent JavaScript from entering through markdown
 image attributes. For example, `![x](x" onerror="document.body.hidden=true)`
@@ -145,5 +146,31 @@ never received a reply. It passed after the fix.
   tests with none skipped. The suite took about 33 seconds.
 - `git diff --check` passed.
 
-The deferred summary HTML issue and the niche project-setting issue are
-unchanged.
+The niche project-setting issue is unchanged.
+
+## Fix summary for finding 1
+
+The summary was not the only way in. Assistant replies rendered any raw HTML
+the model wrote, so an `<img onerror>` in a reply ran directly. Markdown links
+and images also let a `"` close the attribute early, and `javascript:` links
+were allowed. A bare URL could break out of its `href` the same way.
+
+- `src/public/markdown.ts` now shows HTML as text in assistant replies and
+  compaction summaries. The only exception is `<br>`, which models use for
+  line breaks inside table cells. Escaping happens after code and math are
+  taken out, so LaTeX like `a & b` reaches KaTeX unchanged.
+- Link and image URLs must be http(s), mailto, or have no scheme. Their
+  attribute values are escaped, and a bare URL stops at a quote. This also
+  applies to user messages, which still keep any HTML the user typed.
+- `renderMarkdownText` is removed. The compaction row uses `renderMarkdown`,
+  which now escapes HTML for every caller.
+- Unit tests cover raw HTML, `<br>` in tables, each attack from the review,
+  safe links with `&` in the query string, and math and code with `&` or `<`.
+  The new tests fail on the old code.
+
+### Validation after the fix
+
+- `npm run typecheck` passed.
+- `npm test` passed all 312 unit and integration tests.
+- `npm run test:e2e`, with matching installed browser binaries, passed all 90
+  tests with none skipped. The suite took about 33 seconds.

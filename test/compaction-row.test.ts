@@ -43,7 +43,7 @@ test('HTML in the summary is shown as text, while its markdown still renders', (
   assert.match(html, /<h2>Goal<\/h2>/);
   assert.match(html, /<strong>Ship it<\/strong>/);
   assert.doesNotMatch(html, /<img/);
-  assert.match(html, /&lt;img src=x onerror=alert\(1\)>/);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
   assert.match(html, /&lt;div&gt;kept&lt;\/div&gt;/);
 });
 
