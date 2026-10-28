@@ -117,6 +117,19 @@ async function openSidebar(t: TestContext): Promise<Page | null> {
 
 const group = (page: Page, name: string) => page.locator('.project-group').filter({ has: page.locator(`.project-header span[title$="/${name}"]`) });
 const titles = (page: Page, name: string) => group(page, name).locator('.session-title').allTextContents();
+const projectNames = (page: Page) => page.locator('.project-group .project-header span[title]').allTextContents();
+const liveTitles = (page: Page, name: string) => group(page, name).locator('.session-item.has-live-session .session-title').allTextContents();
+
+/** Waits until the value read from the page matches, then asserts it. */
+async function waitForEqual<T>(read: () => Promise<T>, expected: T) {
+  const deadline = Date.now() + 5000;
+  let actual = await read();
+  while (JSON.stringify(actual) !== JSON.stringify(expected) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    actual = await read();
+  }
+  assert.deepEqual(actual, expected);
+}
 
 test('a project with more than 10 sessions shows the 10 newest, and a project with few has no toggle', async (t) => {
   const page = await openSidebar(t);
@@ -143,9 +156,10 @@ test('Show all expands only that project and Show fewer limits it again', async 
   assert.equal((await titles(page, 'big')).length, 10);
 });
 
-test('live-tab selection, reload, and closing tabs keep the open session listed', async (t) => {
+test('open sessions are listed first in their project with green dots, and their project moves to the top', async (t) => {
   const page = await openSidebar(t);
   if (!page) return;
+  await waitForEqual(() => projectNames(page), ['small', 'big', 'trash']);
   const resume = async (index: number) => {
     const response = await fetch(`${base}/api/live-sessions/resume`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -156,32 +170,68 @@ test('live-tab selection, reload, and closing tabs keep the open session listed'
     t.after(async () => { await fetch(`${base}/api/live-sessions/${session.id}`, { method: 'DELETE' }); });
     return page.locator(`.live-tab[data-session-id="${session.id}"]`);
   };
+  // Both sessions are older than the 10 newest. The tab opened last is listed first.
   const oldest = await resume(12);
-  const recent = await resume(2);
-  const activeTitle = group(page, 'big').locator('.session-item.active .session-title');
+  const older = await resume(11);
+  const bothOpen = ['big session 11', 'big session 12', ...Array.from({ length: 10 }, (_, i) => `big session ${i}`)];
+  await waitForEqual(() => titles(page, 'big'), bothOpen);
+  assert.deepEqual(await liveTitles(page, 'big'), ['big session 11', 'big session 12']);
+  assert.deepEqual(await projectNames(page), ['big', 'small', 'trash']);
+  assert.equal(await group(page, 'big').locator('.project-more-btn span:last-child').textContent(), `Show all ${BIG_COUNT}`);
 
+  const activeTitle = group(page, 'big').locator('.session-item.active .session-title');
   await oldest.click();
   await activeTitle.filter({ hasText: 'big session 12' }).waitFor();
-  assert.deepEqual(await titles(page, 'big'), [
-    ...Array.from({ length: 10 }, (_, i) => `big session ${i}`), 'big session 12',
-  ]);
+  assert.deepEqual(await titles(page, 'big'), bothOpen);
 
   await page.reload();
   await activeTitle.filter({ hasText: 'big session 12' }).waitFor();
-  assert.equal((await titles(page, 'big')).length, 11);
+  await waitForEqual(() => titles(page, 'big'), bothOpen);
+  assert.deepEqual(await liveTitles(page, 'big'), ['big session 11', 'big session 12']);
 
-  await recent.click();
-  await activeTitle.filter({ hasText: 'big session 2' }).waitFor();
-  assert.equal((await titles(page, 'big')).length, 10);
-
-  await recent.locator('.live-tab-close').click();
-  await activeTitle.filter({ hasText: 'big session 12' }).waitFor();
-  assert.equal((await titles(page, 'big')).length, 11);
+  // A closed tab's session goes back to its place by file time.
+  await older.locator('.live-tab-close').click();
+  await waitForEqual(() => titles(page, 'big'), ['big session 12', ...Array.from({ length: 10 }, (_, i) => `big session ${i}`)]);
+  assert.deepEqual(await liveTitles(page, 'big'), ['big session 12']);
 
   await oldest.locator('.live-tab-close').click();
   await page.waitForFunction(() => document.querySelectorAll('.live-tab').length === 0);
-  assert.equal((await titles(page, 'big')).length, 10);
+  await waitForEqual(() => titles(page, 'big'), Array.from({ length: 10 }, (_, i) => `big session ${i}`));
+  assert.deepEqual(await liveTitles(page, 'big'), []);
   assert.equal(await activeTitle.count(), 0);
+  assert.deepEqual(await projectNames(page), ['small', 'big', 'trash']);
+});
+
+test('a new tab with no session file yet shows a New session row with a green dot in its project', async (t) => {
+  const page = await openSidebar(t);
+  if (!page) return;
+  await group(page, 'trash').locator('.project-add-btn').click();
+  await page.waitForSelector('#new-live-session-modal:not(.hidden)');
+  const createdResponse = page.waitForResponse(response => response.url() === `${base}/api/live-sessions` && response.request().method() === 'POST');
+  await page.click('#new-live-session-submit');
+  const { session } = await (await createdResponse).json() as { session: { id: string } };
+  t.after(async () => { await fetch(`${base}/api/live-sessions/${session.id}`, { method: 'DELETE' }); });
+
+  const row = group(page, 'trash').locator(`.session-item.has-live-session[data-live-session-id="${session.id}"]`);
+  await row.waitFor();
+  assert.equal(await row.locator('.session-title').textContent(), 'New session');
+  assert.equal((await titles(page, 'trash'))[0], 'New session');
+  assert.equal((await projectNames(page))[0], 'trash');
+  // The new tab counts toward the project's sessions.
+  assert.equal(await group(page, 'trash').locator('.project-count').textContent(), String(TRASH_COUNT + 1));
+
+  // Clicking the row switches back to its tab after another tab was opened.
+  await group(page, 'small').locator('.session-title').filter({ hasText: 'small session 0' }).click();
+  const resumed = page.locator('.live-tab.active').filter({ hasNotText: 'trash' });
+  await resumed.waitFor();
+  const resumedId = await resumed.getAttribute('data-session-id');
+  t.after(async () => { await fetch(`${base}/api/live-sessions/${resumedId}`, { method: 'DELETE' }); });
+  await row.click();
+  await page.waitForSelector(`.live-tab.active[data-session-id="${session.id}"]`);
+
+  await page.locator(`.live-tab[data-session-id="${session.id}"] .live-tab-close`).click();
+  await row.waitFor({ state: 'detached' });
+  await waitForEqual(() => projectNames(page), ['small', 'big', 'trash']);
 });
 
 test('searching finds sessions beyond the 10 shown, and clearing the search limits the project again', async (t) => {

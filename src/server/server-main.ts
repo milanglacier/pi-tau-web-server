@@ -535,10 +535,6 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
   json(res, 404, { error: 'Not found' });
 }
 
-function liveFilesSet() {
-  return new Set(liveManager.list().map((s) => s.sessionFile).filter(Boolean));
-}
-
 function normalizeSessionCwd(cwd: unknown) {
   return typeof cwd === 'string' && cwd.trim() ? path.resolve(expandHome(cwd)) : null;
 }
@@ -652,7 +648,6 @@ async function serveSessionsList(res: ServerResponse) {
   try {
     if (!fs.existsSync(SESSIONS_DIR)) return json(res, 200, { projects: [] });
     const projectsByPath = new Map<string, { path: string; dirName: string; sessions: Array<Record<string, unknown>> }>();
-    const liveFiles = liveFilesSet();
     for (const dir of fs.readdirSync(SESSIONS_DIR, { withFileTypes: true })) {
       if (!dir.isDirectory()) continue;
       const projectDir = path.join(SESSIONS_DIR, dir.name);
@@ -667,7 +662,7 @@ async function serveSessionsList(res: ServerResponse) {
               project = { path: projectPath, dirName: dir.name, sessions: [] };
               projectsByPath.set(projectPath, project);
             }
-            project.sessions.push({ ...parsed, file, filePath, mtime: fs.statSync(filePath).mtimeMs, live: liveFiles.has(filePath) });
+            project.sessions.push({ ...parsed, file, filePath, mtime: fs.statSync(filePath).mtimeMs });
           }
         } catch {}
       }

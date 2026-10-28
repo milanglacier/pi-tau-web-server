@@ -23,7 +23,7 @@ import { buildHistoryItems, type HistoryItem, type SessionHistoryEntry } from '.
 import { parseCompactCommand } from './compact-command.js';
 import { formatElapsed, renderCompactionRow, type CompactionRowState, type SummaryRetry } from './compaction-row.js';
 
-import type { AppEvent, AppMessage, ExtensionUIRequest, InteractionState, LiveInstance, LiveSession, MessageContentBlock, ModelRecord, PendingDialog, PendingFilePath, PendingImage, QueuedCommand, RpcCommand, UsageRecord } from './app-types.js';
+import type { AppEvent, AppMessage, ExtensionUIRequest, InteractionState, LiveSession, MessageContentBlock, ModelRecord, PendingDialog, PendingFilePath, PendingImage, QueuedCommand, RpcCommand, UsageRecord } from './app-types.js';
 
 type LiveSessionSnapshotData = {
   sessionId?: string;
@@ -69,7 +69,6 @@ const sidebar = new SessionSidebar(
   handleSessionSelect,
   (project) => openNewLiveSessionModal(project.path)
 );
-sidebar.onRendered = () => updateLiveSessionIndicators();
 
 // UI elements
 const messageInput = document.getElementById('message-input')!;
@@ -206,7 +205,6 @@ let lastUsage: UsageRecord | null = null; // Full usage object for context visua
 let activeLiveSessionFile: string | null = null; // The active live session file path
 let viewingActiveSession = false; // Whether we're viewing a live backend Tau tab or historical read-only session
 let hasReceivedInitialServerState = false;
-let liveInstances: LiveInstance[] = []; // Sidebar live indicators derived from backend live sessions
 let liveSessions: LiveSession[] = [];
 let activeLiveSessionId = localStorage.getItem('tau-active-live-session-id') || null;
 let hasRestoredInitialLiveSession = false;
@@ -471,7 +469,7 @@ wsClient.addEventListener('stateUpdate', (e: Event) => {
       renderLiveTabs();
     }
     updateLiveSessionInputState();
-    updateLiveSessionIndicators();
+    syncSidebarOpenSessions();
   }
 });
 
@@ -531,9 +529,8 @@ const newLiveSessionSubmit = document.getElementById('new-live-session-submit')!
 
 function setLiveSessions(sessions: LiveSession[]) {
   liveSessions = sessions || [];
-  liveInstances = liveSessions.map(s => ({ sessionFile: s.sessionFile, cwd: s.cwd, port: location.port }));
   renderLiveTabs();
-  updateLiveSessionIndicators();
+  syncSidebarOpenSessions();
 }
 
 function handleLiveSessionClosed(closedId: string) {
@@ -582,9 +579,8 @@ function handleLiveSessionClosed(closedId: string) {
       updateUI();
     }
   }
-  liveInstances = liveSessions.map(s => ({ sessionFile: s.sessionFile, cwd: s.cwd, port: location.port }));
   renderLiveTabs();
-  updateLiveSessionIndicators();
+  syncSidebarOpenSessions();
 }
 
 function upsertLiveSession(session: LiveSession) {
@@ -600,9 +596,8 @@ function upsertLiveSession(session: LiveSession) {
     liveSessions.push(session);
     shouldRenderTabs = true;
   }
-  liveInstances = liveSessions.map(s => ({ sessionFile: s.sessionFile, cwd: s.cwd, port: location.port }));
   if (shouldRenderTabs) renderLiveTabs();
-  updateLiveSessionIndicators();
+  syncSidebarOpenSessions();
 }
 
 function getMostRecentLiveSession() {
@@ -2076,7 +2071,6 @@ refreshSessionsBtn.addEventListener('click', () => {
   refreshSessionsBtn.classList.add('spinning');
   sidebar.loadSessions().then(() => {
     setTimeout(() => refreshSessionsBtn.classList.remove('spinning'), 600);
-    updateLiveSessionIndicators();
   });
 });
 
@@ -2139,6 +2133,15 @@ async function newSession() {
 }
 
 async function handleSessionSelect(session: SidebarSession | null, project: SidebarProject | null) {
+  // A row built from a live tab selects that tab. It may have no file yet.
+  if (session?.liveSessionId) {
+    await selectLiveSession(session.liveSessionId);
+    if (isMobile()) {
+      sidebarEl.classList.add('collapsed');
+      sidebarOverlay.classList.remove('visible');
+    }
+    return;
+  }
   if (session) sidebar.setActive(session.filePath);
   sessionTotalCost = 0;
   lastInputTokens = 0;
@@ -2251,7 +2254,7 @@ function applyLiveSessionSnapshot(data: LiveSessionSnapshotData, requestedAtRevi
   }
   updateLiveSessionInputState();
   updateUI();
-  updateLiveSessionIndicators();
+  syncSidebarOpenSessions();
 
   // Update model display — server is canonical, assign directly.
   if (!staleMetadata && data.model !== undefined) {
@@ -2296,15 +2299,15 @@ function applyLiveSessionSnapshot(data: LiveSessionSnapshotData, requestedAtRevi
   processQueuedExtensionUIRequest();
 }
 
-// Mark all live sessions in the sidebar with a green dot
-function updateLiveSessionIndicators() {
-  const liveFiles = new Set(liveInstances.map(i => i.sessionFile));
-  // Also include the current active live session
-  if (activeLiveSessionFile) liveFiles.add(activeLiveSessionFile);
-
-  document.querySelectorAll('.session-item').forEach(el => {
-    el.classList.toggle('has-live-session', liveFiles.has(el.dataset.filePath));
-  });
+// The sidebar lists the live tabs' sessions first, each with a green dot.
+function syncSidebarOpenSessions() {
+  sidebar.setOpenSessions(liveSessions.map(session => ({
+    id: session.id,
+    filePath: session.sessionFile || null,
+    cwd: session.cwd || '',
+    name: session.sessionName || null,
+    openedAt: Date.parse(session.createdAt || '') || 0,
+  })));
 }
 
 // Refresh live-session list for sidebar indicators if WS missed an update
@@ -2862,9 +2865,7 @@ if (isMobile()) {
 wsClient.connect();
 messageRenderer.renderWelcome();
 updateLiveSessionInputState();
-sidebar.loadSessions().then(() => {
-  updateLiveSessionIndicators();
-});
+void sidebar.loadSessions();
 launcherPanel.init();
 
 // Register service worker for PWA

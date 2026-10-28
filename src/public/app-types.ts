@@ -50,12 +50,6 @@ export type LiveSession = {
   contextUsage?: UsageRecord;
 };
 
-export type LiveInstance = {
-  sessionFile?: string | null;
-  cwd?: string;
-  port: string;
-};
-
 export type UsageRecord = {
   input?: number;
   output?: number;

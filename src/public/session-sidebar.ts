@@ -3,7 +3,7 @@
  */
 
 import { isImeComposition } from './keyboard.js';
-import { limitSessions } from './session-limit.js';
+import { arrangeProjects, type ArrangedProject, type OpenTab } from './session-order.js';
 
 export type SidebarSession = {
   filePath?: string;
@@ -13,8 +13,9 @@ export type SidebarSession = {
   timestamp?: string;
   sessionName?: string;
   sessionTimestamp?: string;
-  live?: boolean;
   tmux?: boolean;
+  /** Set on rows built from a live tab that the session list has no row for. */
+  liveSessionId?: string;
   [key: string]: unknown;
 };
 
@@ -24,6 +25,8 @@ export type SidebarProject = {
   sessions?: SidebarSession[];
   [key: string]: unknown;
 };
+
+type ArrangedEntry = ArrangedProject<SidebarSession, SidebarProject>;
 
 type SearchResult = SidebarSession & {
   project?: string;
@@ -35,11 +38,14 @@ export class SessionSidebar {
   onSessionSelect: (session: SidebarSession | null, project: SidebarProject | null) => void;
   activeSessionFile: string | null;
   projects: SidebarProject[];
-  collapsedProjects: Set<string | undefined>;
-  expandedProjects: Set<string | undefined>;
+  collapsedProjects: Set<string>;
+  expandedProjects: Set<string>;
   onNewSessionInProject: ((project: SidebarProject) => void) | null;
-  /** Called after the session rows are rebuilt, so the app can re-mark live sessions. */
-  onRendered: (() => void) | null = null;
+  /** The live tabs. Their sessions are listed first and get a green dot. */
+  openTabs: OpenTab[] = [];
+  /** False until the first session list arrives, so the loading rows stay. */
+  loaded = false;
+  _loadRequest = 0;
   searchQuery: string;
   favourites: string[];
   contextMenu: HTMLElement | null;
@@ -91,19 +97,60 @@ export class SessionSidebar {
     this.render();
   }
 
-  async loadSessions() {
+  /**
+   * Fetches the session list. A quiet load keeps the current rows until the
+   * new list arrives, instead of showing loading rows.
+   */
+  async loadSessions({ quiet = false } = {}) {
+    const request = ++this._loadRequest;
     try {
-      this.container.innerHTML = Array.from({length: 6}, () =>
-        '<div class="session-skeleton"><div class="session-skeleton-title"></div><div class="session-skeleton-meta"></div></div>'
-      ).join('');
+      if (!quiet) {
+        this.container.innerHTML = Array.from({length: 6}, () =>
+          '<div class="session-skeleton"><div class="session-skeleton-title"></div><div class="session-skeleton-meta"></div></div>'
+        ).join('');
+      }
       const res = await fetch('/api/sessions');
       const data = await res.json();
+      // A later load started while this one was in flight; its list is newer.
+      if (request !== this._loadRequest) return;
       this.projects = data.projects || [];
+      this.loaded = true;
       this.render();
     } catch (error) {
+      if (request !== this._loadRequest) return;
       console.error('[Sidebar] Failed to load sessions:', error);
-      this.container.innerHTML = '<div class="session-loading">Failed to load sessions</div>';
+      if (!quiet) this.container.innerHTML = '<div class="session-loading">Failed to load sessions</div>';
     }
+  }
+
+  /**
+   * Stores the live tabs. The rows are rebuilt only when the tabs change what
+   * the sidebar shows, because tab updates arrive often while a reply streams.
+   */
+  setOpenSessions(tabs: OpenTab[]) {
+    const closed = this.openTabs.some(old => !tabs.some(tab => tab.id === old.id));
+    const before = this.loaded ? this.arrangementKey() : '';
+    this.openTabs = tabs;
+    // A closed tab's session goes back among the other sessions by file time.
+    // Its file may be new or changed since the list was fetched.
+    if (closed && this.loaded) void this.loadSessions({ quiet: true });
+    if (!this.loaded || before === this.arrangementKey()) return;
+    this.render();
+    this.scrollActiveIntoView();
+  }
+
+  /** Scrolls the list just enough to show the open session's row. */
+  scrollActiveIntoView() {
+    const row = this.container.querySelector<HTMLElement>('.project-group .session-item.active');
+    if (!row) return;
+    const box = this.container.getBoundingClientRect();
+    const rect = row.getBoundingClientRect();
+    if (rect.top < box.top) this.container.scrollTop -= box.top - rect.top;
+    else if (rect.bottom > box.bottom) this.container.scrollTop += rect.bottom - box.bottom;
+  }
+
+  isOpen(filePath?: string) {
+    return !!filePath && this.openTabs.some(tab => tab.filePath === filePath);
   }
 
   setSearchQuery(query: string) {
@@ -175,6 +222,7 @@ export class SessionSidebar {
       if (result.filePath === this.activeSessionFile) {
         item.classList.add('active');
       }
+      item.classList.toggle('has-live-session', this.isOpen(result.filePath));
 
       const title = result.sessionName || result.firstMessage || 'Untitled';
       const snippet = result.matches[0]?.snippet || '';
@@ -254,42 +302,40 @@ export class SessionSidebar {
     });
   }
 
-  /** The file paths of every session row the projects currently show. */
-  visibleSessionKey() {
-    return this.projects
-      .map(project => this.visibleSessions(project).visible.map(s => s.filePath).join('|'))
-      .join('\n');
+  /** The key that projects use in the collapsed and expanded sets. */
+  projectKey(project: SidebarProject) {
+    return project.dirName ?? `path:${project.path || ''}`;
   }
 
-  visibleSessions(project: SidebarProject) {
-    return limitSessions({
-      sessions: project.sessions || [],
-      expanded: this.expandedProjects.has(project.dirName),
+  /** The projects in display order, with the session rows each one shows. */
+  arrange(): ArrangedEntry[] {
+    return arrangeProjects<SidebarSession, SidebarProject>({
+      projects: this.projects,
+      openTabs: this.openTabs,
+      isExpanded: project => this.expandedProjects.has(this.projectKey(project)),
       searching: !!this.searchQuery,
-      activeFilePath: this.activeSessionFile,
     });
   }
 
+  /** Changes whenever the projects, their order, or their rows would change. */
+  arrangementKey() {
+    return this.arrange().map(entry => [
+      entry.project ? this.projectKey(entry.project) : `new:${entry.path}`,
+      entry.open.map(({ tab, session }) => session ? session.filePath : `tab:${tab.id}:${tab.filePath}:${tab.name}`).join('|'),
+      entry.visible.map(s => s.filePath).join('|'),
+      entry.total,
+    ].join('\n')).join('\n\n');
+  }
+
   setActive(filePath?: string | null) {
-    const before = this.visibleSessionKey();
     this.activeSessionFile = filePath ?? null;
-    // The open session is always listed, so the rows can change with it.
-    if (before !== this.visibleSessionKey()) {
-      this.render();
-      return;
-    }
     this.container.querySelectorAll('.session-item').forEach(el => {
-      el.classList.toggle('active', el.dataset.filePath === filePath);
+      el.classList.toggle('active', !!filePath && el.dataset.filePath === filePath);
     });
   }
 
   clearActive() {
-    const before = this.visibleSessionKey();
     this.activeSessionFile = null;
-    if (before !== this.visibleSessionKey()) {
-      this.render();
-      return;
-    }
     this.container.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
   }
 
@@ -463,15 +509,17 @@ export class SessionSidebar {
   buildSessionItem(session: SidebarSession, project: SidebarProject) {
     const item = document.createElement('div');
     item.className = 'session-item';
-    item.dataset.filePath = session.filePath;
+    if (session.filePath) item.dataset.filePath = session.filePath;
+    if (session.liveSessionId) item.dataset.liveSessionId = session.liveSessionId;
 
-    if (session.filePath === this.activeSessionFile) {
+    if (session.filePath && session.filePath === this.activeSessionFile) {
       item.classList.add('active');
     }
+    if (session.liveSessionId || this.isOpen(session.filePath)) item.classList.add('has-live-session');
 
-    const title = session.name || session.firstMessage || 'Empty session';
+    const title = session.name || session.firstMessage || (session.liveSessionId ? 'New session' : 'Empty session');
     const time = this.formatTime(session.timestamp);
-    const tmuxTag = session.live ? '<span class="session-tag tmux-tag">live</span>' : (session.tmux ? '<span class="session-tag tmux-tag">tmux</span>' : '');
+    const tmuxTag = session.tmux ? '<span class="session-tag tmux-tag">tmux</span>' : '';
     const favIcon = this.isFavourite(session.filePath) ? '<span class="session-fav-icon">★</span>' : '';
 
     item.innerHTML = `
@@ -484,13 +532,28 @@ export class SessionSidebar {
     `;
 
     item.addEventListener('click', () => this.onSessionSelect(session, project));
-    item.addEventListener('contextmenu', (e) => this.showContextMenu(e, session, project, item));
+    // A row built from a live tab may have no file on disk yet, so the file
+    // actions (favourite, rename, export, delete) are not offered for it.
+    if (!session.liveSessionId) {
+      item.addEventListener('contextmenu', (e) => this.showContextMenu(e, session, project, item));
+    }
 
     return item;
   }
 
+  /** A row for a live tab that the session list has no row for. */
+  tabSession(tab: OpenTab): SidebarSession {
+    return {
+      filePath: tab.filePath ?? undefined,
+      name: tab.name,
+      timestamp: new Date(tab.openedAt).toISOString(),
+      liveSessionId: tab.id,
+    };
+  }
+
   render() {
-    if (this.projects.length === 0) {
+    const arranged = this.arrange();
+    if (arranged.length === 0) {
       this.container.innerHTML = '<div class="session-loading">No sessions found</div>';
       return;
     }
@@ -525,11 +588,14 @@ export class SessionSidebar {
       this.container.appendChild(favGroup);
     }
 
-    // Regular project groups
-    for (const project of this.projects) {
+    // Project groups: projects with open sessions first
+    for (const entry of arranged) {
+      // A directory with open tabs but no saved sessions has no listed project.
+      const project = entry.project ?? { path: entry.path, sessions: [] };
+      const key = this.projectKey(project);
       const group = document.createElement('div');
       group.className = 'project-group';
-      const isCollapsed = this.collapsedProjects.has(project.dirName);
+      const isCollapsed = this.collapsedProjects.has(key);
 
       const header = document.createElement('div');
       header.className = `project-header${isCollapsed ? ' collapsed' : ''}`;
@@ -540,7 +606,7 @@ export class SessionSidebar {
       header.innerHTML = `
         <span class="chevron">▼</span>
         <span title="${this.escapeHtml(project.path)}">${this.escapeHtml(shortPath)}</span>
-        <span class="project-count">${(project.sessions || []).length}</span>
+        <span class="project-count">${entry.total}</span>
       `;
 
       if (this.onNewSessionInProject && project.path) {
@@ -548,10 +614,10 @@ export class SessionSidebar {
       }
 
       header.addEventListener('click', () => {
-        if (this.collapsedProjects.has(project.dirName)) {
-          this.collapsedProjects.delete(project.dirName);
+        if (this.collapsedProjects.has(key)) {
+          this.collapsedProjects.delete(key);
         } else {
-          this.collapsedProjects.add(project.dirName);
+          this.collapsedProjects.add(key);
         }
         header.classList.toggle('collapsed');
         sessionsDiv.classList.toggle('collapsed');
@@ -561,7 +627,7 @@ export class SessionSidebar {
 
       const sessionsDiv = document.createElement('div');
       sessionsDiv.className = `project-sessions${isCollapsed ? ' collapsed' : ''}`;
-      this.fillProjectSessions(sessionsDiv, project);
+      this.fillProjectSessions(sessionsDiv, project, entry);
 
       group.appendChild(sessionsDiv);
       this.container.appendChild(group);
@@ -571,7 +637,6 @@ export class SessionSidebar {
       this.applySearch();
       this.renderSearchResults();
     }
-    this.onRendered?.();
   }
 
   buildNewSessionButton(project: SidebarProject) {
@@ -589,11 +654,17 @@ export class SessionSidebar {
     return button;
   }
 
-  /** Fills a project's session list: the rows to show, then the show-all toggle if needed. */
-  fillProjectSessions(sessionsDiv: HTMLElement, project: SidebarProject) {
+  /**
+   * Fills a project's session list: the open sessions, the other sessions to
+   * show, then the show-all toggle if needed.
+   */
+  fillProjectSessions(sessionsDiv: HTMLElement, project: SidebarProject, entry: ArrangedEntry) {
     sessionsDiv.innerHTML = '';
-    const { visible, limited } = this.visibleSessions(project);
+    const { open, visible, limited, total } = entry;
 
+    for (const { tab, session } of open) {
+      sessionsDiv.appendChild(this.buildSessionItem(session ?? this.tabSession(tab), project));
+    }
     for (const session of visible) {
       sessionsDiv.appendChild(this.buildSessionItem(session, project));
     }
@@ -601,17 +672,17 @@ export class SessionSidebar {
     // While searching, every session is listed and the toggle has no use.
     if (!limited || this.searchQuery) return;
 
-    const expanded = this.expandedProjects.has(project.dirName);
-    const total = (project.sessions || []).length;
+    const key = this.projectKey(project);
+    const expanded = this.expandedProjects.has(key);
     const toggle = document.createElement('button');
     toggle.type = 'button';
     toggle.className = `project-more-btn${expanded ? ' expanded' : ''}`;
     toggle.innerHTML = `<span class="chevron">▼</span><span>${expanded ? 'Show fewer' : `Show all ${total}`}</span>`;
     toggle.addEventListener('click', () => {
-      if (expanded) this.expandedProjects.delete(project.dirName);
-      else this.expandedProjects.add(project.dirName);
-      this.fillProjectSessions(sessionsDiv, project);
-      this.onRendered?.();
+      if (expanded) this.expandedProjects.delete(key);
+      else this.expandedProjects.add(key);
+      const updated = this.arrange().find(other => other.project === entry.project);
+      if (updated) this.fillProjectSessions(sessionsDiv, project, updated);
     });
     sessionsDiv.appendChild(toggle);
   }
