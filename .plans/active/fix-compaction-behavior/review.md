@@ -174,3 +174,65 @@ were allowed. A bare URL could break out of its `href` the same way.
 - `npm test` passed all 312 unit and integration tests.
 - `npm run test:e2e`, with matching installed browser binaries, passed all 90
   tests with none skipped. The suite took about 33 seconds.
+
+# Second-round review
+
+Reviewed the full branch against its merge base with `main`,
+`c1619a96353924e90f001b4745fc967e5008c336`. The working tree was clean before
+this review. Only this review file was changed.
+
+## Findings
+
+### [P1] Prevent later Markdown replacements from rewriting generated image tags
+
+**Location:** `/home/milanglacier/Desktop/personal-projects/pi-extensions/pi-tau-web-server/src/public/markdown.ts:337-338`
+
+The link replacement runs over image tags generated earlier, and `attr` does not escape the quotes those tags contain when rendering assistant text. A summary containing `![x](x[a]( y onerror=window.summaryExecuted=1 a=))` therefore creates an image with a real `onerror` handler. Chromium executed the handler even with the summary's details section collapsed, so model-generated or saved summaries can still run JavaScript in Tau's origin without a click. Protect generated tags from later replacements or sanitize the final HTML, and add a regression test for nested Markdown syntax.
+
+### [P2] Read back the effective auto-compaction setting
+
+**Location:** `/home/milanglacier/Desktop/personal-projects/pi-extensions/pi-tau-web-server/src/server/server-main.ts:348-350`
+
+The first round's niche project-setting issue remains open: when a trusted project's `.pi/settings.json` sets `compaction.enabled` to true, turning the toggle off writes false globally but Pi still uses the project's true value. This code caches and returns the requested false value, so Tau reports that automatic compaction is disabled while it remains enabled. The installed settings manager reproduced that mismatch; read Pi's effective setting after the change and use it for both the cache and the toggle.
+
+## Overall assessment
+
+**Verdict:** Patch is incorrect.
+
+**Explanation:** The earlier queueing fix is covered by passing regression tests, but summary rendering still allows JavaScript execution, and the project-setting mismatch remains unresolved. Type checking, all 312 unit and integration tests, all 90 end-to-end tests with none skipped, and `git diff --check` passed; the end-to-end suite took about 34 seconds.
+
+## Decision after the second round
+
+The user rejected the project-specific auto-compaction finding as won't fix.
+It is not an actionable finding and should not be reported again.
+
+## Fix summary for the second-round P1
+
+The nested Markdown payload could turn part of an image's URL into a new link
+and add an executable image error handler. The fix keeps generated code, math,
+images and links out of later Markdown replacements. Attribute values use the
+original text, escaped for HTML, while link labels keep their rendered
+formatting. This uses the existing renderer and adds no dependency.
+
+- `src/public/markdown.ts` stores generated inline HTML separately and inserts
+  it after Markdown replacements finish. Nested link syntax inside an image
+  URL stays inside the image attribute instead of creating another tag.
+- `test/markdown.test.ts` covers the exact payload in both message renderers.
+  It also checks that image attributes keep code, math and punctuation as text,
+  that quotes stay escaped, and that link labels keep formatting and images.
+- `test/e2e/compaction.e2e.ts` uses the real Pi process and fixture provider to
+  put the payload in an assistant reply and a compaction summary. It waits for
+  the images to finish loading, checks that no error handler or script effect
+  exists, and repeats the summary checks after reload with its details closed.
+
+The payload regression test failed before the fix and passed after it. The
+project-specific auto-compaction setting was not changed.
+
+### Validation after the fix
+
+- `npm run typecheck` passed.
+- `npm test` passed all 315 unit and integration tests.
+- `npm run test:e2e`, with matching installed browser binaries, passed all 91
+  tests with none skipped. The suite took about 34 seconds.
+- `git diff --check` passed.
+- The review text that existed before this summary was preserved exactly.

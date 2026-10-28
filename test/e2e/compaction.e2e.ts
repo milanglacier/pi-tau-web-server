@@ -175,6 +175,33 @@ test('/compact with instructions runs compaction instead of reaching the model',
   assert.match(await finishedRow(page).locator('.compaction-summary-body').textContent() || '', /Focus: keep the API notes/);
 });
 
+test('nested Markdown cannot run scripts in replies or collapsed summaries after reload', async (t) => {
+  if (skipUnlessBrowser(t)) return;
+  const { sessionId } = await createSession(t);
+  const page = await openPage(t, sessionId);
+  const payload = '![x](x[a]( y onerror=window.summaryExecuted=1 a=))';
+  await chat(page, sessionId, 'first question');
+  await send(page, `reply safety ${payload}`);
+  const replyImage = page.locator('#messages .message.assistant img');
+  await replyImage.waitFor({ state: 'attached' });
+  await page.waitForFunction(() => document.querySelector<HTMLImageElement>('#messages .message.assistant img')?.complete);
+  assert.equal(await replyImage.getAttribute('onerror'), null);
+  assert.equal(await page.evaluate(() => 'summaryExecuted' in window), false);
+  await waitIdle(page, sessionId);
+
+  await send(page, `/compact ${payload}`);
+  for (const reload of [false, true]) {
+    if (reload) await page.reload();
+    await finishedRow(page).waitFor();
+    const image = finishedRow(page).locator('.compaction-summary-body img');
+    await image.waitFor({ state: 'attached' });
+    await page.waitForFunction(() => document.querySelector<HTMLImageElement>('.compaction-summary-body img')?.complete);
+    assert.equal(await finishedRow(page).locator('details').evaluate(el => el.hasAttribute('open')), false);
+    assert.equal(await image.getAttribute('onerror'), null);
+    assert.equal(await page.evaluate(() => 'summaryExecuted' in window), false);
+  }
+});
+
 test('automatic compaction during a reply says the context is nearly full', async (t) => {
   if (skipUnlessBrowser(t)) return;
   const { sessionId, releaseSummary } = await createSession(t);

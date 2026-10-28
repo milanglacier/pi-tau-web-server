@@ -291,33 +291,41 @@ function isSafeUrl(url: string) {
  * escaped and their URLs checked.
  */
 function renderInline(text: string, escapeRawHtml = true) {
+  // Keep generated HTML out of later Markdown replacements. Attribute
+  // values use the original text, while labels can use the rendered HTML.
+  const spans: { html: string; source: string }[] = [];
+  const keep = (html: string, source: string) => `%%INLINE${spans.push({ html, source }) - 1}%%`;
+  const restore = (value: string, field: 'html' | 'source') =>
+    value.replace(/%%INLINE(\d+)%%/g, (match, index: string) => spans[Number(index)]?.[field] ?? match);
+  const sourceText = (value: string) => escapeRawHtml ? escapeHtml(value) : value;
+
   // Inline code (must come first to protect content)
-  const codeSpans: string[] = [];
-  text = text.replace(/`([^`]+)`/g, (_, code: string) => {
-    const idx = codeSpans.length;
-    codeSpans.push(`<code>${escapeHtml(code)}</code>`);
-    return `%%ICODE${idx}%%`;
-  });
+  text = text.replace(/`([^`]+)`/g, (match, code: string) =>
+    keep(`<code>${escapeHtml(code)}</code>`, sourceText(match)));
 
   // Inline math — after inline code (so `$x$` stays code) but before the
   // emphasis regexes, which would otherwise mangle math like $a_i * b_i$.
-  const mathSpans: string[] = [];
-  const putMath = (src: string) => `%%IMATH${mathSpans.push(renderMath(src.trim(), false)) - 1}%%`;
-  text = text.replace(/\\\((.+?)\\\)/g, (_, src: string) => putMath(src));
+  const putMath = (match: string, src: string) => keep(renderMath(src.trim(), false), sourceText(match));
+  text = text.replace(/\\\((.+?)\\\)/g, putMath);
   // Single-$ form with currency heuristics: opening $ not escaped/doubled and
   // not followed by whitespace; closing $ not escaped, not preceded by
   // whitespace, not followed by a digit ("$5 and $10" stays text).
-  text = text.replace(/(?<![\\$])\$(?!\s)((?:\\.|[^$])+?)(?<![\s\\])\$(?!\d)/g, (_, src: string) => putMath(src));
+  text = text.replace(/(?<![\\$])\$(?!\s)((?:\\.|[^$])+?)(?<![\s\\])\$(?!\d)/g, putMath);
 
   // Escape after code and math are taken out, so their source reaches the
   // code and KaTeX renderers unchanged. Escaped text is already safe inside
   // an attribute; raw text is escaped when it is put into one.
   if (escapeRawHtml) text = escapeHtml(text).replace(/&lt;br\s*\/?&gt;/gi, '<br>');
-  const attr = escapeRawHtml ? (value: string) => value : escapeHtml;
+  const attr = (value: string) => {
+    const source = restore(value, 'source');
+    return escapeRawHtml ? source : escapeHtml(source);
+  };
 
   // Images (before links so ![...](...) isn't caught by link regex)
   text = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt: string, url: string) =>
-    isSafeUrl(url) ? `<img src="${attr(url)}" alt="${attr(alt)}" class="inline-image">` : match);
+    isSafeUrl(restore(url, 'source'))
+      ? keep(`<img src="${attr(url)}" alt="${attr(alt)}" class="inline-image">`, restore(match, 'source'))
+      : match);
 
   // Bold + italic
   text = text.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
@@ -335,17 +343,15 @@ function renderInline(text: string, escapeRawHtml = true) {
 
   // Links
   text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label: string, url: string) =>
-    isSafeUrl(url) ? `<a href="${attr(url)}" target="_blank" rel="noopener">${label}</a>` : match);
+    isSafeUrl(restore(url, 'source'))
+      ? keep(`<a href="${attr(url)}" target="_blank" rel="noopener">${restore(label, 'html')}</a>`, restore(match, 'source'))
+      : match);
 
   // Auto-link bare URLs. A URL stops at a quote so it cannot close the href.
-  text = text.replace(/(^|[^"'])(https?:\/\/[^\s<"']+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+  text = text.replace(/(^|[^"'])(https?:\/\/[^\s<"']+)/g, (_, prefix: string, url: string) =>
+    prefix + keep(`<a href="${attr(url)}" target="_blank" rel="noopener">${restore(url, 'html')}</a>`, restore(url, 'source')));
 
-  // Restore inline math and inline code last so the regexes above never see
-  // the generated HTML.
-  text = text.replace(/%%IMATH(\d+)%%/g, (_, idx: string) => mathSpans[parseInt(idx)]);
-  text = text.replace(/%%ICODE(\d+)%%/g, (_, idx: string) => codeSpans[parseInt(idx)]);
-
-  return text;
+  return restore(text, 'html');
 }
 
 type Katex = {
@@ -364,7 +370,7 @@ function renderMath(src: string, displayMode: boolean) {
 
 // Replaces $$...$$ and \[...\] segments with %%MATHBLOCK<N>%% placeholders on
 // their own lines, pushing the KaTeX-rendered HTML into `blocks`. The
-// placeholder deliberately has no underscore (matching %%ICODE0%%) so the
+// placeholder deliberately has no underscore (matching %%INLINE0%%) so the
 // italic regex can never split it.
 function extractDisplayMath(text: string, blocks: string[]) {
   const put = (_: string, src: string) =>

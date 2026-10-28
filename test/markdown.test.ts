@@ -114,12 +114,40 @@ test('markdown links and images cannot add event handlers or script URLs', () =>
   }
 });
 
+test('nested link syntax in an image URL stays inside the image attribute', () => {
+  const payload = '![x](x[a]( y onerror=window.summaryExecuted=1 a=))';
+  for (const render of [renderMarkdown, renderUserMarkdown]) {
+    const html = render(payload);
+    assert.match(html, /<img src="x\[a\]\( y onerror=window\.summaryExecuted=1 a=" alt="x" class="inline-image">/);
+    assert.doesNotMatch(html, /<a\b/);
+  }
+});
+
 test('safe links and images still render', () => {
   assert.match(renderMarkdown('[a](https://a.com/?a=1&b=2)'), /<a href="https:\/\/a\.com\/\?a=1&amp;b=2" target="_blank" rel="noopener">a<\/a>/);
   assert.match(renderUserMarkdown('[a](https://a.com/?a=1&b=2)'), /href="https:\/\/a\.com\/\?a=1&amp;b=2"/);
   assert.match(renderMarkdown('[doc](docs/a.md) and [top](#top) and [me](mailto:a@b.c)'), /href="docs\/a\.md".*href="#top".*href="mailto:a@b\.c"/);
   assert.match(renderMarkdown('![cat](https://a.com/cat.png)'), /<img src="https:\/\/a\.com\/cat\.png" alt="cat" class="inline-image">/);
   assert.match(renderMarkdown('see https://a.com/x?y=1'), /<a href="https:\/\/a\.com\/x\?y=1"/);
+});
+
+test('image attributes keep Markdown punctuation, code and math as text', () => {
+  for (const render of [renderMarkdown, renderUserMarkdown]) {
+    const html = render('![**cat** `tag` $x$](https://a.com/a_b_c/$y$)');
+    assert.match(html, /src="https:\/\/a\.com\/a_b_c\/\$y\$" alt="\*\*cat\*\* `tag` \$x\$"/);
+    assert.doesNotMatch(html, /<strong>|<em>|<code>|data-math|%%INLINE/);
+    assert.match(render('![`"` $x$](missing)'), /alt="`&quot;` \$x\$"/);
+  }
+});
+
+test('link labels keep formatting, code, math and linked images', () => {
+  for (const render of [renderMarkdown, renderUserMarkdown]) {
+    const html = render('[**bold** `<x>` $y$](https://a.com/page) and [![cat](https://a.com/cat.png)](https://a.com/cat)');
+    assert.match(html, /<strong>bold<\/strong> <code>&lt;x&gt;<\/code> <span data-math data-display="false">y<\/span><\/a>/);
+    assert.match(html, /href="https:\/\/a\.com\/cat"[^>]*><img src="https:\/\/a\.com\/cat.png" alt="cat" class="inline-image"><\/a>/);
+    assert.equal((html.match(/<a\b/g) || []).length, 2);
+    assert.doesNotMatch(html, /%%INLINE/);
+  }
 });
 
 test('math and code keep their source when HTML is escaped', () => {
