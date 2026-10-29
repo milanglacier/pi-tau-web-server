@@ -63,6 +63,11 @@ before(async () => {
         const end = buffer.indexOf('\n');
         const command = JSON.parse(buffer.slice(0, end));
         buffer = buffer.slice(end + 1);
+        if (command.type === 'prompt') {
+          child.stdout.write(JSON.stringify({
+            type: 'message_start', message: { role: 'user', content: command.message },
+          }) + '\n');
+        }
         child.stdout.write(JSON.stringify({
           type: 'response', id: command.id, command: command.type, success: true,
           data: command.type === 'get_state' ? { sessionFile, isStreaming: false } : {},
@@ -214,6 +219,7 @@ test('a new tab with no session file yet shows a New session row with a green do
 
   const row = group(page, 'trash').locator(`.session-item.has-live-session[data-live-session-id="${session.id}"]`);
   await row.waitFor();
+  await page.waitForSelector(`.session-item.active[data-live-session-id="${session.id}"]`);
   assert.equal(await row.locator('.session-title').textContent(), 'New session');
   assert.equal((await titles(page, 'trash'))[0], 'New session');
   assert.equal((await projectNames(page))[0], 'trash');
@@ -226,12 +232,109 @@ test('a new tab with no session file yet shows a New session row with a green do
   await resumed.waitFor();
   const resumedId = await resumed.getAttribute('data-session-id');
   t.after(async () => { await fetch(`${base}/api/live-sessions/${resumedId}`, { method: 'DELETE' }); });
+  assert.equal(await row.evaluate(el => el.classList.contains('active')), false);
   await row.click();
   await page.waitForSelector(`.live-tab.active[data-session-id="${session.id}"]`);
+  await page.waitForSelector(`.session-item.active[data-live-session-id="${session.id}"]`);
+
+  await page.reload();
+  await page.waitForSelector(`.session-item.active[data-live-session-id="${session.id}"]`);
+  await page.fill('#session-search-input', 'New session');
+  await page.waitForSelector(`.session-item.active[data-live-session-id="${session.id}"]`);
+  await page.fill('#session-search-input', '');
+  await page.waitForSelector(`.session-item.active[data-live-session-id="${session.id}"]`);
 
   await page.locator(`.live-tab[data-session-id="${session.id}"] .live-tab-close`).click();
   await row.waitFor({ state: 'detached' });
   await waitForEqual(() => projectNames(page), ['small', 'big', 'trash']);
+});
+
+test('switching between fileless tabs in the same project highlights only the selected row', async (t) => {
+  const page = await openSidebar(t);
+  if (!page) return;
+  const ids: string[] = [];
+  for (let i = 0; i < 2; i++) {
+    const response = await fetch(`${base}/api/live-sessions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cwd: BIG }),
+    });
+    assert.equal(response.status, 200);
+    const { session } = await response.json() as { session: { id: string } };
+    ids.push(session.id);
+    t.after(async () => { await fetch(`${base}/api/live-sessions/${session.id}`, { method: 'DELETE' }); });
+  }
+  const activeRows = group(page, 'big').locator('.session-item.active');
+  for (const id of [ids[0], ids[1], ids[0]]) {
+    await page.locator(`.live-tab[data-session-id="${id}"]`).click();
+    await waitForEqual(() => activeRows.getAttribute('data-live-session-id'), id);
+    assert.equal(await activeRows.count(), 1);
+  }
+
+  await page.locator(`.live-tab[data-session-id="${ids[0]}"] .live-tab-close`).click();
+  await waitForEqual(() => activeRows.getAttribute('data-live-session-id'), ids[1]);
+  await page.locator(`.live-tab[data-session-id="${ids[1]}"] .live-tab-close`).click();
+  await page.waitForFunction(() => document.querySelectorAll('.live-tab').length === 0);
+  assert.equal(await page.locator('.session-item.active').count(), 0);
+});
+
+test('automatic live-tab titles stay plain text before and after reload', async (t) => {
+  const page = await openSidebar(t);
+  if (!page) return;
+  await group(page, 'big').locator('.project-add-btn').click();
+  await page.waitForSelector('#new-live-session-modal:not(.hidden)');
+  const createdResponse = page.waitForResponse(response => response.url() === `${base}/api/live-sessions` && response.request().method() === 'POST');
+  await page.click('#new-live-session-submit');
+  const { session } = await (await createdResponse).json() as { session: { id: string } };
+  t.after(async () => { await fetch(`${base}/api/live-sessions/${session.id}`, { method: 'DELETE' }); });
+  await page.waitForSelector(`.live-tab.active[data-session-id="${session.id}"]`);
+
+  const prompt = 'Example" onmouseover="window.__sidebarTitleRan=1';
+  await page.evaluate('window.__sidebarTitleRan = 0');
+  await page.fill('#message-input', prompt);
+  await page.press('#message-input', 'Enter');
+  const title = group(page, 'big').locator(`.session-item[data-live-session-id="${session.id}"] .session-title`);
+  await waitForEqual(() => title.textContent(), prompt);
+  await title.hover();
+  assert.equal(await page.evaluate('window.__sidebarTitleRan'), 0, 'hovering the title must not execute its text');
+  assert.equal(await title.getAttribute('title'), prompt);
+  assert.equal(await title.getAttribute('onmouseover'), null);
+
+  await page.reload();
+  await waitForEqual(() => title.textContent(), prompt);
+  await page.evaluate('window.__sidebarTitleRan = 0');
+  await title.hover();
+  assert.equal(await page.evaluate('window.__sidebarTitleRan'), 0);
+  assert.equal(await title.getAttribute('title'), prompt);
+  assert.equal(await title.getAttribute('onmouseover'), null);
+});
+
+test('saved session titles stay plain text in projects, favourites, and search results', async (t) => {
+  const prompt = 'Example" onmouseover="window.__sidebarTitleRan=1';
+  const file = writeSession(SMALL, 'quoted-title', prompt, 1000);
+  t.after(() => fs.rmSync(file, { force: true }));
+  const page = await openSidebar(t);
+  if (!page) return;
+  await page.evaluate('window.__sidebarTitleRan = 0');
+
+  const title = group(page, 'small').locator('.session-title').filter({ hasText: prompt });
+  await title.hover();
+  assert.equal(await page.evaluate('window.__sidebarTitleRan'), 0);
+  assert.equal(await title.getAttribute('title'), prompt);
+  await title.click({ button: 'right' });
+  await page.click('.context-menu-item:has-text("Favourite")');
+  const favourite = page.locator('.favourites-group .session-title');
+  await favourite.hover();
+  assert.equal(await page.evaluate('window.__sidebarTitleRan'), 0);
+  assert.equal(await favourite.getAttribute('title'), prompt);
+
+  await page.fill('#session-search-input', 'Example');
+  const match = page.locator('.search-results-group .session-title');
+  await match.waitFor();
+  await match.hover();
+  assert.equal(await page.evaluate('window.__sidebarTitleRan'), 0);
+  assert.equal(await match.getAttribute('title'), prompt);
+  assert.equal(await match.textContent(), prompt);
+  assert.equal(await match.getAttribute('onmouseover'), null);
 });
 
 test('searching finds sessions beyond the 10 shown, and clearing the search limits the project again', async (t) => {

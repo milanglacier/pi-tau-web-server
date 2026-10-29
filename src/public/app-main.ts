@@ -732,7 +732,7 @@ async function selectLiveSession(id: string) {
 function applyActiveSessionMetadata(session: LiveSession) {
   if (!session) return;
   activeLiveSessionFile = session.sessionFile || null;
-  sidebar.setActive(activeLiveSessionFile);
+  sidebar.setActive(activeLiveSessionFile, session.id);
   // Server is canonical: session.model is always null or a full {provider,id}
   // object, so assign directly. No modelLabel/modelSpec string fallbacks.
   modelPickerController.setModelState(session.model || '', session.thinkingLevel || 'off');
@@ -2248,7 +2248,7 @@ function applyLiveSessionSnapshot(data: LiveSessionSnapshotData, requestedAtRevi
   if (!staleMetadata) {
     if (data.session) upsertLiveSession(data.session);
     activeLiveSessionFile = data.sessionFile || data.session?.sessionFile || null;
-    sidebar.setActive(activeLiveSessionFile);
+    sidebar.setActive(activeLiveSessionFile, sessionId);
     state.setStreaming(!!data.isStreaming);
     showTypingIndicator(!!data.isStreaming);
   }

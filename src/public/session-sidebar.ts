@@ -37,6 +37,7 @@ export class SessionSidebar {
   container: HTMLElement;
   onSessionSelect: (session: SidebarSession | null, project: SidebarProject | null) => void;
   activeSessionFile: string | null;
+  activeLiveSessionId: string | null = null;
   projects: SidebarProject[];
   collapsedProjects: Set<string>;
   expandedProjects: Set<string>;
@@ -142,7 +143,7 @@ export class SessionSidebar {
   /** Scrolls the list just enough to show the open session's row. */
   scrollActiveIntoView() {
     const row = this.container.querySelector<HTMLElement>('.project-group .session-item.active');
-    if (!row) return;
+    if (!row || row.getClientRects().length === 0) return;
     const box = this.container.getBoundingClientRect();
     const rect = row.getBoundingClientRect();
     if (rect.top < box.top) this.container.scrollTop -= box.top - rect.top;
@@ -231,11 +232,15 @@ export class SessionSidebar {
 
       item.innerHTML = `
         <div class="session-title-row">
-          <div class="session-title" title="${this.escapeHtml(title)}">${this.escapeHtml(title)}</div>
+          <div class="session-title"></div>
         </div>
         <div class="search-snippet">${this.highlightMatch(snippet, this.searchQuery)}</div>
         <div class="session-meta">${time}${matchCount > 1 ? ` · ${matchCount} matches` : ''}</div>
       `;
+
+      const titleEl = item.querySelector<HTMLElement>('.session-title')!;
+      titleEl.textContent = title;
+      titleEl.title = title;
 
       // Find the matching project/session to pass to onSessionSelect
       item.addEventListener('click', () => {
@@ -327,16 +332,24 @@ export class SessionSidebar {
     ].join('\n')).join('\n\n');
   }
 
-  setActive(filePath?: string | null) {
+  isActive(filePath?: string, liveSessionId?: string) {
+    return (!!filePath && filePath === this.activeSessionFile)
+      || (!!liveSessionId && liveSessionId === this.activeLiveSessionId);
+  }
+
+  setActive(filePath?: string | null, liveSessionId?: string | null) {
+    const changed = this.activeSessionFile !== (filePath ?? null)
+      || this.activeLiveSessionId !== (liveSessionId ?? null);
     this.activeSessionFile = filePath ?? null;
+    this.activeLiveSessionId = liveSessionId ?? null;
     this.container.querySelectorAll('.session-item').forEach(el => {
-      el.classList.toggle('active', !!filePath && el.dataset.filePath === filePath);
+      el.classList.toggle('active', this.isActive(el.dataset.filePath, el.dataset.liveSessionId));
     });
+    if (changed) this.scrollActiveIntoView();
   }
 
   clearActive() {
-    this.activeSessionFile = null;
-    this.container.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
+    this.setActive(null);
   }
 
   /** Shows a new name for the open session in every row that lists it. */
@@ -473,7 +486,7 @@ export class SessionSidebar {
         }
         // If this was the active session, clear it
         if (session.filePath === this.activeSessionFile) {
-          this.activeSessionFile = null;
+          this.clearActive();
           this.render();
           if (this.onSessionSelect) this.onSessionSelect(null, null);
         } else {
@@ -512,7 +525,7 @@ export class SessionSidebar {
     if (session.filePath) item.dataset.filePath = session.filePath;
     if (session.liveSessionId) item.dataset.liveSessionId = session.liveSessionId;
 
-    if (session.filePath && session.filePath === this.activeSessionFile) {
+    if (this.isActive(session.filePath, session.liveSessionId)) {
       item.classList.add('active');
     }
     if (session.liveSessionId || this.isOpen(session.filePath)) item.classList.add('has-live-session');
@@ -525,11 +538,15 @@ export class SessionSidebar {
     item.innerHTML = `
       <div class="session-title-row">
         ${favIcon}
-        <div class="session-title" title="${this.escapeHtml(title)}">${this.escapeHtml(title)}</div>
+        <div class="session-title"></div>
         ${tmuxTag}
       </div>
       <div class="session-meta">${time}</div>
     `;
+
+    const titleEl = item.querySelector<HTMLElement>('.session-title')!;
+    titleEl.textContent = title;
+    titleEl.title = title;
 
     item.addEventListener('click', () => this.onSessionSelect(session, project));
     // A row built from a live tab may have no file on disk yet, so the file
