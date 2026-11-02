@@ -2,6 +2,20 @@
 
 Branch: `feat/sidebar-open-sessions-on-top`
 
+Status: Completed.
+
+## Completion
+
+Open sessions appear first in their projects with green dots, and projects
+with open sessions appear first in the sidebar. New sessions appear before Pi
+reports their file paths, and the selected row keeps its active highlight.
+Session titles and tooltips are rendered as plain text.
+
+The second-round review found no further actionable bugs. Type checking, all
+319 tests, and all 95 end-to-end tests passed. The project-collapse behavior
+when a project's first saved session appears is accepted, as recorded in
+`review.md`.
+
 ## Goal
 
 Every session that is open as a live tab is easy to find in the left sidebar,

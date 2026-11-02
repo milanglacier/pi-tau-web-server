@@ -45,3 +45,15 @@ The project-collapse behavior is left unchanged by agreement. A project can expa
 - `npm run test:e2e` passed all 95 tests in about 33 seconds.
 
 The findings and overall assessment above are preserved as the original review. Findings 1 and 2 are fixed, and finding 3 is accepted.
+
+# Second-round review
+
+## Findings
+
+No findings.
+
+## Overall assessment
+
+**Verdict:** Patch is correct.
+
+**Explanation:** Review against the merge base with `main`, including an independent review, found no further actionable bugs. The title-injection and active-highlight findings are fixed; the project-collapse behavior remains accepted. Type checking, all 319 tests, and all 95 end-to-end tests passed, with the end-to-end suite taking about 33 seconds.
