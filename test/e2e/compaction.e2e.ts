@@ -193,11 +193,12 @@ test('nested Markdown cannot run scripts in replies or collapsed summaries after
   for (const reload of [false, true]) {
     if (reload) await page.reload();
     await finishedRow(page).waitFor();
-    const image = finishedRow(page).locator('.compaction-summary-body img');
-    await image.waitFor({ state: 'attached' });
-    await page.waitForFunction(() => document.querySelector<HTMLImageElement>('.compaction-summary-body img')?.complete);
+    // A split turn gives two summaries, and each one echoes the payload.
+    const images = finishedRow(page).locator('.compaction-summary-body img');
+    await images.first().waitFor({ state: 'attached' });
+    await page.waitForFunction(() => [...document.querySelectorAll<HTMLImageElement>('.compaction-summary-body img')].every(img => img.complete));
     assert.equal(await finishedRow(page).locator('details').evaluate(el => el.hasAttribute('open')), false);
-    assert.equal(await image.getAttribute('onerror'), null);
+    assert.equal(await images.evaluateAll(imgs => imgs.some(img => img.hasAttribute('onerror'))), false);
     assert.equal(await page.evaluate(() => 'summaryExecuted' in window), false);
   }
 });
