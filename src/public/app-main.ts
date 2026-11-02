@@ -2522,7 +2522,7 @@ function updateContextPill() {
   const estimateNote = contextTokensEstimated ? ' (estimated after compaction)' : '';
   if (lastInputTokens > 0 && contextWindowSize > 0) {
     const pct = Math.round((lastInputTokens / contextWindowSize) * 100);
-    contextPillEl.textContent = pct === 0 ? '<1%' : `${approx}${pct}%`;
+    contextPillEl.textContent = `${approx}${pct === 0 ? '<1' : pct}%`;
     contextPillEl.classList.add('visible');
     contextPillEl.classList.remove('warning', 'critical');
     if (pct >= 80) {
