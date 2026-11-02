@@ -72,7 +72,8 @@
     "src",
     "tsconfig.json",
     "tsconfig.server.json",
-    "tsconfig.public.json"
+    "tsconfig.public.json",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.public.json && node scripts/copy-katex.ts && node scripts/copy-highlight.ts",
