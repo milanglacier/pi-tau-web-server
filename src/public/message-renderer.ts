@@ -60,10 +60,18 @@ export class MessageRenderer {
     `;
   }
 
+  /**
+   * Remove the welcome screen. It is always the container's only child when
+   * shown, so only the first child is checked; searching the whole
+   * conversation for every rendered message makes long histories slow.
+   */
+  removeWelcome() {
+    const first = this.container.firstElementChild;
+    if (first?.classList.contains('welcome')) first.remove();
+  }
+
   renderUserMessage(message: RenderMessage, isHistory = false, target: ParentNode = this.container) {
-    // Remove welcome message if present
-    const welcome = this.container.querySelector('.welcome');
-    if (welcome) welcome.remove();
+    this.removeWelcome();
 
     const div = document.createElement('div');
     div.className = `message user${isHistory ? ' history' : ''}`;
@@ -88,9 +96,7 @@ export class MessageRenderer {
   }
 
   renderAssistantMessage(message: RenderMessage, isStreaming = false, isHistory = false, target: ParentNode = this.container) {
-    // Remove welcome message if present
-    const welcome = this.container.querySelector('.welcome');
-    if (welcome) welcome.remove();
+    this.removeWelcome();
 
     const div = document.createElement('div');
     div.className = `message assistant${isHistory ? ' history' : ''}`;
