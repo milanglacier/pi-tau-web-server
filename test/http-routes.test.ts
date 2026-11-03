@@ -16,7 +16,7 @@ process.env.TAU_PROJECTS_DIR = PROJECTS_DIR;
 
 // Load the server after the env is in place: the module reads it at load
 // time, and ESM hoists static imports ahead of this body.
-const { server, computeUrls, liveManager, SESSIONS_DIR, _setSpawnPiForTest } = (await import('../bin/tau.js')) as any;
+const { server, computeUrls, liveManager, SESSIONS_DIR, _setSpawnPiForTest, shouldCompress } = (await import('../bin/tau.js')) as any;
 import type { TestContext } from 'node:test';
 
 let base = '';
@@ -622,6 +622,16 @@ test('the live snapshot can send the newest entries first, and older entries com
   // Replacing the history, as a tree navigation does, makes older pages unavailable.
   liveManager.get(decodeURIComponent(id)).historyEpoch++;
   assert.equal((await fetch(`${base}/api/live-sessions/${id}/entries?end=4&limit=5&epoch=0`)).status, 409);
+});
+
+test('large history responses are compressed only for remote browsers that accept gzip', () => {
+  const large = 64 * 1024;
+  assert.equal(shouldCompress('100.64.0.2', 'gzip, deflate, br', large), true);
+  assert.equal(shouldCompress('192.168.1.20', 'gzip', large), true);
+  assert.equal(shouldCompress('100.64.0.2', 'gzip', 1000), false, 'small responses are sent as they are');
+  assert.equal(shouldCompress('100.64.0.2', 'br', large), false, 'the browser must accept gzip');
+  assert.equal(shouldCompress('100.64.0.2', undefined, large), false);
+  for (const loopback of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) assert.equal(shouldCompress(loopback, 'gzip', large), false);
 });
 
 test('history snapshots link to images instead of carrying their data, and the links serve the image', async (t: TestContext) => {

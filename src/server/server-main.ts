@@ -11,6 +11,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import zlib from 'node:zlib';
 import { spawn, execFile, type ExecException } from 'node:child_process';
 import readline from 'node:readline';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -104,6 +105,36 @@ function sendAuthRequired(res: ServerResponse, req?: IncomingMessage) {
 }
 
 const HISTORY_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+// History responses are large JSON that compresses about 3.5 times at the
+// fastest gzip level. A browser on a phone or remote link gets them that much
+// sooner. Loopback browsers gain nothing, so they skip it.
+const COMPRESS_MIN_BYTES = 32 * 1024;
+const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+
+function shouldCompress(remoteAddress: string | undefined, acceptEncoding: string | string[] | undefined, bytes: number) {
+  if (bytes < COMPRESS_MIN_BYTES || LOOPBACK_ADDRESSES.has(remoteAddress || '')) return false;
+  return /\bgzip\b/.test(String(acceptEncoding || ''));
+}
+
+/** Send JSON, compressed when the browser is remote and accepts gzip. Compression runs off the main thread. */
+function compressedJson(req: IncomingMessage, res: ServerResponse, status: number, data: unknown) {
+  const body = JSON.stringify(data);
+  if (!shouldCompress(req.socket.remoteAddress, req.headers['accept-encoding'], Buffer.byteLength(body))) {
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(body);
+    return;
+  }
+  zlib.gzip(body, { level: 1 }, (error, zipped) => {
+    if (error) {
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(body);
+      return;
+    }
+    res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' });
+    res.end(zipped);
+  });
+}
 
 function json(res: ServerResponse, status: number, data: unknown, extraHeaders: Record<string, string> = {}) {
   res.writeHead(status, { 'Content-Type': 'application/json', ...extraHeaders });
@@ -498,7 +529,7 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
     const subRoute = liveMatch[2];
     if (subRoute === 'snapshot' && req.method === 'GET') {
       const tail = parsed.searchParams.get('tail');
-      return json(res, 200, session.snapshot(tail ? { tail: Math.max(1, Number(tail) || 1) } : {}));
+      return compressedJson(req, res, 200, session.snapshot(tail ? { tail: Math.max(1, Number(tail) || 1) } : {}));
     }
     if (subRoute === 'entries' && req.method === 'GET') {
       const end = Number(parsed.searchParams.get('end'));
@@ -507,7 +538,7 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
       if (![end, limit, epoch].every(Number.isInteger) || end < 0 || limit < 1) return json(res, 400, { error: 'end, limit and epoch must be whole numbers' });
       const page = session.historyPage(end, limit, epoch);
       if (!page) return json(res, 409, { error: 'The session history changed. Load the session again.' });
-      return json(res, 200, page);
+      return compressedJson(req, res, 200, page);
     }
     if (!subRoute && req.method === 'DELETE') { liveManager.delete(id, 'closed_by_user').then(() => json(res, 200, { success: true })); return; }
   }
@@ -1052,6 +1083,7 @@ export {
   isAllowedApiOrigin,
   setCorsForAllowedOrigin,
   handleApiRoute,
+  shouldCompress,
   serveStaticFile,
   server,
   wss,
