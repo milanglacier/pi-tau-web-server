@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Switching back to a tab you already opened shows its conversation almost at once, at the same scroll position, including anything that arrived while it was hidden.
+- Large sessions show their newest messages sooner and fill in older history faster, and long sessions no longer freeze the page while they load.
+
 ## [1.2.0] - 2026-11-02
 
 ### Added
