@@ -89,6 +89,24 @@ Findings:
   streaming in the background add little work. The sidebar and tab bar already
   skip redraws when nothing they show has changed.
 
+## Status
+
+All six steps are done, each in its own commit, in the order 1, 2, 3, 5, 4,
+6. Step 5 went before step 4 because both change the tool card and message
+renderers, and step 5 was ready first. Results are in "Outcome" below.
+
+Step 2 changed from this plan in one way. A hidden tab's view is not brought
+up to date by asking the server for entries after a count. Instead the
+browser keeps the events that arrive for the hidden tab and replays them
+when the tab is shown again. Entries cannot describe a reply that is still
+streaming, or a running tool's partial output, but events can, so a tab
+hidden in the middle of a reply comes back exactly as it would have looked.
+Streamed text is merged into one event and only the newest output of each
+running tool is kept. The view is built again from the server when the
+connection dropped, when the server sends a new full snapshot for the tab
+(as after a tree navigation), or after 5,000 kept events. The history epoch
+from step 2 is used by step 3's history pages instead.
+
 ## Fix plan
 
 Steps are ordered by gain for effort. Each step is its own commit and is
@@ -228,6 +246,37 @@ shrink what is sent, so do this step last and only if it still pays off.
 
 The benchmark is not part of `npm test` or `npm run test:e2e`; a full run of
 all presets takes a few minutes.
+
+## Outcome
+
+`after-cpu4.json` and `after-cpu1.json` hold the finished branch, measured
+the same way as the baseline. Median of 3 runs at a 4x slower CPU; "tail"
+is when the newest message was painted, "full" when all history was in the
+page.
+
+| preset  | action | tail (ms)  | full (ms)     | max task (ms) | blocking (ms) | elements        |
+| ------- | ------ | ---------: | ------------: | ------------: | ------------: | --------------: |
+| typical | open   | 336 → 220  | 862 → 713     | 85 → 0        | 35 → 0        | 16,608 → 10,842 |
+| typical | switch | 148 → 67   | 653 → 67      | 0 → 0         | 0 → 0         | 16,612 → 10,846 |
+| long    | open   | 570 → 231  | 4,013 → 2,700 | 124 → 0       | 493 → 0       | 67,434 → 42,490 |
+| long    | switch | 392 → 197  | 3,916 → 197   | 127 → 79      | 411 → 29      | 67,438 → 42,494 |
+| images  | open   | 644 → 320  | 1,079 → 522   | 199 → 84      | 385 → 42      | 3,752 → 2,922   |
+| images  | switch | 422 → 72   | 793 → 72      | 163 → 0       | 237 → 0       | 3,756 → 2,926   |
+
+Switching back after the hidden tab received a streamed reply
+(`switch-reply`, added with step 2) takes 72, 206 and 65 ms. At normal CPU
+speed, switching back takes 28-48 ms for every session size instead of
+248-1,593 ms, and the newest messages of an opened session show 10-35%
+sooner. There, the whole history of the long session takes about 11% longer
+to fill in (1,834 ms instead of 1,654 ms), because it arrives in several
+requests.
+
+The whole history of a long session still takes about 2.7 s to fill in at a
+4x slower CPU, but it now fills in without blocking input, while the reader
+already sees the newest messages. Switching back to the long session still
+spends about 200 ms putting 42,000 elements back in the page; showing each
+tab's conversation in its own hidden container would avoid that, at the cost
+of a larger change to how the renderers find the conversation.
 
 ## Verification for each step
 
