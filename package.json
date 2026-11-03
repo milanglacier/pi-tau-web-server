@@ -80,7 +80,9 @@
     "prepare": "npm run build",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.public.json --noEmit && tsc -p tsconfig.test.json",
     "test": "npm run build && node --test test/*.test.ts",
-    "test:e2e": "bash scripts/e2e.sh"
+    "test:e2e": "bash scripts/e2e.sh",
+    "benchmark": "bash scripts/benchmark.sh",
+    "benchmark:render": "npm run build && node benchmark/render-cost.ts"
   },
   "dependencies": {
     "ws": "^8.21.1"
