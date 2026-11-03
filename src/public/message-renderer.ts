@@ -29,10 +29,22 @@ type RenderMessage = {
 export class MessageRenderer {
   container: HTMLElement;
   isNearBottom: boolean;
+  /** Text of history thinking blocks that have not been opened yet. */
+  private unopenedThinking = new WeakMap<Element, string>();
 
   constructor(container: HTMLElement) {
     this.container = container;
     this.isNearBottom = true;
+
+    // One handler opens and closes every thinking block in the conversation.
+    this.container.addEventListener('click', (event) => {
+      const toggle = (event.target as Element | null)?.closest('.thinking-toggle');
+      if (!toggle || !this.container.contains(toggle)) return;
+      const content = toggle.nextElementSibling;
+      if (content) this.fillThinking(content);
+      content?.classList.toggle('expanded');
+      toggle.classList.toggle('expanded');
+    });
 
     // Track scroll position for smart auto-scroll
     this.container.addEventListener('scroll', () => {
@@ -104,6 +116,9 @@ export class MessageRenderer {
 
     let contentHtml = '';
     let usageHtml = '';
+    // History thinking blocks start closed and get their text when opened,
+    // because most are never opened.
+    const thinkingTexts: string[] = [];
 
     if (typeof message.content === 'string') {
       contentHtml = isStreaming ? this.escapeHtml(message.content) : renderMarkdown(message.content);
@@ -112,7 +127,8 @@ export class MessageRenderer {
         if (block.type === 'text') {
           contentHtml += isStreaming ? this.escapeHtml(block.text) : renderMarkdown(block.text || '');
         } else if (block.type === 'thinking') {
-          contentHtml += this.renderThinkingBlock(block.thinking);
+          contentHtml += this.renderThinkingBlock(block.thinking, isHistory);
+          thinkingTexts.push(block.thinking || '');
         }
       }
     }
@@ -134,6 +150,10 @@ export class MessageRenderer {
       ${!isStreaming ? '<button class="message-copy-btn" aria-label="Copy message"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>' : ''}
     `;
 
+    if (isHistory && thinkingTexts.length > 0) {
+      div.querySelectorAll(':scope > .message-content > .thinking-block > .thinking-content')
+        .forEach((element, index) => this.unopenedThinking.set(element, thinkingTexts[index]));
+    }
     if (!isStreaming) this._setupCopyBtn(div);
     target.appendChild(div);
     if (!isHistory) this.scrollToBottom();
@@ -141,14 +161,21 @@ export class MessageRenderer {
     return div;
   }
 
-  renderThinkingBlock(thinking?: string) {
-    const id = 'thinking-' + Math.random().toString(36).slice(2, 8);
+  private fillThinking(content: Element) {
+    const text = this.unopenedThinking.get(content);
+    if (text === undefined) return;
+    this.unopenedThinking.delete(content);
+    content.textContent = text;
+  }
+
+  /** A closed thinking block. With `textOnOpen`, its text is filled in when it first opens. */
+  renderThinkingBlock(thinking?: string, textOnOpen = false) {
     return `<div class="thinking-block">
-<div class="thinking-toggle" onclick="var c=document.getElementById('${id}');c.classList.toggle('expanded');this.classList.toggle('expanded')">
+<div class="thinking-toggle">
 <span class="chevron"><svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor"><path d="M2 1l4 3-4 3z"/></svg></span>
 <span class="thinking-label"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M12 5v13"/><path d="M6.5 9h11"/><path d="M7 13h10"/></svg> Thinking</span>
 </div>
-<div class="thinking-content" id="${id}">${this.escapeHtml(thinking)}</div>
+<div class="thinking-content">${textOnOpen ? '' : this.escapeHtml(thinking)}</div>
 </div>`;
   }
 
@@ -160,7 +187,7 @@ export class MessageRenderer {
       thinkingDiv = document.createElement('div');
       thinkingDiv.className = 'thinking-block streaming-thinking';
       thinkingDiv.innerHTML = `
-        <div class="thinking-toggle expanded" onclick="var c=this.nextElementSibling;c.classList.toggle('expanded');this.classList.toggle('expanded')">
+        <div class="thinking-toggle expanded">
           <span class="chevron"><svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor"><path d="M2 1l4 3-4 3z"/></svg></span>
           <span class="thinking-label"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M12 5v13"/><path d="M6.5 9h11"/><path d="M7 13h10"/></svg> Thinking</span>
         </div>
@@ -284,6 +311,7 @@ export class MessageRenderer {
     btn.addEventListener('click', () => {
       const content = messageEl.querySelector('.message-content');
       if (!content) return;
+      content.querySelectorAll('.thinking-content').forEach(element => this.fillThinking(element));
       const text = content.textContent;
       // Fallback for non-HTTPS (LAN access)
       const copyText = (t: string) => {

@@ -83,12 +83,15 @@ test('nested tool events leave root cards unchanged and match reloaded history',
   await page.reload();
   await card.waitFor({ state: 'attached' });
   assert.deepEqual(await page.locator('#messages > .tool-card').evaluateAll(cards => cards.map(card => card.getAttribute('data-tool-call-id'))), liveIds);
-  assert.equal(await card.locator('.tool-output').textContent(), 'root final output');
   assert.equal(await card.locator('.nested-call-row').count(), 1);
   assert.equal(await card.locator('.nested-call-duration').textContent(), '17 ms');
   assert.equal(await card.locator('.nested-call-status').textContent(), 'succeeded');
   assert.equal(await card.locator('.nested-call-details pre').count(), 0, 'history details must be lazy');
+  assert.equal(await card.locator('.tool-output').count(), 0, 'a closed history card builds its output when it opens');
   await card.locator('.tool-card-header').click();
+  assert.equal(await card.locator('.tool-output').textContent(), 'root final output');
+  // The output sits below the calls, as in the live card.
+  assert.equal(await card.locator('.tool-card-body > :last-child').getAttribute('class'), 'tool-output');
   await card.locator('.nested-calls-toggle').click();
   await card.locator('.nested-call-toggle').click();
   assert.match(await card.locator('.nested-call-details').textContent() || '', /\/tmp\/nested\.txt/);

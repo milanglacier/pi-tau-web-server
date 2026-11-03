@@ -248,6 +248,13 @@ type CallsView = {
 
 type ExpansionChoice = { body?: boolean; calls?: boolean };
 
+/** What a history card needs to build its body the first time it opens. */
+type UnbuiltBody = { toolName: string; args?: ToolArgs; result?: ToolResult };
+
+// Expand All builds this many card bodies per frame, so it never freezes a
+// long conversation.
+const EXPAND_ALL_BATCH = 40;
+
 export type ToolExecution = {
   toolCallId?: string;
   toolName?: string;
@@ -279,6 +286,7 @@ export type ToolCardState = {
   callsViews: Map<string, CallsView>;
   expansion: Map<string, ExpansionChoice>;
   allChoice: boolean | undefined;
+  unbuiltBodies: Map<string, UnbuiltBody>;
 };
 
 export class ToolCardRenderer {
@@ -291,6 +299,9 @@ export class ToolCardRenderer {
   private callsViews = new Map<string, CallsView>();
   private expansion = new Map<string, ExpansionChoice>();
   private allChoice: boolean | undefined;
+  private unbuiltBodies = new Map<string, UnbuiltBody>();
+  /** Bumped to stop an Expand All that is still building bodies. */
+  private expandRun = 0;
   private bottomScrollFrame: number | undefined;
   private bottomScrollTop: number | undefined;
 
@@ -352,6 +363,7 @@ export class ToolCardRenderer {
     if (!card) {
       card = this.createToolCard(toolExecution);
     }
+    this.buildBody(String(toolExecution.toolCallId || ''));
 
     // Update status
     const statusElement = card.querySelector('.tool-status');
@@ -376,6 +388,7 @@ export class ToolCardRenderer {
   finalizeToolCard(toolCallId: string, result: ToolResult, isError: boolean) {
     const card = this.toolCards.get(toolCallId);
     if (!card) return;
+    this.buildBody(toolCallId);
 
     const wasFollowing = this.isFollowingBottom();
     // Update status
@@ -453,6 +466,7 @@ export class ToolCardRenderer {
     copyBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
     copyBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      this.buildBody(id);
       const output = card.querySelector('.tool-output');
       if (!output || !output.textContent.trim()) return;
       const text = output.textContent;
@@ -476,21 +490,15 @@ export class ToolCardRenderer {
     card.appendChild(header);
 
     // Body is collapsed by default unless Expand All was invoked while
-    // progressive history chunks are still pending.
+    // progressive history chunks are still pending. Its arguments and output
+    // are built the first time it opens, because most history cards never do.
     const body = document.createElement('div');
     body.className = `tool-card-body${this.historyCardsExpanded ? ' expanded' : ''}`;
-
-    const argsEl = this.renderArguments(toolName || '', args);
-    if (argsEl) body.appendChild(argsEl);
-
-    const outputEl = document.createElement('div');
-    outputEl.className = 'tool-output';
-    body.appendChild(outputEl);
-
     card.appendChild(body);
 
     target.appendChild(card);
     this.toolCards.set(id, card);
+    this.unbuiltBodies.set(id, { toolName: String(toolName || ''), args });
     this.bindHeader(id, card);
     this.renderNestedCalls(id);
 
@@ -512,8 +520,11 @@ export class ToolCardRenderer {
       }
     }
 
+    const unbuilt = this.unbuiltBodies.get(toolCallId);
     const outputElement = card.querySelector('.tool-output');
-    if (outputElement && result) {
+    if (unbuilt) {
+      unbuilt.result = result;
+    } else if (outputElement && result) {
       outputElement.textContent = this.formatResult(result);
     }
     if (result?.nestedCalls) this.nestedCalls.replace(toolCallId, result.nestedCalls);
@@ -562,9 +573,26 @@ export class ToolCardRenderer {
   }
 
   private setBodyExpanded(card: HTMLElement, expanded: boolean) {
+    if (expanded) this.buildBody(card.dataset.toolCallId || '');
     card.querySelector('.tool-card-body')?.classList.toggle('expanded', expanded);
     card.querySelector('.tool-card-chevron')?.classList.toggle('expanded', expanded);
     card.querySelector('.tool-card-header')?.setAttribute('aria-expanded', String(expanded));
+  }
+
+  /** Build a history card's arguments and output, once, the first time it opens. */
+  private buildBody(id: string) {
+    const unbuilt = this.unbuiltBodies.get(id);
+    const body = this.toolCards.get(id)?.querySelector('.tool-card-body');
+    if (!unbuilt || !body) return;
+    this.unbuiltBodies.delete(id);
+    // Calls of nested tools may already sit in the body; arguments go above
+    // them and the output below, as in a card built all at once.
+    const argsEl = this.renderArguments(unbuilt.toolName, unbuilt.args);
+    if (argsEl) body.prepend(argsEl);
+    const outputEl = document.createElement('div');
+    outputEl.className = 'tool-output';
+    if (unbuilt.result) outputEl.textContent = this.formatResult(unbuilt.result);
+    body.append(outputEl);
   }
 
   private bindHeader(id: string, card: HTMLElement) {
@@ -915,14 +943,26 @@ export class ToolCardRenderer {
   expandAll() {
     this.historyCardsExpanded = true;
     this.allChoice = true;
-    this.toolCards.forEach((card, id) => {
-      this.expansion.set(id, { body: true, calls: true });
-      this.setBodyExpanded(card, true);
-      this.renderNestedCalls(id);
-    });
+    const run = ++this.expandRun;
+    // Newest first: those cards are nearest the bottom, where the reader
+    // usually is.
+    const ids = [...this.toolCards.keys()].reverse();
+    for (const id of ids) this.expansion.set(id, { body: true, calls: true });
+    const expandBatch = () => {
+      if (run !== this.expandRun) return;
+      for (const id of ids.splice(0, EXPAND_ALL_BATCH)) {
+        const card = this.toolCards.get(id);
+        if (!card) continue;
+        this.setBodyExpanded(card, true);
+        this.renderNestedCalls(id);
+      }
+      if (ids.length > 0) requestAnimationFrame(expandBatch);
+    };
+    expandBatch();
   }
 
   collapseAll() {
+    this.expandRun++;
     this.historyCardsExpanded = false;
     this.allChoice = false;
     this.toolCards.forEach((card, id) => {
@@ -943,6 +983,7 @@ export class ToolCardRenderer {
    * them back later with `restoreState`.
    */
   takeState(): ToolCardState {
+    this.expandRun++;
     if (this.bottomScrollFrame !== undefined) cancelAnimationFrame(this.bottomScrollFrame);
     this.bottomScrollFrame = undefined;
     this.bottomScrollTop = undefined;
@@ -955,6 +996,7 @@ export class ToolCardRenderer {
       callsViews: this.callsViews,
       expansion: this.expansion,
       allChoice: this.allChoice,
+      unbuiltBodies: this.unbuiltBodies,
     };
     this.toolCards = new Map();
     this.historyCardsExpanded = false;
@@ -964,6 +1006,7 @@ export class ToolCardRenderer {
     this.callsViews = new Map();
     this.expansion = new Map();
     this.allChoice = undefined;
+    this.unbuiltBodies = new Map();
     return state;
   }
 
@@ -978,6 +1021,7 @@ export class ToolCardRenderer {
       callsViews: this.callsViews,
       expansion: this.expansion,
       allChoice: this.allChoice,
+      unbuiltBodies: this.unbuiltBodies,
     } = state);
   }
 }

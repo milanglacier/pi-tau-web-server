@@ -96,6 +96,8 @@ test('codemode argument fallbacks preserve JSON, empty code, and omitted nested 
     const rendered = cases.map(execution => {
       const card = renderer.createToolCard({ ...execution, status: 'pending' });
       const history = renderer.createHistoryCard({ ...execution, toolCallId: `${execution.toolCallId}-history` });
+      // A history card builds its arguments when it first opens.
+      (history.querySelector('.tool-card-header') as HTMLElement).click();
       return [card, history].map(element => ({
         args: element.querySelector('.tool-args')?.textContent,
         code: element.querySelector('code')?.textContent,
@@ -381,6 +383,7 @@ test('built-in bash, edit, read, and write tool calls render cleanly in live, ne
     const topLevel = invalidCases.map(item => {
       const live = renderer.createToolCard({ ...item, status: 'pending' });
       const hist = renderer.createHistoryCard({ ...item, toolCallId: `${item.toolCallId}-h` });
+      (hist.querySelector('.tool-card-header') as HTMLElement).click();
       return {
         expected: JSON.stringify(item.args, null, 2),
         liveArgs: live.querySelector('.tool-args')?.textContent,
@@ -522,5 +525,36 @@ test('long write labels keep Copy code visible and usable on narrow screens', as
       assert.equal(await page.evaluate(() => navigator.clipboard.readText()), content);
     }
   }
+  await assertNoPageErrors(errors);
+});
+
+test('a history thinking block shows its text when opened, and copying the reply includes it', async (t: TestContext) => {
+  if (skipUnlessBrowser(t)) return;
+  const { page, errors, session } = await openNestedPage(t);
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  const thinking = 'history thinking <b>not markup</b>';
+  session.entries.push({ type: 'message', message: { role: 'assistant', content: [
+    { type: 'thinking', thinking },
+    { type: 'text', text: 'history reply text' },
+  ] } });
+  await page.reload();
+  const message = page.locator('#messages > .message.assistant').filter({ hasText: 'history reply text' });
+  await message.waitFor();
+  const content = message.locator('.thinking-content');
+  assert.equal(await content.textContent(), '');
+
+  await message.locator('.thinking-toggle').click();
+  assert.equal(await content.textContent(), thinking);
+  assert.equal(await content.evaluate(element => element.classList.contains('expanded')), true);
+  await message.locator('.thinking-toggle').click();
+  assert.equal(await content.evaluate(element => element.classList.contains('expanded')), false);
+
+  // Copying a reply whose thinking was never opened copies the same text.
+  await page.reload();
+  await message.waitFor();
+  await message.hover();
+  await message.locator('.message-copy-btn').click();
+  await page.waitForFunction(() => navigator.clipboard.readText().then(text => text.includes('history reply text')));
+  assert.match(await page.evaluate(() => navigator.clipboard.readText()), /history thinking <b>not markup<\/b>[\s\S]*history reply text/);
   await assertNoPageErrors(errors);
 });

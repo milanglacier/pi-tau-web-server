@@ -187,6 +187,7 @@ test('Expand All Tools also expands cards rendered by later history chunks', asy
   });
   assert.ok(cardState.total > 1, 'fixture should contain tool cards across multiple chunks');
   assert.equal(cardState.expanded, cardState.total, 'deferred tool cards ignored Expand All Tools');
+  assert.equal(await page.locator('#messages > .tool-card .tool-output').count(), cardState.total, 'Expand All builds every card body');
   assert.equal(await page.locator('.nested-calls-toggle[aria-expanded="true"]').count(), cardState.total);
   assert.equal(await page.locator('.nested-call-toggle[aria-expanded="true"]').count(), 0, 'Expand All keeps row details closed');
   assert.equal(await page.locator('.nested-call-details pre').count(), 0, 'history arguments are built on demand');

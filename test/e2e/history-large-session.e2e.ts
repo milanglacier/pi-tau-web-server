@@ -96,6 +96,8 @@ test('tool results are paired onto their cards in both the newest and oldest chu
     const id = `tool-${pad(round)}`;
     const output = await page.evaluate((toolCallId: string) => {
       const card = document.querySelector(`.tool-card[data-tool-call-id="${toolCallId}"]`);
+      // A history card builds its output when it first opens.
+      card?.querySelector<HTMLElement>('.tool-card-header')?.click();
       return card?.querySelector('.tool-output')?.textContent ?? null;
     }, id);
     assert.equal(output, `tool-result-${pad(round)}`, `result missing on card ${id}`);
