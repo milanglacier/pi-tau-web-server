@@ -208,9 +208,9 @@ test('switching tabs preserves the original approval deadline and never sends ca
   await page.click(`.live-tab[data-session-id="${other.sessionId}"]`);
   await page.waitForSelector('#dialog-container.hidden', { state: 'attached' });
   await page.clock.runFor(4000);
-  const response = page.waitForResponse((res) => res.url().endsWith(`/api/live-sessions/${sessionId}/snapshot`));
+  // The tab's kept conversation comes back without a new snapshot request.
   await page.click(`.live-tab[data-session-id="${sessionId}"]`);
-  await response;
+  await page.waitForSelector(`.live-tab.active[data-session-id="${sessionId}"]`);
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   assert.equal(await page.locator('#dialog-container').isVisible(), false, 'an expired request must not get a fresh timeout on tab return');
   assert.deepEqual(commands.filter((command) => command.type === 'extension_ui_response'), []);

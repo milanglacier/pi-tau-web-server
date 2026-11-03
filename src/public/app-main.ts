@@ -5,7 +5,7 @@
 import { WebSocketClient } from './websocket-client.js';
 import { StateManager } from './state.js';
 import { MessageRenderer } from './message-renderer.js';
-import { ToolCardRenderer, type ToolExecution, type ToolResult } from './tool-card.js';
+import { ToolCardRenderer, type ToolCardState, type ToolExecution, type ToolResult } from './tool-card.js';
 import { attachCompletionList } from './completion-list.js';
 import { modelMeta, modelRef, normalizeModelList, searchModels } from './model-match.js';
 import { DialogHandler, type DialogRequest } from './dialogs.js';
@@ -192,7 +192,8 @@ let lastInputTokens = 0;
 // reply that reports usage replaces it with a real count.
 let contextTokensEstimated = false;
 // The transcript row of the compaction running in the viewed tab.
-let compactionRow: { element: HTMLElement; state: RunningCompaction } | null = null;
+type CompactionRowRef = { element: HTMLElement; state: RunningCompaction };
+let compactionRow: CompactionRowRef | null = null;
 let compactionElapsedTimer: ReturnType<typeof setInterval> | null = null;
 let contextWindowSize = 0;  // fetched from model info
 let originalTitle = document.title;
@@ -370,6 +371,9 @@ wsClient.addEventListener('connected', () => {
 
 wsClient.addEventListener('disconnected', () => {
   updateConnectionStatus('disconnected');
+  // Events sent while the socket is down never arrive, so a kept view of a
+  // hidden tab could miss part of its conversation.
+  parkedViews.clear();
 });
 
 wsClient.addEventListener('reconnectFailed', () => {
@@ -424,6 +428,7 @@ wsClient.addEventListener('rpcEvent', (e: Event) => {
     }
     if (sessionId !== activeLiveSessionId || !viewingActiveSession) {
       if (event.type === 'extension_ui_request') queueExtensionUIRequest(event, sessionId);
+      bufferParkedEvent(sessionId, event);
       return;
     }
   }
@@ -510,7 +515,11 @@ wsClient.addEventListener('interactionState', (e: Event) => {
 
 // Receive a full live-session state snapshot.
 wsClient.addEventListener('liveSessionSnapshot', (e: Event) => {
-  applyLiveSessionSnapshot((e as CustomEvent<LiveSessionSnapshotData>).detail);
+  const detail = (e as CustomEvent<LiveSessionSnapshotData>).detail;
+  // New entries replace the history a kept view was built from, for example
+  // after a session tree navigation.
+  if (detail.sessionId && detail.entries) parkedViews.delete(detail.sessionId);
+  applyLiveSessionSnapshot(detail);
 });
 
 // ═══════════════════════════════════════
@@ -546,6 +555,7 @@ function handleLiveSessionClosed(closedId: string) {
   queuedPrompts.delete(closedId);
   compactRequests.delete(closedId);
   compactionStarts.delete(closedId);
+  parkedViews.delete(closedId);
   if (dialogHandler.currentRequest?.sessionId === closedId) {
     dialogHandler.clearCurrentDialog();
     processQueuedExtensionUIRequest();
@@ -694,6 +704,11 @@ function restoreActiveLiveSession() {
 async function selectLiveSession(id: string) {
   const session = liveSessions.find(s => s.id === id);
   if (!session) return;
+  // Selecting the shown tab again reloads it from the server.
+  const reload = id === activeLiveSessionId && viewingActiveSession;
+  if (!reload) parkActiveView();
+  const parked = parkedViews.get(id);
+  parkedViews.delete(id);
   suspendCurrentDialogForTabSwitch(id);
   launcherPanel.hide();
   activeLiveSessionId = id;
@@ -702,6 +717,14 @@ async function selectLiveSession(id: string) {
   renderLiveTabs();
   renderQueuedMessages();
   applyActiveSessionMetadata(session);
+  if (parked && !reload) {
+    restoreParkedView(id, parked, session);
+    if (!fileSidebar.classList.contains('collapsed')) fileBrowser.load();
+    updateLiveSessionInputState();
+    processQueuedExtensionUIRequest(id);
+    flushQueue();
+    return;
+  }
   currentStreamingElement = null;
   currentStreamingThinking = '';
   currentStreamingText = '';
@@ -1011,14 +1034,18 @@ function showRunningCompaction(reason: string, startedAt: number) {
   renderCompactionRow(state, element);
   messagesContainer.appendChild(element);
   compactionRow = { element, state };
+  startCompactionElapsedTimer();
+  scrollToBottom();
+}
+
+// Show how long the running compaction has taken, so a slow one does not look stuck.
+function startCompactionElapsedTimer() {
   stopCompactionElapsedTimer();
-  // Show how long it has been running, so a slow compaction does not look stuck.
   compactionElapsedTimer = setInterval(() => {
     const elapsed = compactionRow?.element.querySelector('.compaction-elapsed');
     if (!compactionRow?.element.isConnected || !elapsed) return stopCompactionElapsedTimer();
-    elapsed.textContent = formatElapsed(Date.now() - startedAt);
+    elapsed.textContent = formatElapsed(Date.now() - (compactionRow.state.startedAt ?? Date.now()));
   }, 1000);
-  scrollToBottom();
 }
 
 function updateRunningCompaction(retry: SummaryRetry) {
@@ -2158,6 +2185,7 @@ async function handleSessionSelect(session: SidebarSession | null, project: Side
 
 async function switchSession(sessionFile: string | null | undefined, session: SidebarSession | null = null, project: SidebarProject | null = null) {
   try {
+    parkActiveView();
     // Clear any streaming state from previous session to prevent bleed
     currentStreamingElement = null;
     currentStreamingThinking = '';
@@ -2289,6 +2317,7 @@ function applyLiveSessionSnapshot(data: LiveSessionSnapshotData, requestedAtRevi
   // metadata already holds the newest of the snapshot and live events.
   const runningCompaction = liveSessions.find(session => session.id === sessionId)?.compaction;
   if (runningCompaction) showRunningCompaction(runningCompaction.reason, runningCompaction.startedAt);
+  activeViewReady = true;
 
   updateContextPill();
   // A snapshot means the session's entries/leaf may have moved (e.g. another
@@ -2381,9 +2410,19 @@ messagesContainer.classList.toggle('native-scroll-anchoring', supportsScrollAnch
 // snapshot) mid-fill cannot interleave stale chunks into the new conversation.
 let historyRenderToken = 0;
 
+// Older history items still waiting to be rendered above the shown ones.
+// Items render from the end of `items`, newest first.
+type HistoryFill = { items: HistoryItem[]; topAnchor: ChildNode | null };
+let historyFill: HistoryFill | null = null;
+
 function cancelHistoryRender() {
   historyRenderToken++;
+  historyFill = null;
 }
+
+// Whether the shown conversation is complete enough to keep when the user
+// switches tabs: a snapshot was applied, and no reload is in flight.
+let activeViewReady = false;
 
 // Tear down the conversation view as one unit. Clearing the tool-card map
 // alongside the DOM matters: a stale map would hand out detached cards to
@@ -2394,6 +2433,7 @@ function clearConversation() {
   messageRenderer.clear();
   toolCardRenderer.clear();
   state.toolExecutions.clear();
+  activeViewReady = false;
 }
 
 function renderHistoryItem(item: HistoryItem, target: ParentNode) {
@@ -2420,7 +2460,6 @@ function renderHistoryItem(item: HistoryItem, target: ParentNode) {
 }
 
 function renderSessionHistory(entries: SessionHistoryEntry[]) {
-  const token = ++historyRenderToken;
   const { items, totalCost, lastInputTokens: builtInputTokens, contextTokensEstimated: builtEstimated, lastUsage: builtUsage } = buildHistoryItems(entries);
   console.log(`[History] Rendering ${items.length} items from ${entries.length} entries`);
   for (const item of items) {
@@ -2443,11 +2482,11 @@ function renderSessionHistory(entries: SessionHistoryEntry[]) {
 
   // Render the newest items synchronously so the first paint shows what the
   // user actually looks at — the bottom of the conversation.
-  let cursor = Math.max(0, items.length - INITIAL_SYNC_ITEMS);
+  const cursor = Math.max(0, items.length - INITIAL_SYNC_ITEMS);
   const tail = document.createDocumentFragment();
   for (const item of items.slice(cursor)) renderHistoryItem(item, tail);
   // Captured before insertion: after appendChild the fragment is empty.
-  let topAnchor: ChildNode | null = tail.firstChild;
+  const topAnchor: ChildNode | null = tail.firstChild;
   messagesContainer.appendChild(tail);
 
   // Jump to bottom instantly (no smooth scroll animation)
@@ -2460,21 +2499,27 @@ function renderSessionHistory(entries: SessionHistoryEntry[]) {
     });
   });
 
-  if (cursor === 0) return;
+  if (cursor > 0) continueHistoryFill({ items: items.slice(0, cursor), topAnchor });
+}
 
-  // Fill in older history above the tail during idle time. Live streaming
-  // messages keep appending at the container's end, below the tail, so the
-  // two never interleave.
+// Fill in older history above the shown items during idle time. Live
+// streaming messages keep appending at the container's end, below them, so
+// the two never interleave.
+function continueHistoryFill(fill: HistoryFill) {
+  const token = ++historyRenderToken;
+  historyFill = fill;
+
   const scheduleChunk = (fn: () => void) =>
     typeof requestIdleCallback === 'function' ? requestIdleCallback(fn, { timeout: 500 }) : setTimeout(fn, 16);
 
   const renderOlderChunk = () => {
     if (token !== historyRenderToken) return;
-    if (!topAnchor || !topAnchor.isConnected) return;
+    if (!fill.topAnchor || !fill.topAnchor.isConnected) return;
 
-    const start = Math.max(0, cursor - HISTORY_CHUNK_ITEMS);
+    const start = Math.max(0, fill.items.length - HISTORY_CHUNK_ITEMS);
     const chunk = document.createDocumentFragment();
-    for (const item of items.slice(start, cursor)) renderHistoryItem(item, chunk);
+    for (const item of fill.items.slice(start)) renderHistoryItem(item, chunk);
+    fill.items.length = start;
     const newTop: ChildNode | null = chunk.firstChild;
 
     if (supportsScrollAnchoring) {
@@ -2482,7 +2527,7 @@ function renderSessionHistory(entries: SessionHistoryEntry[]) {
       // is inserted above the viewport — including the deferred size
       // refinements content-visibility applies after insertion, which a
       // one-shot manual compensation cannot track.
-      messagesContainer.insertBefore(chunk, topAnchor);
+      messagesContainer.insertBefore(chunk, fill.topAnchor);
     } else {
       // Fallback (Safari): compensate scrollTop for the added height in the
       // same task, so nothing paints in between. scroll-behavior must be
@@ -2492,17 +2537,180 @@ function renderSessionHistory(entries: SessionHistoryEntry[]) {
       messagesContainer.style.scrollBehavior = 'auto';
       const prevHeight = messagesContainer.scrollHeight;
       const prevTop = messagesContainer.scrollTop;
-      messagesContainer.insertBefore(chunk, topAnchor);
+      messagesContainer.insertBefore(chunk, fill.topAnchor);
       messagesContainer.scrollTop = prevTop + (messagesContainer.scrollHeight - prevHeight);
       messagesContainer.style.scrollBehavior = prevBehavior;
     }
 
-    if (newTop) topAnchor = newTop;
-    cursor = start;
-    if (cursor > 0) scheduleChunk(renderOlderChunk);
+    if (newTop) fill.topAnchor = newTop;
+    if (fill.items.length > 0) scheduleChunk(renderOlderChunk);
+    else historyFill = null;
   };
 
   scheduleChunk(renderOlderChunk);
+}
+
+// ═══════════════════════════════════════
+// Kept views of hidden tabs
+// ═══════════════════════════════════════
+
+// A tab's built conversation, kept while another tab is shown, so switching
+// back does not download and rebuild it. Events for the hidden tab are kept
+// too and replayed on return, which brings the view up to date.
+type ParkedView = {
+  nodes: DocumentFragment;
+  scrollTop: number;
+  atBottom: boolean;
+  toolCards: ToolCardState;
+  toolExecutions: Map<string, Record<string, unknown>>;
+  streamingElement: HTMLElement | null;
+  streamingText: string;
+  streamingThinking: string;
+  pendingAssistantError: PendingAssistantError | null;
+  retryStatusElement: HTMLElement | null;
+  compactionRow: CompactionRowRef | null;
+  fill: HistoryFill | null;
+  totalCost: number;
+  inputTokens: number;
+  tokensEstimated: boolean;
+  usage: UsageRecord | null;
+  contextWindow: number;
+  lastSentMessage: string | null;
+  isStreaming: boolean;
+  events: AppEvent[];
+  /** Where each tool's latest output update sits in `events`. */
+  updateIndexes: Map<string, number>;
+};
+
+// Each kept view holds a whole conversation in memory. The least recently
+// shown views are dropped first and rebuilt from the server when needed.
+const MAX_PARKED_VIEWS = 4;
+// A tab that stays hidden through a lot of activity is rebuilt instead of
+// replaying everything it missed.
+const MAX_PARKED_EVENTS = 5000;
+const parkedViews = new Map<string, ParkedView>();
+
+/** Move the shown conversation out of the page and keep it for its tab. */
+function parkActiveView() {
+  if (!activeViewReady || !viewingActiveSession || !activeLiveSessionId) return;
+  const sessionId = activeLiveSessionId;
+  const fill = historyFill;
+  cancelHistoryRender();
+  const atBottom = messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight < 150;
+  const view: ParkedView = {
+    nodes: document.createDocumentFragment(),
+    scrollTop: messagesContainer.scrollTop,
+    atBottom,
+    toolCards: toolCardRenderer.takeState(),
+    toolExecutions: state.toolExecutions,
+    streamingElement: currentStreamingElement,
+    streamingText: currentStreamingText,
+    streamingThinking: currentStreamingThinking,
+    pendingAssistantError,
+    retryStatusElement,
+    compactionRow,
+    fill,
+    totalCost: sessionTotalCost,
+    inputTokens: lastInputTokens,
+    tokensEstimated: contextTokensEstimated,
+    usage: lastUsage,
+    contextWindow: contextWindowSize,
+    lastSentMessage,
+    isStreaming: state.isStreaming,
+    events: [],
+    updateIndexes: new Map(),
+  };
+  view.nodes.append(...messagesContainer.childNodes);
+  state.toolExecutions = new Map();
+  stopCompactionElapsedTimer();
+  compactionRow = null;
+  currentStreamingElement = null;
+  currentStreamingText = '';
+  currentStreamingThinking = '';
+  pendingAssistantError = null;
+  retryStatusElement = null;
+  activeViewReady = false;
+  parkedViews.delete(sessionId);
+  parkedViews.set(sessionId, view);
+  while (parkedViews.size > MAX_PARKED_VIEWS) parkedViews.delete(parkedViews.keys().next().value!);
+}
+
+/** Put a kept view back in the page and replay what its tab missed. */
+function restoreParkedView(sessionId: string, view: ParkedView, session: LiveSession) {
+  clearConversation();
+  messagesContainer.appendChild(view.nodes);
+  toolCardRenderer.restoreState(view.toolCards);
+  state.toolExecutions = view.toolExecutions;
+  currentStreamingElement = view.streamingElement;
+  currentStreamingText = view.streamingText;
+  currentStreamingThinking = view.streamingThinking;
+  pendingAssistantError = view.pendingAssistantError;
+  retryStatusElement = view.retryStatusElement;
+  sessionTotalCost = view.totalCost;
+  lastInputTokens = view.inputTokens;
+  contextTokensEstimated = view.tokensEstimated;
+  lastUsage = view.usage;
+  contextWindowSize = view.contextWindow;
+  lastSentMessage = view.lastSentMessage;
+  if (view.compactionRow) {
+    compactionRow = view.compactionRow;
+    startCompactionElapsedTimer();
+  }
+  activeViewReady = true;
+
+  messagesContainer.style.scrollBehavior = 'auto';
+  messagesContainer.scrollTop = view.atBottom ? messagesContainer.scrollHeight : view.scrollTop;
+  messagesContainer.style.scrollBehavior = '';
+  messageRenderer.isNearBottom = view.atBottom;
+
+  state.setStreaming(view.isStreaming);
+  for (const event of view.events) handleRPCEvent(event, sessionId);
+  // The tab's metadata is newer than any replayed event.
+  state.setStreaming(!!session.isStreaming);
+  showTypingIndicator(!!session.isStreaming);
+  if (view.fill) continueHistoryFill(view.fill);
+
+  updateContextPill();
+  fetchContextWindow();
+  void sessionStatsCard.refresh();
+  updateUI();
+}
+
+/**
+ * Keep an event for a hidden tab's view. Streaming text is merged into one
+ * event, and only the newest output of each running tool is kept, so a busy
+ * hidden tab replays a short list.
+ */
+function bufferParkedEvent(sessionId: string, event: AppEvent) {
+  const view = parkedViews.get(sessionId);
+  if (!view) return;
+  // These do not change the conversation. Dialogs and notifications reach a
+  // hidden tab through other paths.
+  if (event.type === 'extension_ui_request' || event.type === 'extension_error' || event.type === 'session_name') return;
+  const events = view.events;
+  if (event.type === 'message_update') {
+    const update = event.assistantMessageEvent;
+    // Other updates describe tool calls, which message_end repeats in full.
+    if (update?.type !== 'text_delta' && update?.type !== 'thinking_delta') return;
+    const last = events[events.length - 1];
+    if (last?.type === 'message_update' && last.assistantMessageEvent?.type === update.type) {
+      events[events.length - 1] = {
+        ...last,
+        assistantMessageEvent: { ...last.assistantMessageEvent, delta: (last.assistantMessageEvent.delta || '') + (update.delta || '') },
+      };
+      return;
+    }
+  } else if (event.type === 'tool_execution_update' && event.toolCallId) {
+    const key = `${event.parentToolCallId ?? ''}\u001f${event.toolCallId}`;
+    const index = view.updateIndexes.get(key);
+    if (index !== undefined) {
+      events[index] = event;
+      return;
+    }
+    view.updateIndexes.set(key, events.length);
+  }
+  events.push(event);
+  if (events.length > MAX_PARKED_EVENTS) parkedViews.delete(sessionId);
 }
 
 // ═══════════════════════════════════════

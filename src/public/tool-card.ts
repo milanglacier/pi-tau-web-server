@@ -269,11 +269,23 @@ export type ToolResult = {
   [key: string]: unknown;
 };
 
+/** Everything the renderer keeps about one conversation's cards. */
+export type ToolCardState = {
+  toolCards: Map<string, HTMLElement>;
+  historyCardsExpanded: boolean;
+  nestedCalls: NestedToolCallsModel;
+  roots: Map<string, ToolExecution>;
+  liveRoots: Set<string>;
+  callsViews: Map<string, CallsView>;
+  expansion: Map<string, ExpansionChoice>;
+  allChoice: boolean | undefined;
+};
+
 export class ToolCardRenderer {
   container: HTMLElement;
   toolCards: Map<string, HTMLElement>;
   historyCardsExpanded: boolean;
-  readonly nestedCalls = new NestedToolCallsModel();
+  nestedCalls = new NestedToolCallsModel();
   private roots = new Map<string, ToolExecution>();
   private liveRoots = new Set<string>();
   private callsViews = new Map<string, CallsView>();
@@ -921,17 +933,51 @@ export class ToolCardRenderer {
   }
 
   clear() {
+    this.toolCards.forEach((card) => card.remove());
+    this.takeState();
+  }
+
+  /**
+   * Hand over the state of the shown conversation and start empty. The cards
+   * stay where they are, so a caller can move them out of the page and give
+   * them back later with `restoreState`.
+   */
+  takeState(): ToolCardState {
     if (this.bottomScrollFrame !== undefined) cancelAnimationFrame(this.bottomScrollFrame);
     this.bottomScrollFrame = undefined;
     this.bottomScrollTop = undefined;
-    this.toolCards.forEach((card) => card.remove());
-    this.toolCards.clear();
-    this.roots.clear();
-    this.liveRoots.clear();
-    this.nestedCalls.clear();
-    this.callsViews.clear();
-    this.expansion.clear();
-    this.allChoice = undefined;
+    const state: ToolCardState = {
+      toolCards: this.toolCards,
+      historyCardsExpanded: this.historyCardsExpanded,
+      nestedCalls: this.nestedCalls,
+      roots: this.roots,
+      liveRoots: this.liveRoots,
+      callsViews: this.callsViews,
+      expansion: this.expansion,
+      allChoice: this.allChoice,
+    };
+    this.toolCards = new Map();
     this.historyCardsExpanded = false;
+    this.nestedCalls = new NestedToolCallsModel();
+    this.roots = new Map();
+    this.liveRoots = new Set();
+    this.callsViews = new Map();
+    this.expansion = new Map();
+    this.allChoice = undefined;
+    return state;
+  }
+
+  restoreState(state: ToolCardState) {
+    this.takeState();
+    ({
+      toolCards: this.toolCards,
+      historyCardsExpanded: this.historyCardsExpanded,
+      nestedCalls: this.nestedCalls,
+      roots: this.roots,
+      liveRoots: this.liveRoots,
+      callsViews: this.callsViews,
+      expansion: this.expansion,
+      allChoice: this.allChoice,
+    } = state);
   }
 }

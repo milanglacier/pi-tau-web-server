@@ -109,7 +109,7 @@ function buildSmallSession(cwd: string) {
   return entries;
 }
 
-function writeSession(fileName: string, lines: Array<Record<string, unknown>>) {
+export function writeSession(fileName: string, lines: Array<Record<string, unknown>>) {
   fs.mkdirSync(PROJ_DIR, { recursive: true });
   const filePath = path.join(PROJ_DIR, fileName);
   fs.writeFileSync(filePath, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');

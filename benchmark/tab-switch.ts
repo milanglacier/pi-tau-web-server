@@ -20,12 +20,14 @@ import { PRESETS, buildSession } from './fixtures.ts';
 //   npm run benchmark -- --json after.json --baseline before.json
 //   npm run benchmark -- --profile benchmark-profiles
 //
-// Each run measures four actions in order:
+// Each run measures five actions in order:
 //   open          open session A from the sidebar on an empty page
 //   open-replace  open session B from the sidebar while A is fully shown
 //   switch        click A's tab while B is fully shown
 //   switch-busy   click B's tab, then click A's tab as soon as B's newest
 //                 messages are on screen, while B's older history still fills
+//   switch-reply  click B's tab after B received a new streamed reply while
+//                 it was hidden
 //
 // For each action it records when the newest message was painted ("tail"),
 // when the whole history was in the page ("full"), how the snapshot request
@@ -99,6 +101,24 @@ function writeSessions(presetName: string) {
     return { file, tailMarker, expectedItems: buildHistoryItems(entries).items.length };
   };
   return { a: make('a', 1), b: make('b', 2) };
+}
+
+// Sends one streamed turn through the session's fake pi process, the way a
+// real reply arrives: the user message, the reply in many small pieces, then
+// the finished reply. A session name change at the end tells the page that
+// every event has arrived.
+function sendTurn(file: string, marker: string, pieces = 400) {
+  const child = liveManager.findBySessionFile(file).child;
+  const write = (event: Record<string, unknown>) => child.stdout.write(JSON.stringify(event) + '\n');
+  const words = Array.from({ length: pieces }, (_, i) => `word${i} `);
+  const text = words.join('') + marker;
+  write({ type: 'agent_start' });
+  write({ type: 'message_start', message: { role: 'user', content: `question before ${marker}` } });
+  write({ type: 'message_start', message: { role: 'assistant', content: [] } });
+  for (const delta of [...words, marker]) write({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta } });
+  write({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }] } });
+  write({ type: 'agent_settled' });
+  write({ type: 'session_name', name: marker });
 }
 
 // ── In-page measurement ───────────────────────────────────────────────────
@@ -313,6 +333,10 @@ async function runOnce(browser: import('playwright').Browser, base: string, pres
     await step('switch', liveTab(a.file), a);
     await step('busy-start', liveTab(b.file), b, true);
     await step('switch-busy', liveTab(a.file), a);
+    const marker = `benchmark-${preset}-reply`;
+    sendTurn(b.file, marker);
+    await page.waitForFunction((selector: string) => document.querySelector(selector)?.textContent?.includes('benchmark-'), `${liveTab(b.file)} .live-tab-title`);
+    await step('switch-reply', liveTab(b.file), { ...b, tailMarker: marker, expectedItems: b.expectedItems + 2 });
     return { samples: samples.filter(sample => sample.action !== 'busy-start'), profiles };
   } finally {
     await context.close();
