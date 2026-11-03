@@ -33,6 +33,9 @@ type LiveSessionSnapshotData = {
   model?: ModelRecord | null;
   thinkingLevel?: string;
   entries?: SessionHistoryEntry[];
+  /** Where `entries` begins in the session's history, when only its newest part was sent. */
+  entriesStart?: number;
+  historyEpoch?: number;
   pendingDialogs?: PendingDialog[];
   interactionRevision?: number;
   compaction?: LiveSession['compaction'];
@@ -187,6 +190,9 @@ type PendingAssistantError = { element: HTMLElement | null; errorMessage: string
 let pendingAssistantError: PendingAssistantError | null = null;
 let retryStatusElement: HTMLElement | null = null;
 let sessionTotalCost = 0;
+// True once Pi's own session stats set sessionTotalCost. Costs found in older
+// history loaded after that are already part of it.
+let costFromStats = false;
 let lastInputTokens = 0;
 // True while lastInputTokens is Pi's estimate after a compaction. The next
 // reply that reports usage replaces it with a real count.
@@ -735,7 +741,7 @@ async function selectLiveSession(id: string) {
   clearConversation();
   const requestedAtRevision = sessionStateRevisions.get(id) || 0;
   try {
-    const res = await fetch(`/api/live-sessions/${encodeURIComponent(id)}/snapshot`);
+    const res = await fetch(`/api/live-sessions/${encodeURIComponent(id)}/snapshot?tail=${SNAPSHOT_TAIL_ENTRIES}`);
     const data = await res.json();
     if (!res.ok || data.error) {
       handleLiveSessionClosed(id);
@@ -2304,12 +2310,14 @@ function applyLiveSessionSnapshot(data: LiveSessionSnapshotData, requestedAtRevi
   clearConversation();
   retryStatusElement = null;
   sessionTotalCost = 0;
+  costFromStats = false;
   lastInputTokens = 0;
   contextTokensEstimated = false;
   lastUsage = null;
 
   if (data.entries && data.entries.length > 0) {
-    renderSessionHistory(data.entries);
+    const olderEntries = data.entriesStart && data.historyEpoch !== undefined ? data.entriesStart : 0;
+    renderSessionHistory(data.entries, olderEntries > 0 ? { sessionId, epoch: data.historyEpoch!, end: olderEntries } : null);
   } else {
     messageRenderer.renderWelcome();
   }
@@ -2397,6 +2405,10 @@ function updateLiveSessionInputState() {
 // everything older is prepended above in idle-scheduled chunks.
 const INITIAL_SYNC_ITEMS = 30;
 const HISTORY_CHUNK_ITEMS = 50;
+// Opening a session downloads only its newest entries first, then older
+// entries in pages, so the first paint does not wait for the whole history.
+const SNAPSHOT_TAIL_ENTRIES = 80;
+const HISTORY_PAGE_ENTRIES = 300;
 
 // Browsers with native scroll anchoring (Chrome, Firefox) keep the viewport
 // pinned to visible content when history is prepended above it; browsers
@@ -2411,8 +2423,21 @@ messagesContainer.classList.toggle('native-scroll-anchoring', supportsScrollAnch
 let historyRenderToken = 0;
 
 // Older history items still waiting to be rendered above the shown ones.
-// Items render from the end of `items`, newest first.
-type HistoryFill = { items: HistoryItem[]; topAnchor: ChildNode | null };
+// Items render from the end of `items`, newest first. `older` describes the
+// entries not downloaded yet, when the history arrived newest part first.
+type OlderHistory = {
+  sessionId: string;
+  epoch: number;
+  /** Older entries end here; nothing is left to download at 0. */
+  end: number;
+  /** The downloaded entries, from `end` to where the snapshot ended. */
+  entries: SessionHistoryEntry[];
+  /** How many items the downloaded entries make. */
+  itemCount: number;
+  /** The cost of the downloaded replies. */
+  cost: number;
+};
+type HistoryFill = { items: HistoryItem[]; topAnchor: ChildNode | null; older: OlderHistory | null };
 let historyFill: HistoryFill | null = null;
 
 function cancelHistoryRender() {
@@ -2459,17 +2484,10 @@ function renderHistoryItem(item: HistoryItem, target: ParentNode) {
   }
 }
 
-function renderSessionHistory(entries: SessionHistoryEntry[]) {
+function renderSessionHistory(entries: SessionHistoryEntry[], older: Pick<OlderHistory, 'sessionId' | 'epoch' | 'end'> | null = null) {
   const { items, totalCost, lastInputTokens: builtInputTokens, contextTokensEstimated: builtEstimated, lastUsage: builtUsage } = buildHistoryItems(entries);
   console.log(`[History] Rendering ${items.length} items from ${entries.length} entries`);
-  for (const item of items) {
-    if (item.kind === 'toolCall') {
-      toolCardRenderer.rememberRoot({
-        toolCallId: item.toolCallId, toolName: item.toolName, args: item.args,
-        status: item.result !== undefined ? (item.isError ? 'error' : 'complete') : 'pending',
-      });
-    }
-  }
+  rememberHistoryToolCalls(items);
 
   // Stats come from the pure pre-pass so the context pill is correct
   // immediately, even though the DOM fills in newest-first below.
@@ -2499,7 +2517,106 @@ function renderSessionHistory(entries: SessionHistoryEntry[]) {
     });
   });
 
-  if (cursor > 0) continueHistoryFill({ items: items.slice(0, cursor), topAnchor });
+  if (cursor === 0 && !older) return;
+  const fill: HistoryFill = {
+    items: items.slice(0, cursor),
+    topAnchor,
+    older: older && { ...older, entries, itemCount: items.length, cost: totalCost },
+  };
+  continueHistoryFill(fill);
+  if (fill.older) void loadOlderHistory(fill, fill.older);
+}
+
+// Live events can name a tool call whose card is not rendered yet, so every
+// history tool call is known before its card exists.
+function rememberHistoryToolCalls(items: HistoryItem[]) {
+  for (const item of items) {
+    if (item.kind === 'toolCall') {
+      toolCardRenderer.rememberRoot({
+        toolCallId: item.toolCallId, toolName: item.toolName, args: item.args,
+        status: item.result !== undefined ? (item.isError ? 'error' : 'complete') : 'pending',
+      });
+    }
+  }
+}
+
+/** Whether a fill still belongs to the shown conversation or a kept view. */
+function historyFillInUse(fill: HistoryFill) {
+  return historyFill === fill || [...parkedViews.values()].some(view => view.fill === fill);
+}
+
+/**
+ * Download the older history page by page, newest first, and queue its items
+ * above the ones already shown. It keeps going while the tab is hidden, so
+ * its kept view is complete when shown again.
+ */
+async function loadOlderHistory(fill: HistoryFill, older: OlderHistory) {
+  while (older.end > 0 && fill.older === older && historyFillInUse(fill)) {
+    let page: { entries?: SessionHistoryEntry[]; start?: number };
+    try {
+      const params = new URLSearchParams({ end: String(older.end), limit: String(HISTORY_PAGE_ENTRIES), epoch: String(older.epoch) });
+      const res = await fetch(`/api/live-sessions/${encodeURIComponent(older.sessionId)}/entries?${params}`);
+      // The history was replaced, and the server sends a new snapshot for it.
+      if (res.status === 409) {
+        fill.older = null;
+        return;
+      }
+      page = await res.json();
+      if (!res.ok || !Array.isArray(page.entries) || typeof page.start !== 'number') throw new Error();
+    } catch {
+      fill.older = null;
+      if (historyFillInUse(fill)) showOlderHistoryError(fill);
+      return;
+    }
+    if (fill.older !== older || !historyFillInUse(fill)) return;
+
+    // Building items from all downloaded entries keeps each reply's error
+    // state right when it depends on a later retry in the same turn.
+    const entries = page.entries.concat(older.entries);
+    const built = buildHistoryItems(entries);
+    const added = built.items.slice(0, built.items.length - older.itemCount);
+    const addedCost = built.totalCost - older.cost;
+    older.entries = entries;
+    older.itemCount = built.items.length;
+    older.cost = built.totalCost;
+    older.end = page.start;
+    if (older.end === 0) fill.older = null;
+    fill.items = added.concat(fill.items);
+    if (historyFill === fill) rememberHistoryToolCalls(added);
+    addOlderHistoryTotals(fill, addedCost, built);
+    if (historyFill === fill) continueHistoryFill(fill);
+  }
+}
+
+// Older replies add to the session cost. When the newest part of the
+// history had no usage, the older part tells how full the context is.
+function addOlderHistoryTotals(fill: HistoryFill, addedCost: number, built: ReturnType<typeof buildHistoryItems>) {
+  if (historyFill === fill) {
+    if (!costFromStats) sessionTotalCost += addedCost;
+    if (!lastUsage && lastInputTokens === 0) {
+      lastInputTokens = built.lastInputTokens;
+      contextTokensEstimated = built.contextTokensEstimated;
+      lastUsage = built.lastUsage;
+    }
+    updateContextPill();
+    return;
+  }
+  const view = [...parkedViews.values()].find(view => view.fill === fill);
+  if (!view) return;
+  if (!view.costFromStats) view.totalCost += addedCost;
+  if (!view.usage && view.inputTokens === 0) {
+    view.inputTokens = built.lastInputTokens;
+    view.tokensEstimated = built.contextTokensEstimated;
+    view.usage = built.lastUsage;
+  }
+}
+
+function showOlderHistoryError(fill: HistoryFill) {
+  const note = document.createElement('div');
+  note.className = 'system-message';
+  note.textContent = 'Could not load older messages. Select the tab again to retry.';
+  if (fill.topAnchor?.parentNode) fill.topAnchor.parentNode.insertBefore(note, fill.topAnchor);
+  fill.topAnchor = note;
 }
 
 // Fill in older history above the shown items during idle time. Live
@@ -2514,7 +2631,11 @@ function continueHistoryFill(fill: HistoryFill) {
 
   const renderOlderChunk = () => {
     if (token !== historyRenderToken) return;
-    if (!fill.topAnchor || !fill.topAnchor.isConnected) return;
+    if (fill.topAnchor && !fill.topAnchor.isConnected) return;
+    if (fill.items.length === 0) {
+      if (!fill.older) historyFill = null;
+      return;
+    }
 
     const start = Math.max(0, fill.items.length - HISTORY_CHUNK_ITEMS);
     const chunk = document.createDocumentFragment();
@@ -2527,7 +2648,7 @@ function continueHistoryFill(fill: HistoryFill) {
       // is inserted above the viewport — including the deferred size
       // refinements content-visibility applies after insertion, which a
       // one-shot manual compensation cannot track.
-      messagesContainer.insertBefore(chunk, fill.topAnchor);
+      messagesContainer.insertBefore(chunk, fill.topAnchor ?? messagesContainer.firstChild);
     } else {
       // Fallback (Safari): compensate scrollTop for the added height in the
       // same task, so nothing paints in between. scroll-behavior must be
@@ -2537,14 +2658,14 @@ function continueHistoryFill(fill: HistoryFill) {
       messagesContainer.style.scrollBehavior = 'auto';
       const prevHeight = messagesContainer.scrollHeight;
       const prevTop = messagesContainer.scrollTop;
-      messagesContainer.insertBefore(chunk, fill.topAnchor);
+      messagesContainer.insertBefore(chunk, fill.topAnchor ?? messagesContainer.firstChild);
       messagesContainer.scrollTop = prevTop + (messagesContainer.scrollHeight - prevHeight);
       messagesContainer.style.scrollBehavior = prevBehavior;
     }
 
     if (newTop) fill.topAnchor = newTop;
     if (fill.items.length > 0) scheduleChunk(renderOlderChunk);
-    else historyFill = null;
+    else if (!fill.older) historyFill = null;
   };
 
   scheduleChunk(renderOlderChunk);
@@ -2571,6 +2692,7 @@ type ParkedView = {
   compactionRow: CompactionRowRef | null;
   fill: HistoryFill | null;
   totalCost: number;
+  costFromStats: boolean;
   inputTokens: number;
   tokensEstimated: boolean;
   usage: UsageRecord | null;
@@ -2611,6 +2733,7 @@ function parkActiveView() {
     compactionRow,
     fill,
     totalCost: sessionTotalCost,
+    costFromStats,
     inputTokens: lastInputTokens,
     tokensEstimated: contextTokensEstimated,
     usage: lastUsage,
@@ -2647,6 +2770,7 @@ function restoreParkedView(sessionId: string, view: ParkedView, session: LiveSes
   pendingAssistantError = view.pendingAssistantError;
   retryStatusElement = view.retryStatusElement;
   sessionTotalCost = view.totalCost;
+  costFromStats = view.costFromStats;
   lastInputTokens = view.inputTokens;
   contextTokensEstimated = view.tokensEstimated;
   lastUsage = view.usage;
@@ -3029,7 +3153,10 @@ async function fetchSessionStats(): Promise<SessionStats | null> {
     // Sync authoritative numbers into the locally-tracked pill state so the
     // pill never drifts from what pi reports. contextUsage (and its fields)
     // may be null right after compaction — keep the last known values then.
-    if (typeof stats.cost === 'number') sessionTotalCost = stats.cost;
+    if (typeof stats.cost === 'number') {
+      sessionTotalCost = stats.cost;
+      costFromStats = true;
+    }
     const cu = stats.contextUsage;
     if (cu && typeof cu.contextWindow === 'number' && cu.contextWindow > 0) {
       contextWindowSize = cu.contextWindow;

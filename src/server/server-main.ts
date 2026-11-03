@@ -460,7 +460,7 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
     }).catch((e) => json(res, 400, { error: errorMessage(e) }));
     return;
   }
-  const liveMatch = cleanPath.match(/^\/api\/live-sessions\/([^/]+)(?:\/snapshot)?$/);
+  const liveMatch = cleanPath.match(/^\/api\/live-sessions\/([^/]+)(?:\/(snapshot|entries))?$/);
   if (liveMatch) {
     let id;
     try {
@@ -470,9 +470,21 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
     }
     const session = liveManager.get(id);
     if (!session) return json(res, 404, { error: 'Live session not found' });
-    const isSnapshotRoute = cleanPath.endsWith('/snapshot');
-    if (isSnapshotRoute && req.method === 'GET') return json(res, 200, session.snapshot());
-    if (!isSnapshotRoute && req.method === 'DELETE') { liveManager.delete(id, 'closed_by_user').then(() => json(res, 200, { success: true })); return; }
+    const subRoute = liveMatch[2];
+    if (subRoute === 'snapshot' && req.method === 'GET') {
+      const tail = parsed.searchParams.get('tail');
+      return json(res, 200, session.snapshot(tail ? { tail: Math.max(1, Number(tail) || 1) } : {}));
+    }
+    if (subRoute === 'entries' && req.method === 'GET') {
+      const end = Number(parsed.searchParams.get('end'));
+      const limit = Number(parsed.searchParams.get('limit'));
+      const epoch = Number(parsed.searchParams.get('epoch'));
+      if (![end, limit, epoch].every(Number.isInteger) || end < 0 || limit < 1) return json(res, 400, { error: 'end, limit and epoch must be whole numbers' });
+      const page = session.historyPage(end, limit, epoch);
+      if (!page) return json(res, 409, { error: 'The session history changed. Load the session again.' });
+      return json(res, 200, page);
+    }
+    if (!subRoute && req.method === 'DELETE') { liveManager.delete(id, 'closed_by_user').then(() => json(res, 200, { success: true })); return; }
   }
 
   if (cleanPath === '/api/complete/directories' && req.method === 'GET') {

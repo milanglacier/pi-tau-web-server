@@ -568,6 +568,62 @@ test('POST /api/live-sessions/resume exposes historical entries through the live
   child.stdin.end();
 });
 
+test('the live snapshot can send the newest entries first, and older entries come in pages that keep tool results with their calls', async (t: TestContext) => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-history-pages-'));
+  const entries: Array<Record<string, unknown>> = [{ type: 'session', id: 'history-pages-sess', timestamp: '2026-01-01T00:00:00.000Z', cwd }];
+  for (let i = 0; i < 6; i++) {
+    entries.push({ type: 'message', message: { role: 'user', content: `question ${i}` } });
+    entries.push({ type: 'message', message: { role: 'assistant', content: [{ type: 'toolCall', id: `call-${i}`, name: 'bash', arguments: { command: 'ls' } }] } });
+    entries.push({ type: 'message', message: { role: 'toolResult', toolCallId: `call-${i}`, content: [{ type: 'text', text: `output ${i}` }] } });
+    entries.push({ type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: `answer ${i}` }] } });
+  }
+  writeSessionFileAt(PROJ_DIR, 'history-pages.jsonl', entries);
+  const child = makeFakeChild();
+  _setSpawnPiForTest(() => child);
+  t.after(() => { _setSpawnPiForTest(null); child.stdin.end(); });
+  const resumeRes = await fetch(`${base}/api/live-sessions/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base, Host: new URL(base).host },
+    body: JSON.stringify({ filePath: path.join(PROJ_DIR, 'history-pages.jsonl') }),
+  });
+  const id = encodeURIComponent((await jsonBody(resumeRes)).session.id);
+  const startsAMessage = (entry: any) => entry.type === 'message' && ['user', 'assistant'].includes(entry.message.role);
+
+  const full = await jsonBody(await fetch(`${base}/api/live-sessions/${id}/snapshot`));
+  assert.equal(full.entriesStart, 0);
+  assert.deepEqual(full.entries, entries);
+
+  // Asking for the newest 3 entries starts at the reply that called the tool
+  // whose result is among them.
+  const tail = await jsonBody(await fetch(`${base}/api/live-sessions/${id}/snapshot?tail=3`));
+  assert.equal(tail.historyEpoch, 0);
+  assert.equal(tail.entriesStart, entries.length - 3);
+  assert.deepEqual(tail.entries, entries.slice(-3));
+  const tail2 = await jsonBody(await fetch(`${base}/api/live-sessions/${id}/snapshot?tail=2`));
+  assert.equal(tail2.entriesStart, entries.length - 3);
+
+  const pages: Array<Record<string, unknown>[]> = [tail.entries];
+  let end = tail.entriesStart;
+  while (end > 0) {
+    const res = await fetch(`${base}/api/live-sessions/${id}/entries?end=${end}&limit=5&epoch=0`);
+    assert.equal(res.status, 200);
+    const page = await jsonBody(res);
+    assert.ok(page.start < end && end - page.start >= Math.min(5, end));
+    if (page.start > 0) assert.ok(startsAMessage(page.entries[0]), 'a page starts at a user or assistant message');
+    pages.unshift(page.entries);
+    end = page.start;
+  }
+  assert.deepEqual(pages.flat(), entries);
+
+  assert.equal((await fetch(`${base}/api/live-sessions/${id}/entries?end=4&limit=5&epoch=1`)).status, 409);
+  assert.equal((await fetch(`${base}/api/live-sessions/${id}/entries?end=999&limit=5&epoch=0`)).status, 409);
+  assert.equal((await fetch(`${base}/api/live-sessions/${id}/entries?end=4&limit=0&epoch=0`)).status, 400);
+  assert.equal((await fetch(`${base}/api/live-sessions/${id}/entries?end=4&epoch=0`)).status, 400);
+  // Replacing the history, as a tree navigation does, makes older pages unavailable.
+  liveManager.get(decodeURIComponent(id)).historyEpoch++;
+  assert.equal((await fetch(`${base}/api/live-sessions/${id}/entries?end=4&limit=5&epoch=0`)).status, 409);
+});
+
 test('POST /api/live-sessions/resume falls back to the first user message for generic or missing names', async (t: TestContext) => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-resume-title-'));
   writeSessionFileAt(PROJ_DIR, 'resume-title.jsonl', [

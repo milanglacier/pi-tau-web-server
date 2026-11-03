@@ -133,12 +133,12 @@ async function openPage(t: TestContext, sessionId: string, snapshot?: object) {
   page.on('pageerror', (error: Error) => errors.push(error.message));
   t.after(() => assert.deepEqual(errors, [], 'browser must not throw'));
   if (snapshot) {
-    await page.route(`**/api/live-sessions/${sessionId}/snapshot`, async (route) => {
+    await page.route((url) => url.pathname === `/api/live-sessions/${sessionId}/snapshot`, async (route) => {
       const response = await route.fetch();
       await route.fulfill({ response, json: { ...await response.json(), ...snapshot } });
     });
   }
-  const snapshotResponse = page.waitForResponse((response) => response.url().endsWith(`/api/live-sessions/${sessionId}/snapshot`));
+  const snapshotResponse = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/live-sessions/${sessionId}/snapshot`);
   await page.goto(base);
   await (await snapshotResponse).finished();
   await page.waitForSelector(`.live-tab.active[data-session-id="${sessionId}"]`);
@@ -366,7 +366,7 @@ test('a delayed HTTP snapshot cannot roll back a newer running state or approval
   const captured = new Promise<void>(resolve => { snapshotCaptured = resolve; });
   let releaseSnapshot!: () => void;
   const released = new Promise<void>(resolve => { releaseSnapshot = resolve; });
-  await page.route(`**/api/live-sessions/${sessionId}/snapshot`, async route => {
+  await page.route((url) => url.pathname === `/api/live-sessions/${sessionId}/snapshot`, async route => {
     const response = await route.fetch();
     const snapshot = await response.json();
     snapshotCaptured();
@@ -379,7 +379,7 @@ test('a delayed HTTP snapshot cannot roll back a newer running state or approval
   emit(confirmRequest('after-snapshot'));
   await page.waitForSelector('#typing-indicator:not(.hidden)');
   await page.waitForFunction(() => document.getElementById('status-text')?.textContent === 'Waiting for approval');
-  const response = page.waitForResponse(response => response.url().endsWith(`/api/live-sessions/${sessionId}/snapshot`));
+  const response = page.waitForResponse(response => new URL(response.url()).pathname === `/api/live-sessions/${sessionId}/snapshot`);
   releaseSnapshot();
   await (await response).finished();
   await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));

@@ -232,6 +232,7 @@ function fakeSession(opts: { isStreaming?: boolean; entries?: Json[]; leafId?: s
     id: 'live_1',
     isStreaming: !!opts.isStreaming,
     entries: [] as Json[],
+    historyEpoch: 0,
     lastExtensionError: null as string | null,
     navigateCommandChecked: false,
     sent,
@@ -295,6 +296,8 @@ test('navigateTree drives the extension command, re-derives the active path, and
   assert.deepEqual(ids.slice(0, 2), ['u1', 'a1']);
   assert.equal(session.entries[session.entries.length - 1].customType, NAVIGATION_MARKER_TYPE);
   assert.ok(!ids.includes('u2') && !ids.includes('a2'));
+  // Browsers holding pages of the old history can tell it was replaced.
+  assert.equal(session.historyEpoch, 1);
 
   // Every browser gets a fresh full snapshot plus the metadata update.
   assert.equal(session.broadcasts.length, 1);
@@ -490,6 +493,7 @@ test('the bundled extension moves a real pi child\'s leaf, invisibly to the LLM,
     id: 'live_pi',
     isStreaming: false,
     entries: [] as Json[],
+    historyEpoch: 0,
     lastExtensionError: null as string | null,
     send: pi.send,
     snapshot() { return { entries: this.entries }; },

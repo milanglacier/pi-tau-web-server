@@ -139,6 +139,7 @@ export type NavigableSession = {
   id: string;
   isStreaming: boolean;
   entries: JsonRecord[];
+  historyEpoch: number;
   send: (command: RpcCommand, opts?: { timeoutMs?: number }) => Promise<RpcResponse>;
   snapshot: () => JsonRecord;
   manager: { broadcast: (data: unknown) => void; broadcastUpdated: (id: string) => void };
@@ -263,6 +264,7 @@ export async function navigateTree(session: NavigableSession, entryId: string): 
     // the child is authoritative, so even when verification fails below every
     // client must be re-rendered onto whatever the child actually has.
     session.entries = pathFromRoot(byId, newLeafId) as unknown as JsonRecord[];
+    session.historyEpoch++;
     session.manager.broadcast({ type: 'live_session_snapshot', sessionId: session.id, ...session.snapshot() });
     session.manager.broadcastUpdated(session.id);
     // On success the extension appended a marker at the navigation target and

@@ -425,7 +425,9 @@ test('live children received before a deferred snapshot card still open that car
   session.entries.push({ type: 'message', message: { role: 'assistant', content: [
     { type: 'toolCall', id, name: 'codemode', arguments: { code: 'deferred root' } },
   ] } });
-  for (let n = 0; n < 100; n++) session.entries.push({ type: 'message', message: { role: 'user', content: `deferred-padding-${n}` } });
+  // Within the newest entries the snapshot sends first, but above the
+  // messages painted right away, so the card waits for an idle-time chunk.
+  for (let n = 0; n < 40; n++) session.entries.push({ type: 'message', message: { role: 'user', content: `deferred-padding-${n}` } });
   await page.addInitScript(() => {
     const callbacks: IdleRequestCallback[] = [];
     window.requestIdleCallback = callback => { callbacks.push(callback); return callbacks.length; };
@@ -434,7 +436,7 @@ test('live children received before a deferred snapshot card still open that car
     } });
   });
   await page.reload();
-  await page.waitForFunction(() => document.getElementById('messages')?.textContent?.includes('deferred-padding-99'));
+  await page.waitForFunction(() => document.getElementById('messages')?.textContent?.includes('deferred-padding-39'));
   assert.equal(await card.count(), 0);
   start('/1', id);
   broadcast({ type: 'tool_execution_start', toolCallId: id + '-fence', toolName: 'read', args: {} });

@@ -49,6 +49,22 @@ export function makeId() {
 // pi loads extension .ts files directly.
 const TAU_TREE_EXTENSION = path.resolve(import.meta.dirname, '..', 'src', 'pi-extension', 'tau-tree.ts');
 
+/**
+ * Where to split a history so its newest part can be sent first: the first
+ * entry at or before `index` that starts a user or assistant message or is a
+ * compaction. Every tool result stays in the same part as the reply that
+ * called it, so each part turns into the same items on its own as inside the
+ * whole history.
+ */
+export function historySplitAt(entries: JsonRecord[], index: number) {
+  for (let i = Math.min(index, entries.length - 1); i > 0; i--) {
+    const entry = entries[i] as { type?: string; message?: { role?: string } };
+    if (entry.type === 'compaction') return i;
+    if (entry.type === 'message' && (entry.message?.role === 'user' || entry.message?.role === 'assistant')) return i;
+  }
+  return 0;
+}
+
 export function isGenericSessionName(name: unknown) {
   const normalized = String(name || '').trim().toLowerCase();
   return normalized === 'chat' || normalized === 'new chat' || normalized === 'untitled' || normalized === 'untitled chat' || normalized === 'session';
@@ -65,6 +81,8 @@ export class PiRpcSession {
   lastActiveAt: string;
   isStreaming: boolean;
   entries: JsonRecord[];
+  /** Changes whenever `entries` is replaced instead of added to, so a browser can tell that history it loaded in parts no longer fits together. */
+  historyEpoch = 0;
   model: ModelIdentity | null;
   thinkingLevel: string;
   sessionFile: string | null;
@@ -143,12 +161,20 @@ export class PiRpcSession {
     };
   }
 
-  snapshot() {
+  /**
+   * The session's state and history. With `tail`, only the newest part of the
+   * history is included, at least `tail` entries; `entriesStart` says where it
+   * begins, and the browser asks for the rest with `historyPage`.
+   */
+  snapshot({ tail }: { tail?: number } = {}) {
+    const entriesStart = tail === undefined ? 0 : historySplitAt(this.entries, this.entries.length - tail);
     return {
       session: this.metadata(),
       pendingDialogs: this.dialogSnapshot(),
       interactionRevision: this.interactionRevision,
-      entries: this.entries,
+      entries: entriesStart > 0 ? this.entries.slice(entriesStart) : this.entries,
+      entriesStart,
+      historyEpoch: this.historyEpoch,
       model: this.model,
       thinkingLevel: this.thinkingLevel,
       isStreaming: this.isStreaming,
@@ -157,6 +183,18 @@ export class PiRpcSession {
       sessionName: this.sessionName,
       contextUsage: this.contextUsage,
     };
+  }
+
+  /**
+   * The history entries just before `end`, at least `limit` of them unless
+   * the history starts sooner. Returns null when `epoch` is not the current
+   * history epoch or `end` is past the history, because the entries the
+   * browser already has may no longer fit with these.
+   */
+  historyPage(end: number, limit: number, epoch: number) {
+    if (epoch !== this.historyEpoch || end > this.entries.length) return null;
+    const start = historySplitAt(this.entries, end - limit);
+    return { entries: this.entries.slice(start, end), start, historyEpoch: this.historyEpoch };
   }
 
   dialogSnapshot() {

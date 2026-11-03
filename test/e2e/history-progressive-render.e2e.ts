@@ -256,3 +256,22 @@ test('switching sessions mid-fill cancels the old render completely', async (t: 
 
   await assertNoPageErrors(errors);
 });
+
+test('opening a session downloads only its newest entries first and the older history in pages', async (t: TestContext) => {
+  if (skipUnlessBrowser(t)) return;
+  const { page, errors } = await openPage(t);
+  const pages: string[] = [];
+  page.on('request', request => { if (new URL(request.url()).pathname.endsWith('/entries')) pages.push(request.url()); });
+  const snapshot = page.waitForResponse(response => new URL(response.url()).pathname.endsWith('/snapshot'));
+
+  await page.click(sessionItemSelector(largeFile));
+  const first = await (await snapshot).json() as { entries: unknown[]; entriesStart: number };
+  assert.ok(first.entriesStart > 0, 'the first response must leave older entries out');
+  assert.ok(first.entries.length < 200, `the first response held ${first.entries.length} entries`);
+  await page.waitForFunction((expected: number) =>
+    document.querySelectorAll('#messages > .message, #messages > .tool-card').length === expected, TOTAL_ITEMS, { timeout: 60000 });
+  assert.ok(pages.length > 1, `expected the older history in several pages, got ${pages.length}`);
+  assert.match(await page.locator('#messages > .message').first().textContent() || '', /msg-user-0000/);
+
+  await assertNoPageErrors(errors);
+});
