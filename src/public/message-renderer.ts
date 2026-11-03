@@ -3,10 +3,12 @@
  */
 
 import { renderMarkdown, renderUserMarkdown } from './markdown.js';
+import { imageSource } from './image-source.js';
 
 type RenderedImage = {
   data: string;
   mimeType?: string;
+  url?: string;
 };
 
 type MessageContentBlock = {
@@ -92,8 +94,9 @@ export class MessageRenderer {
     if (message.images && message.images.length > 0) {
       imagesHtml = '<div class="message-images">' +
         message.images.map(img => {
-          const src = img.data.startsWith('data:') ? img.data : `data:${img.mimeType || 'image/png'};base64,${img.data}`;
-          return `<img class="message-image" src="${src}" alt="Attached image" />`;
+          const src = imageSource(img);
+          // Images below the visible part load only when scrolled to.
+          return src ? `<img class="message-image" src="${this.escapeAttribute(src)}" alt="Attached image" loading="lazy" decoding="async" />` : '';
         }).join('') +
         '</div>';
     }
@@ -332,6 +335,10 @@ export class MessageRenderer {
         }, 1500);
       });
     });
+  }
+
+  escapeAttribute(text: string) {
+    return this.escapeHtml(text).replace(/"/g, '&quot;');
   }
 
   escapeHtml(text: unknown) {

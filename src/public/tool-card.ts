@@ -4,6 +4,7 @@
 
 import { NestedToolCallsModel } from './nested-tool-calls.js';
 import { createCodeBlock, createJavaScriptCodeBlock } from './javascript-code-block.js';
+import { imageSource, type ImageBlock } from './image-source.js';
 import type { NestedCallSummary, NestedCallsRecord, NestedCallsSummary } from './nested-tool-calls.js';
 
 export type ToolArgs = Record<string, unknown>;
@@ -404,6 +405,7 @@ export class ToolCardRenderer {
     if (outputElement && result) {
       const output = this.formatResult(result);
       outputElement.textContent = output;
+      this.renderResultImages(outputElement, result);
     }
 
     this.nestedCalls.finish(toolCallId);
@@ -526,6 +528,7 @@ export class ToolCardRenderer {
       unbuilt.result = result;
     } else if (outputElement && result) {
       outputElement.textContent = this.formatResult(result);
+      this.renderResultImages(outputElement, result);
     }
     if (result?.nestedCalls) this.nestedCalls.replace(toolCallId, result.nestedCalls);
     this.nestedCalls.finish(toolCallId);
@@ -593,6 +596,30 @@ export class ToolCardRenderer {
     outputEl.className = 'tool-output';
     if (unbuilt.result) outputEl.textContent = this.formatResult(unbuilt.result);
     body.append(outputEl);
+    if (unbuilt.result) this.renderResultImages(outputEl, unbuilt.result);
+  }
+
+  /** Show the images of a tool result below its text output. */
+  private renderResultImages(output: Element, result: ToolResult) {
+    const next = output.nextElementSibling;
+    if (next?.classList.contains('tool-output-images')) next.remove();
+    const sources = (Array.isArray(result.content) ? result.content : [])
+      .filter(block => block.type === 'image')
+      .map(block => imageSource(block as ImageBlock))
+      .filter((src): src is string => !!src);
+    if (sources.length === 0) return;
+    const images = document.createElement('div');
+    images.className = 'tool-output-images';
+    for (const src of sources) {
+      const image = document.createElement('img');
+      image.className = 'tool-output-image';
+      image.alt = 'Tool result image';
+      image.loading = 'lazy';
+      image.decoding = 'async';
+      image.src = src;
+      images.appendChild(image);
+    }
+    output.after(images);
   }
 
   private bindHeader(id: string, card: HTMLElement) {
@@ -900,7 +927,9 @@ export class ToolCardRenderer {
     if (!result) return '';
 
     if (result.content && Array.isArray(result.content)) {
+      // Images show below the text output instead of as their data.
       return result.content
+        .filter((block) => block.type !== 'image')
         .map((block) => {
           if (block.type === 'text') return block.text;
           return JSON.stringify(block);

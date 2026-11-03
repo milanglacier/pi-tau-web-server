@@ -624,6 +624,54 @@ test('the live snapshot can send the newest entries first, and older entries com
   assert.equal((await fetch(`${base}/api/live-sessions/${id}/entries?end=4&limit=5&epoch=0`)).status, 409);
 });
 
+test('history snapshots link to images instead of carrying their data, and the links serve the image', async (t: TestContext) => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-history-images-'));
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').toString('base64');
+  const entries: Array<Record<string, unknown>> = [
+    { type: 'session', id: 'history-images-sess', timestamp: '2026-01-01T00:00:00.000Z', cwd },
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image', data: png, mimeType: 'image/png' }] } },
+    { type: 'message', message: { role: 'assistant', content: [{ type: 'toolCall', id: 'shot', name: 'screenshot', arguments: {} }] } },
+    { type: 'message', message: { role: 'toolResult', toolCallId: 'shot', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/svg+xml', data: png } }] } },
+  ];
+  writeSessionFileAt(PROJ_DIR, 'history-images.jsonl', entries);
+  const child = makeFakeChild();
+  _setSpawnPiForTest(() => child);
+  t.after(() => { _setSpawnPiForTest(null); child.stdin.end(); });
+  const resumeRes = await fetch(`${base}/api/live-sessions/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: base, Host: new URL(base).host },
+    body: JSON.stringify({ filePath: path.join(PROJ_DIR, 'history-images.jsonl') }),
+  });
+  const sessionId = (await jsonBody(resumeRes)).session.id;
+  const id = encodeURIComponent(sessionId);
+
+  const snapshot = await jsonBody(await fetch(`${base}/api/live-sessions/${id}/snapshot`));
+  const userImage = snapshot.entries[1].message.content[1];
+  assert.deepEqual(userImage, { type: 'image', mimeType: 'image/png', url: `/api/live-sessions/${id}/images/0/1/1` });
+  assert.equal(snapshot.entries[1].message.content[0].text, 'look');
+  assert.ok(!JSON.stringify(snapshot).includes(png), 'no image data in the snapshot');
+  // Entries without images are sent as they are.
+  assert.deepEqual(snapshot.entries[2], entries[2]);
+  // The live session keeps the image data.
+  assert.equal(liveManager.get(sessionId).entries[1].message.content[1].data, png);
+
+  const image = await fetch(`${base}${userImage.url}`);
+  assert.equal(image.status, 200);
+  assert.equal(image.headers.get('content-type'), 'image/png');
+  assert.equal(image.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(Buffer.from(await image.arrayBuffer()).toString('base64'), png);
+
+  // A type that could run script is never served as an image.
+  const toolImage = snapshot.entries[3].message.content[0];
+  assert.equal(toolImage.url, `/api/live-sessions/${id}/images/0/3/0`);
+  assert.equal((await fetch(`${base}${toolImage.url}`)).headers.get('content-type'), 'application/octet-stream');
+
+  assert.equal((await fetch(`${base}/api/live-sessions/${id}/images/0/1/0`)).status, 404);
+  assert.equal((await fetch(`${base}/api/live-sessions/${id}/images/0/99/0`)).status, 404);
+  liveManager.get(sessionId).historyEpoch++;
+  assert.equal((await fetch(`${base}${userImage.url}`)).status, 404);
+});
+
 test('POST /api/live-sessions/resume falls back to the first user message for generic or missing names', async (t: TestContext) => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-resume-title-'));
   writeSessionFileAt(PROJ_DIR, 'resume-title.jsonl', [

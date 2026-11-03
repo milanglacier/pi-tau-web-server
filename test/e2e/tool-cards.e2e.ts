@@ -558,3 +558,36 @@ test('a history thinking block shows its text when opened, and copying the reply
   assert.match(await page.evaluate(() => navigator.clipboard.readText()), /history thinking <b>not markup<\/b>[\s\S]*history reply text/);
   await assertNoPageErrors(errors);
 });
+
+test('history images load from links when shown, and tool result images show as images instead of their data', async (t: TestContext) => {
+  if (skipUnlessBrowser(t)) return;
+  const { page, errors, session, broadcast } = await openNestedPage(t);
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+  session.entries.push(
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'history image question' }, { type: 'image', data: png, mimeType: 'image/png' }] } },
+    { type: 'message', message: { role: 'assistant', content: [{ type: 'toolCall', id: 'history-shot', name: 'screenshot', arguments: {} }] } },
+    { type: 'message', message: { role: 'toolResult', toolCallId: 'history-shot', toolName: 'screenshot', isError: false, timestamp: Date.now(),
+      content: [{ type: 'text', text: 'captured' }, { type: 'image', data: png, mimeType: 'image/png' }] } },
+  );
+  await page.reload();
+  const userImage = page.locator('#messages > .message.user').filter({ hasText: 'history image question' }).locator('img.message-image');
+  await userImage.waitFor();
+  assert.match(await userImage.getAttribute('src') || '', /^\/api\/live-sessions\/[^/]+\/images\/0\/\d+\/1$/);
+  assert.equal(await userImage.getAttribute('loading'), 'lazy');
+  await page.waitForFunction(() => (document.querySelector('img.message-image') as HTMLImageElement | null)?.naturalWidth === 1);
+
+  const historyCard = page.locator('.tool-card[data-tool-call-id="history-shot"]');
+  await historyCard.locator('.tool-card-header').click();
+  assert.equal(await historyCard.locator('.tool-output').textContent(), 'captured');
+  assert.match(await historyCard.locator('.tool-output-images img').getAttribute('src') || '', /\/images\/0\/\d+\/1$/);
+
+  broadcast({ type: 'tool_execution_start', toolCallId: 'live-shot', toolName: 'screenshot', args: {} });
+  broadcast({ type: 'tool_execution_end', toolCallId: 'live-shot', toolName: 'screenshot', isError: false,
+    result: { content: [{ type: 'image', data: png, mimeType: 'image/png' }], details: {} } });
+  const liveCard = page.locator('.tool-card[data-tool-call-id="live-shot"]');
+  await liveCard.locator('.tool-output-images img').waitFor({ state: 'attached' });
+  assert.equal(await liveCard.locator('.tool-output').textContent(), '');
+  assert.equal(await liveCard.locator('.tool-output-images img').getAttribute('src'), `data:image/png;base64,${png}`);
+  assert.ok(!(await page.locator('#messages').textContent())?.includes(png), 'image data must not show as text');
+  await assertNoPageErrors(errors);
+});

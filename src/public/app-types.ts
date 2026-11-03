@@ -65,7 +65,10 @@ export type MessageContentBlock = {
   thinking?: string;
   source?: { data?: string; media_type?: string };
   data?: string;
+  mimeType?: string;
   media_type?: string;
+  /** A link to an image's data, in place of `data`, in server snapshots. */
+  url?: string;
   id?: string;
   name?: string;
   arguments?: Record<string, unknown>;

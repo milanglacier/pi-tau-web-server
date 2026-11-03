@@ -21,7 +21,8 @@ export type SessionHistoryEntry = {
   estimatedTokensAfter?: number;
 };
 
-export type HistoryImage = { data: string; mimeType: string };
+/** A user image: its base64 data, or, from a server snapshot, a link to it. */
+export type HistoryImage = { data: string; mimeType: string; url?: string };
 
 export type HistoryUserItem = { kind: 'user'; content: string; images?: HistoryImage[] };
 export type HistoryAssistantItem = {
@@ -122,7 +123,11 @@ export function buildHistoryItems(entries: SessionHistoryEntry[]): HistoryBuildR
       const images = Array.isArray(msg.content)
         ? msg.content
             .filter((b) => b.type === 'image')
-            .map((b) => ({ data: b.source?.data || b.data || '', mimeType: b.source?.media_type || b.media_type || 'image/png' }))
+            .map((b) => ({
+              data: b.source?.data || b.data || '',
+              mimeType: b.mimeType || b.source?.media_type || b.media_type || 'image/png',
+              ...(typeof b.url === 'string' ? { url: b.url } : {}),
+            }))
         : [];
       if (content || images.length > 0) {
         items.push({ kind: 'user', content: content || '', images: images.length > 0 ? images : undefined });

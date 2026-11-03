@@ -6,6 +6,7 @@
 
 - Switching back to a tab you already opened shows its conversation almost at once, at the same scroll position, including anything that arrived while it was hidden.
 - Large sessions show their newest messages sooner and fill in older history faster, and long sessions no longer freeze the page while they load.
+- Images in a session's history load when they come into view, and images in tool results show as images instead of long text.
 
 ## [1.2.0] - 2026-11-02
 

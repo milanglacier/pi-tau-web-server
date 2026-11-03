@@ -1403,7 +1403,9 @@ function formatToolOutput(result: unknown) {
 
   const r = result as { content?: MessageContentBlock[] };
   if (r.content && Array.isArray(r.content)) {
+    // Images show below the output once the tool finishes.
     return r.content
+      .filter((block) => block.type !== 'image')
       .map((block) => {
         if (block.type === 'text') return block.text;
         return JSON.stringify(block);

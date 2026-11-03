@@ -1513,6 +1513,20 @@ body {
   transform: scale(1.02);
 }
 
+.tool-output-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.tool-output-image {
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+}
+
 .queued-messages {
   display: flex;
   flex-direction: column;

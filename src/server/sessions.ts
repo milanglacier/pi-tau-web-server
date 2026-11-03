@@ -65,6 +65,24 @@ export function historySplitAt(entries: JsonRecord[], index: number) {
   return 0;
 }
 
+export type InlineImage = { data: string; mimeType: string };
+
+/** The base64 data of an image content block, in Pi's or Anthropic's shape. */
+export function inlineImage(block: unknown): InlineImage | null {
+  if (!block || typeof block !== 'object') return null;
+  const image = block as { type?: unknown; data?: unknown; mimeType?: unknown; media_type?: unknown; source?: { data?: unknown; media_type?: unknown } };
+  if (image.type !== 'image') return null;
+  let data = typeof image.data === 'string' ? image.data : typeof image.source?.data === 'string' ? image.source.data : '';
+  if (!data) return null;
+  let mimeType = [image.mimeType, image.source?.media_type, image.media_type].find((value): value is string => typeof value === 'string');
+  const dataUrl = /^data:([^;,]+)[^,]*,/.exec(data);
+  if (dataUrl) {
+    mimeType ??= dataUrl[1];
+    data = data.slice(dataUrl[0].length);
+  }
+  return { data, mimeType: mimeType || 'image/png' };
+}
+
 export function isGenericSessionName(name: unknown) {
   const normalized = String(name || '').trim().toLowerCase();
   return normalized === 'chat' || normalized === 'new chat' || normalized === 'untitled' || normalized === 'untitled chat' || normalized === 'session';
@@ -172,7 +190,7 @@ export class PiRpcSession {
       session: this.metadata(),
       pendingDialogs: this.dialogSnapshot(),
       interactionRevision: this.interactionRevision,
-      entries: entriesStart > 0 ? this.entries.slice(entriesStart) : this.entries,
+      entries: this.linkedEntries(entriesStart, this.entries.length),
       entriesStart,
       historyEpoch: this.historyEpoch,
       model: this.model,
@@ -194,7 +212,35 @@ export class PiRpcSession {
   historyPage(end: number, limit: number, epoch: number) {
     if (epoch !== this.historyEpoch || end > this.entries.length) return null;
     const start = historySplitAt(this.entries, end - limit);
-    return { entries: this.entries.slice(start, end), start, historyEpoch: this.historyEpoch };
+    return { entries: this.linkedEntries(start, end), start, historyEpoch: this.historyEpoch };
+  }
+
+  /**
+   * History entries for a browser, with each image replaced by a link to it.
+   * Images are most of a screenshot-heavy history, and the browser loads
+   * them only when they come into view.
+   */
+  private linkedEntries(start: number, end: number) {
+    const entries = this.entries.slice(start, end);
+    return entries.map((entry, offset) => {
+      const message = entry.message as JsonRecord | undefined;
+      const content = message?.content;
+      if (!Array.isArray(content) || !content.some((block) => inlineImage(block))) return entry;
+      const index = start + offset;
+      const linked = content.map((block, blockIndex) => {
+        const image = inlineImage(block);
+        if (!image) return block;
+        return { type: 'image', mimeType: image.mimeType, url: `/api/live-sessions/${encodeURIComponent(this.id)}/images/${this.historyEpoch}/${index}/${blockIndex}` };
+      });
+      return { ...entry, message: { ...message, content: linked } };
+    });
+  }
+
+  /** The image a history link points to, or null when the history changed since the link was made. */
+  historyImage(epoch: number, entryIndex: number, blockIndex: number) {
+    if (epoch !== this.historyEpoch) return null;
+    const content = (this.entries[entryIndex]?.message as JsonRecord | undefined)?.content;
+    return Array.isArray(content) ? inlineImage(content[blockIndex]) : null;
   }
 
   dialogSnapshot() {

@@ -103,6 +103,8 @@ function sendAuthRequired(res: ServerResponse, req?: IncomingMessage) {
   res.end(JSON.stringify({ error: 'Unauthorized' }));
 }
 
+const HISTORY_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
 function json(res: ServerResponse, status: number, data: unknown, extraHeaders: Record<string, string> = {}) {
   res.writeHead(status, { 'Content-Type': 'application/json', ...extraHeaders });
   res.end(JSON.stringify(data));
@@ -458,6 +460,29 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
         json(res, 200, { session: session.metadata(), ...(reusedPending ? { reused: true } : {}) });
       } catch (e) { json(res, 400, { error: errorMessage(e) }); }
     }).catch((e) => json(res, 400, { error: errorMessage(e) }));
+    return;
+  }
+  const imageMatch = cleanPath.match(/^\/api\/live-sessions\/([^/]+)\/images\/(\d+)\/(\d+)\/(\d+)$/);
+  if (imageMatch && req.method === 'GET') {
+    let id;
+    try {
+      id = decodeURIComponent(imageMatch[1]);
+    } catch {
+      return json(res, 400, { error: 'Malformed live session id' });
+    }
+    const image = liveManager.get(id)?.historyImage(Number(imageMatch[2]), Number(imageMatch[3]), Number(imageMatch[4]));
+    if (!image) return json(res, 404, { error: 'Image not found' });
+    const bytes = Buffer.from(image.data, 'base64');
+    res.writeHead(200, {
+      // Only raster types are served as images. Anything else, SVG included,
+      // could run script when opened directly from this origin.
+      'Content-Type': HISTORY_IMAGE_TYPES.has(image.mimeType) ? image.mimeType : 'application/octet-stream',
+      'Content-Length': bytes.length,
+      'X-Content-Type-Options': 'nosniff',
+      // A link names one history version, so its image never changes.
+      'Cache-Control': 'private, max-age=31536000, immutable',
+    });
+    res.end(bytes);
     return;
   }
   const liveMatch = cleanPath.match(/^\/api\/live-sessions\/([^/]+)(?:\/(snapshot|entries))?$/);
