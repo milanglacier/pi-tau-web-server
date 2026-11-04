@@ -46,9 +46,10 @@ subject or the opening paragraph.
 
 ## Changelog
 
-Describe what users receive, not implementation details or development history.
-Do not add separate fix entries for bugs in an unreleased feature; keep those
-details in plans or reviews.
+Record only breaking changes, new features, and important bug fixes, described
+as what users receive rather than how it was built. A fix belongs in the
+changelog only when the bug shipped in an earlier version; bugs in features
+still under development stay out.
 
 # Important Notes About the Codebase and Rabbit Holes
 
