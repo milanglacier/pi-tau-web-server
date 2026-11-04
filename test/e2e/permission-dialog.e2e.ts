@@ -255,6 +255,64 @@ test('a delivery acknowledgement cannot resolve a dialog or let the browser subm
   await page.waitForSelector('#dialog-container.hidden', { state: 'attached' });
 });
 
+test('returning to a tab waits for the current reply before sending its queued instruction', async (t) => {
+  if (skipUnlessBrowser(t)) return;
+  const first = await createSession(t);
+  const second = await createSession(t);
+  const laptop = await openPage(t, first.sessionId);
+  const phone = await openPage(t, first.sessionId);
+  first.emit({ type: 'agent_start' });
+  await laptop.waitForSelector('#abort-btn:not(.hidden)');
+  await laptop.fill('#message-input', 'waiting instruction from laptop');
+  await laptop.press('#message-input', 'Enter');
+  await laptop.waitForSelector('.queued-msg');
+
+  const selectSecond = async () => {
+    const snapshot = laptop.waitForResponse(response => new URL(response.url()).pathname === `/api/live-sessions/${second.sessionId}/snapshot`);
+    await laptop.click(`.live-tab[data-session-id="${second.sessionId}"]`);
+    await (await snapshot).finished();
+    await laptop.waitForSelector('#messages .welcome');
+  };
+  await selectSecond();
+  first.emit({ type: 'agent_settled' });
+  await phone.waitForSelector('#send-btn:not(.hidden)');
+  await laptop.waitForSelector(`.live-tab[data-session-id="${first.sessionId}"] .live-tab-streaming-dot`, { state: 'detached' });
+
+  const phonePrompt = first.nextCommand('prompt');
+  await phone.fill('#message-input', 'new task from phone');
+  await phone.press('#message-input', 'Enter');
+  const sent = await phonePrompt;
+  first.emit({ type: 'response', command: 'prompt', id: sent.id, success: true });
+  first.emit({ type: 'agent_start' });
+  first.emit({ type: 'message_start', message: { role: 'user', content: 'new task from phone' } });
+  first.emit({ type: 'message_start', message: { role: 'assistant', content: [] } });
+  first.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'phone reply in progress' } });
+  await laptop.waitForSelector(`.live-tab[data-session-id="${first.sessionId}"] .live-tab-streaming-dot`);
+
+  await laptop.click(`.live-tab[data-session-id="${first.sessionId}"]`);
+  await laptop.waitForFunction(() => document.getElementById('messages')?.textContent?.includes('phone reply in progress'));
+  assert.equal(await laptop.locator('.queued-msg').count(), 1, 'the laptop instruction must wait for the phone task');
+  assert.equal(await laptop.locator('#typing-indicator').isVisible(), true);
+  assert.deepEqual(first.commands.filter(command => command.type === 'prompt').map(command => command.message), ['new task from phone']);
+
+  // A reply that finishes while another tab is shown releases the waiting
+  // instruction when this browser returns to its conversation.
+  await laptop.click(`.live-tab[data-session-id="${second.sessionId}"]`);
+  await laptop.waitForSelector('#messages .welcome');
+  first.emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'phone reply finished' }] } });
+  first.emit({ type: 'agent_settled' });
+  await laptop.waitForSelector(`.live-tab[data-session-id="${first.sessionId}"] .live-tab-streaming-dot`, { state: 'detached' });
+  const laptopPrompt = first.nextCommand('prompt');
+  await laptop.click(`.live-tab[data-session-id="${first.sessionId}"]`);
+  const waiting = await laptopPrompt;
+  assert.equal(waiting.message, 'waiting instruction from laptop');
+  first.emit({ type: 'response', command: 'prompt', id: waiting.id, success: true });
+  await laptop.waitForSelector('#queued-messages.hidden', { state: 'attached' });
+  assert.deepEqual(first.commands.filter(command => command.type === 'prompt').map(command => command.message), [
+    'new task from phone', 'waiting instruction from laptop',
+  ]);
+});
+
 test('queued instructions wait through turn_end and agent_end until agent_settled', async (t) => {
   if (skipUnlessBrowser(t)) return;
   const { sessionId, commands, emit } = await createSession(t);
@@ -644,6 +702,42 @@ for (const failure of ['network', 'http', 'rpc'] as const) {
     assert.equal(probes, 3, 'Retries stop once the dispatch is released');
   });
 }
+
+test('switching tabs while disconnected reloads messages missed by the previous tab', async (t) => {
+  if (skipUnlessBrowser(t)) return;
+  const first = await createSession(t);
+  const second = await createSession(t);
+  const page = await openPage(t, first.sessionId);
+  first.emit({ type: 'agent_start' });
+  first.emit({ type: 'message_start', message: { role: 'assistant', content: [] } });
+  first.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'answer before disconnect' } });
+  await page.waitForFunction(() => document.getElementById('messages')?.textContent?.includes('answer before disconnect'));
+
+  await page.clock.pauseAt(await page.evaluate(() => Date.now()));
+  for (const client of liveManager.clients) client.close();
+  await page.getByText('Disconnected', { exact: true }).waitFor();
+  const secondSnapshot = page.waitForResponse(response => new URL(response.url()).pathname === `/api/live-sessions/${second.sessionId}/snapshot`);
+  await page.click(`.live-tab[data-session-id="${second.sessionId}"]`);
+  await (await secondSnapshot).finished();
+  await page.waitForSelector('#messages .welcome');
+
+  first.emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'answer completed during disconnect' }] } });
+  first.emit({ type: 'agent_settled' });
+  const reconnectedSnapshot = page.waitForResponse(response => new URL(response.url()).pathname === `/api/live-sessions/${second.sessionId}/snapshot`);
+  await page.clock.runFor(1100);
+  await (await reconnectedSnapshot).finished();
+  await page.clock.resume();
+  await page.getByText('Connected', { exact: true }).waitFor();
+
+  let refreshed = false;
+  page.on('request', request => {
+    if (new URL(request.url()).pathname === `/api/live-sessions/${first.sessionId}/snapshot`) refreshed = true;
+  });
+  await page.click(`.live-tab[data-session-id="${first.sessionId}"]`);
+  await page.waitForFunction(() => document.getElementById('messages')?.textContent?.includes('answer completed during disconnect'));
+  assert.equal(refreshed, true, 'the previous tab must ask the server for messages missed during the outage');
+  assert.equal(await page.locator('#messages .message-content.streaming').count(), 0);
+});
 
 test('reconnecting recovers an approval created while the browser was disconnected', async (t) => {
   if (skipUnlessBrowser(t)) return;

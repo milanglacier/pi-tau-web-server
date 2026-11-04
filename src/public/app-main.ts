@@ -184,6 +184,8 @@ const launcherPanel = setupLauncherPanel({
 let currentStreamingElement: HTMLElement | null = null;
 let currentStreamingText = '';
 let currentStreamingThinking = '';
+// Queued messages wait until the conversation and its current status are restored.
+let applyingMissedEvents = false;
 // A failed assistant reply is kept here until the whole turn settles. Pi may
 // still retry it, and an error the user never saw as final should not appear.
 type PendingAssistantError = { element: HTMLElement | null; errorMessage: string };
@@ -377,9 +379,10 @@ wsClient.addEventListener('connected', () => {
 
 wsClient.addEventListener('disconnected', () => {
   updateConnectionStatus('disconnected');
-  // Events sent while the socket is down never arrive, so a kept view of a
-  // hidden tab could miss part of its conversation.
+  // Any conversation may miss messages until the connection returns.
+  // The shown conversation needs a fresh snapshot before it can be saved.
   parkedViews.clear();
+  activeViewReady = false;
 });
 
 wsClient.addEventListener('reconnectFailed', () => {
@@ -1793,7 +1796,7 @@ function escapeHtml(text: string) {
 }
 
 function flushQueue() {
-  if (!activeLiveSessionId || state.isStreaming || sessionHasPendingWork(activeLiveSessionId)) return;
+  if (applyingMissedEvents || !activeLiveSessionId || state.isStreaming || sessionHasPendingWork(activeLiveSessionId)) return;
   const idx = messageQueue.findIndex(cmd => cmd.sessionId === activeLiveSessionId);
   if (idx >= 0) {
     if (messageQueue[idx].error) return; // A failed instruction needs an explicit retry or cancellation.
@@ -2716,7 +2719,7 @@ const parkedViews = new Map<string, ParkedView>();
 
 /** Move the shown conversation out of the page and keep it for its tab. */
 function parkActiveView() {
-  if (!activeViewReady || !viewingActiveSession || !activeLiveSessionId) return;
+  if (wsClient.ws?.readyState !== WebSocket.OPEN || !activeViewReady || !viewingActiveSession || !activeLiveSessionId) return;
   const sessionId = activeLiveSessionId;
   const fill = historyFill;
   cancelHistoryRender();
@@ -2789,11 +2792,16 @@ function restoreParkedView(sessionId: string, view: ParkedView, session: LiveSes
   messagesContainer.style.scrollBehavior = '';
   messageRenderer.isNearBottom = view.atBottom;
 
-  state.setStreaming(view.isStreaming);
-  for (const event of view.events) handleRPCEvent(event, sessionId);
-  // The tab's metadata is newer than any replayed event.
-  state.setStreaming(!!session.isStreaming);
-  showTypingIndicator(!!session.isStreaming);
+  applyingMissedEvents = true;
+  try {
+    state.setStreaming(view.isStreaming);
+    for (const event of view.events) handleRPCEvent(event, sessionId);
+    // The tab's metadata is newer than the events received while it was hidden.
+    state.setStreaming(!!session.isStreaming);
+    showTypingIndicator(!!session.isStreaming);
+  } finally {
+    applyingMissedEvents = false;
+  }
   if (view.fill) continueHistoryFill(view.fill);
 
   updateContextPill();

@@ -44,6 +44,12 @@ bullet fragments that only describe what changed. Keep the key framing words
 the user cared about ("preserve", "no downgrade", "stale") visible in the
 subject or the opening paragraph.
 
+## Changelog
+
+Describe what users receive, not implementation details or development history.
+Do not add separate fix entries for bugs in an unreleased feature; keep those
+details in plans or reviews.
+
 # Important Notes About the Codebase and Rabbit Holes
 
 These tips and notes are maintained as a reference for future development. They
