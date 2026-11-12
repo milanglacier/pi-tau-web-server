@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Typing `@` in the chat input suggests files and folders, and typing `/` at the start suggests Pi's extension commands, prompt templates, and skills, plus Tau's own commands.
+- Pi's terminal-only commands such as `/settings` are no longer sent to the model as text. Tau keeps them in the input and explains why.
+
+### Removed
+
+- The file browser sidebar. Use `@` in the chat input to reference files.
+
 ### Fixed
 
 - Code blocks inside list items and quotes show as code instead of a `%%CODEBLOCK_N%%` mark, and code blocks with `~~~` fences or languages such as `c++` render as code.

@@ -177,18 +177,6 @@ test('DELETE /api/live-sessions/:id/snapshot is not a termination route and fall
   assert.equal(liveManager.sessions.has('tau_1'), true);
 });
 
-test('GET /api/files without sessionId is rejected with 400', async () => {
-  const res = await fetch(`${base}/api/files`);
-  assert.equal(res.status, 400);
-  assert.match((await jsonBody(res)).error, /No live session selected/);
-});
-
-test('GET /api/file/preview without sessionId is rejected with 400', async () => {
-  const res = await fetch(`${base}/api/file/preview?path=/x.png`);
-  assert.equal(res.status, 400);
-  assert.match((await jsonBody(res)).error, /No live session selected/);
-});
-
 test('malformed static URL returns 400 instead of crashing the server', async () => {
   const res = await fetch(`${base}/%E0%A4%A`);
   assert.equal(res.status, 400);
@@ -399,28 +387,44 @@ test('GET /api/projects counts sessions for hyphenated project names using heade
   assert.ok(proj.sessionCount >= 1);
 });
 
-test('GET /api/files lists the directory for a live session', async () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-files-'));
-  fs.writeFileSync(path.join(cwd, 'a.txt'), 'hi');
-  const s = fakeSession('tau_1');
-  s.cwd = cwd;
-  liveManager.sessions.set('tau_1', s);
-  const res = await fetch(`${base}/api/files?sessionId=tau_1`);
-  assert.equal(res.status, 200);
-  const body = await jsonBody(res);
-  assert.ok(body.items.some((i: { name: string }) => i.name === 'a.txt'));
+test('GET /api/complete/files without sessionId is rejected with 400', async () => {
+  const res = await fetch(`${base}/api/complete/files?query=a`);
+  assert.equal(res.status, 400);
+  assert.match((await jsonBody(res)).error, /sessionId required/);
 });
 
-test('GET /api/file/preview streams a previewable image inside the session cwd', async () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-prev-'));
-  const png = path.join(cwd, 'img.png');
-  fs.writeFileSync(png, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+test('GET /api/complete/files for an unknown session is rejected with 404', async () => {
+  const res = await fetch(`${base}/api/complete/files?sessionId=tau_missing&query=a`);
+  assert.equal(res.status, 404);
+});
+
+test('GET /api/complete/files suggests files and folders in the live session directory', async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-complete-files-'));
+  fs.mkdirSync(path.join(cwd, 'src'));
+  fs.writeFileSync(path.join(cwd, 'src', 'app.ts'), '');
+  fs.writeFileSync(path.join(cwd, 'notes.txt'), '');
   const s = fakeSession('tau_1');
   s.cwd = cwd;
   liveManager.sessions.set('tau_1', s);
-  const res = await fetch(`${base}/api/file/preview?sessionId=tau_1&path=${encodeURIComponent(png)}`);
+
+  const res = await fetch(`${base}/api/complete/files?sessionId=tau_1&query=${encodeURIComponent('ap')}`);
   assert.equal(res.status, 200);
-  assert.equal(res.headers.get('content-type'), 'image/png');
+  assert.deepEqual((await jsonBody(res)).items, [{ name: 'app.ts', path: 'src/app.ts', isDirectory: false }]);
+
+  const scoped = await fetch(`${base}/api/complete/files?sessionId=tau_1&query=${encodeURIComponent('src/')}`);
+  assert.deepEqual((await jsonBody(scoped)).items, [{ name: 'app.ts', path: 'src/app.ts', isDirectory: false }]);
+
+  const all = await fetch(`${base}/api/complete/files?sessionId=tau_1`);
+  assert.deepEqual((await jsonBody(all)).items.map((i: { path: string }) => i.path).sort(), ['notes.txt', 'src/', 'src/app.ts']);
+});
+
+test('GET /api/complete/files returns an empty list for a folder that cannot be read', async () => {
+  const s = fakeSession('tau_1');
+  s.cwd = path.join(os.tmpdir(), 'tau-no-such-folder-' + Date.now());
+  liveManager.sessions.set('tau_1', s);
+  const res = await fetch(`${base}/api/complete/files?sessionId=tau_1&query=a`);
+  assert.equal(res.status, 200);
+  assert.deepEqual((await jsonBody(res)).items, []);
 });
 
 test('POST /api/open rejects a missing filePath with 400', async () => {
@@ -441,17 +445,6 @@ test('static-file path traversal is rejected with 403', async () => {
   // server stays up for subsequent requests
   const health = await fetch(`${base}/api/health`);
   assert.equal(health.status, 200);
-});
-
-test('GET /api/file/preview rejects a non-image with 415', async () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-prev415-'));
-  fs.writeFileSync(path.join(cwd, 'notes.txt'), 'hi');
-  const s = fakeSession('tau_1');
-  s.cwd = cwd;
-  liveManager.sessions.set('tau_1', s);
-  const res = await fetch(`${base}/api/file/preview?sessionId=tau_1&path=${encodeURIComponent(path.join(cwd, 'notes.txt'))}`);
-  assert.equal(res.status, 415);
-  assert.match((await jsonBody(res)).error, /Not a previewable image/);
 });
 
 test('POST /api/rpc with a malformed JSON body returns 400', async () => {
@@ -767,23 +760,6 @@ test('POST /api/live-sessions returns 400 when the cwd does not exist', async (t
   });
   assert.equal(res.status, 400);
   assert.match((await jsonBody(res)).error, /Directory not found/);
-});
-
-test('GET /api/files filters dotfiles and ignored directories from the listing', async () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-filter-'));
-  fs.mkdirSync(path.join(cwd, 'node_modules'));
-  fs.mkdirSync(path.join(cwd, '.hidden'));
-  fs.writeFileSync(path.join(cwd, 'a.txt'), 'hi');
-  const s = fakeSession('tau_1');
-  s.cwd = cwd;
-  liveManager.sessions.set('tau_1', s);
-  const res = await fetch(`${base}/api/files?sessionId=tau_1`);
-  assert.equal(res.status, 200);
-  const body = await jsonBody(res);
-  const names = body.items.map((i: { name: string }) => i.name);
-  assert.ok(names.includes('a.txt'));
-  assert.ok(!names.includes('node_modules'));
-  assert.ok(!names.includes('.hidden'));
 });
 
 test('GET /api/complete/directories lists only directories that match the typed name', async () => {

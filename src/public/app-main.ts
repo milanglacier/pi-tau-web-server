@@ -11,7 +11,6 @@ import { modelMeta, modelRef, normalizeModelList, searchModels } from './model-m
 import { DialogHandler, type DialogRequest } from './dialogs.js';
 import { SessionSidebar, type SidebarProject, type SidebarSession } from './session-sidebar.js';
 import { themes, applyTheme, getCurrentTheme } from './themes.js';
-import { FileBrowser, getFileIcon } from './file-browser.js';
 import { setupLauncherPanel } from './launcher-panel.js';
 import { setupModelPicker } from './model-picker.js';
 import { setupTreeView } from './tree-view.js';
@@ -20,10 +19,11 @@ import { setupCommandPalette } from './command-palette.js';
 import { setupSessionStatsCard, type SessionStats } from './session-stats-card.js';
 import { isImeComposition } from './keyboard.js';
 import { buildHistoryItems, type HistoryItem, type SessionHistoryEntry } from './history-render.js';
-import { parseCompactCommand } from './compact-command.js';
+import { blockedCommandNote, isTauHandledName, parseCompactCommand, resolveSlashCommand, slashCommandName } from './slash-commands.js';
+import { setupComposerCompletion } from './composer-completion.js';
 import { formatElapsed, renderCompactionRow, type CompactionRowState, type SummaryRetry } from './compaction-row.js';
 
-import type { AppEvent, AppMessage, ExtensionUIRequest, InteractionState, LiveSession, MessageContentBlock, ModelRecord, PendingDialog, PendingFilePath, PendingImage, QueuedCommand, RpcCommand, UsageRecord } from './app-types.js';
+import type { AppEvent, AppMessage, ExtensionUIRequest, InteractionState, LiveSession, MessageContentBlock, ModelRecord, PendingDialog, PendingImage, QueuedCommand, RpcCommand, UsageRecord } from './app-types.js';
 
 type LiveSessionSnapshotData = {
   sessionId?: string;
@@ -74,7 +74,7 @@ const sidebar = new SessionSidebar(
 );
 
 // UI elements
-const messageInput = document.getElementById('message-input')!;
+const messageInput = document.getElementById('message-input') as HTMLTextAreaElement;
 const chatForm = document.getElementById('chat-form')!;
 const sendBtn = document.getElementById('send-btn')!;
 const abortBtn = document.getElementById('abort-btn')!;
@@ -244,62 +244,6 @@ const compactionStarts = new Map<string, number>();
 // WebSocket prompts by command id, so a rejection can be shown in its tab.
 const sentPrompts = new Map<string, string>();
 dialogHandler.onIdle = () => processQueuedExtensionUIRequest();
-
-// File browser
-const fileSidebar = document.getElementById('file-sidebar')!;
-const fileSidebarToggle = document.getElementById('file-sidebar-toggle')!;
-const fileSidebarClose = document.getElementById('file-sidebar-close')!;
-const fileSidebarUp = document.getElementById('file-sidebar-up')!;
-const fileList = document.getElementById('file-list')!;
-const fileSidebarPath = document.getElementById('file-sidebar-path')!;
-const fileBrowser = new FileBrowser(fileList, fileSidebarPath, messageInput, (filePath) => {
-  const name = filePath.split(/[/\\]/).pop() || filePath;
-  const ext = name.split('.').pop()?.toLowerCase() || '';
-  pendingFilePaths.push({ path: filePath, name, ext, sessionId: activeLiveSessionId });
-  renderAttachmentPreviews();
-}, () => (viewingActiveSession && liveSessions.some(s => s.id === activeLiveSessionId) ? activeLiveSessionId : null));
-
-fileSidebarToggle.addEventListener('click', () => {
-  const isCollapsed = fileSidebar.classList.toggle('collapsed');
-  if (!isCollapsed && !fileBrowser.currentPath) {
-    fileBrowser.load(); // Load session cwd
-  }
-  localStorage.setItem('tau-file-sidebar', isCollapsed ? 'closed' : 'open');
-});
-
-fileSidebarClose.addEventListener('click', () => {
-  fileSidebar.classList.add('collapsed');
-  localStorage.setItem('tau-file-sidebar', 'closed');
-});
-
-fileSidebarUp.addEventListener('click', () => {
-  const parent = fileBrowser.getParentPath();
-  if (parent) fileBrowser.load(parent);
-});
-
-fetch('/api/health').then(r => r.json()).then(data => {
-  const names: Record<string, string> = { win32: 'Explorer', darwin: 'Finder', linux: 'file manager' };
-  const name = names[data.platform] || 'file manager';
-  document.getElementById('file-sidebar-finder')!.title = `Open in ${name}`;
-}).catch(() => {});
-
-document.getElementById('file-sidebar-finder')!.addEventListener('click', () => {
-  const sessionId = viewingActiveSession && activeLiveSessionId ? activeLiveSessionId : null;
-  if (fileBrowser.currentPath && sessionId) {
-    fetch('/api/open', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filePath: fileBrowser.currentPath, sessionId }),
-    });
-  }
-});
-
-// Restore file sidebar state
-if (localStorage.getItem('tau-file-sidebar') === 'open') {
-  fileSidebar.classList.remove('collapsed');
-  fileBrowser.load();
-}
-
 
 // ═══════════════════════════════════════
 // Focus tracking for tab title notifications
@@ -728,7 +672,6 @@ async function selectLiveSession(id: string) {
   applyActiveSessionMetadata(session);
   if (parked && !reload) {
     restoreParkedView(id, parked, session);
-    if (!fileSidebar.classList.contains('collapsed')) fileBrowser.load();
     updateLiveSessionInputState();
     processQueuedExtensionUIRequest(id);
     flushQueue();
@@ -755,7 +698,6 @@ async function selectLiveSession(id: string) {
     messageRenderer.renderError((e instanceof Error ? e.message : '') || 'Failed to load live session snapshot');
     return;
   }
-  if (!fileSidebar.classList.contains('collapsed')) fileBrowser.load();
   updateLiveSessionInputState();
   processQueuedExtensionUIRequest(id);
   flushQueue();
@@ -1428,6 +1370,15 @@ chatForm.addEventListener('submit', (e) => {
   sendMessage();
 });
 
+// `@` and `/` suggestions. This is set up before the Enter handler below: an
+// open menu handles Enter, Tab, Escape and the arrow keys itself, and no later
+// listener on the input sees them.
+const composerCompletion = setupComposerCompletion({
+  input: messageInput,
+  anchor: messageInput.parentElement!,
+  getSessionId: () => (viewingActiveSession && liveSessions.some(session => session.id === activeLiveSessionId) ? activeLiveSessionId : null),
+});
+
 messageInput.addEventListener('keydown', (e) => {
   if (isImeComposition(e)) return;
   // Enter sends, Shift+Enter inserts newline
@@ -1444,7 +1395,7 @@ messageInput.addEventListener('input', () => {
 });
 
 // ═══════════════════════════════════════
-// Attachments (images + file browser paths)
+// Attachments (images)
 // ═══════════════════════════════════════
 
 const attachBtn = document.getElementById('attach-btn')!;
@@ -1452,15 +1403,9 @@ const imageInput = document.getElementById('image-input')!;
 const imagePreviews = document.getElementById('image-previews')!;
 
 let pendingImages: PendingImage[] = [];     // { data: base64, mimeType }
-let pendingFilePaths: PendingFilePath[] = [];  // { path, name, ext } — from file browser (populated by callback above)
 
 const MAX_IMAGE_DIM = 2048;
 const VALID_MIME_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
-const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico']);
-
-function getFileChipIcon(name: string) {
-  return getFileIcon(name || 'file', false);
-}
 
 function processImageFile(file: File): Promise<PendingImage> {
   return new Promise((resolve, reject) => {
@@ -1546,11 +1491,9 @@ function makeRemoveBtn(onClick: () => void) {
 
 function renderAttachmentPreviews() {
   imagePreviews.innerHTML = '';
-  const hasAny = pendingImages.length > 0 || pendingFilePaths.length > 0;
-  if (!hasAny) { imagePreviews.classList.add('hidden'); return; }
+  if (!pendingImages.length) { imagePreviews.classList.add('hidden'); return; }
   imagePreviews.classList.remove('hidden');
 
-  // Binary image chips
   pendingImages.forEach((img, i) => {
     const el = document.createElement('div');
     el.className = 'image-preview';
@@ -1558,57 +1501,6 @@ function renderAttachmentPreviews() {
     thumb.src = `data:${img.mimeType};base64,${img.data}`;
     el.appendChild(thumb);
     el.appendChild(makeRemoveBtn(() => { pendingImages.splice(i, 1); renderAttachmentPreviews(); }));
-    imagePreviews.appendChild(el);
-  });
-
-  // File browser path chips
-  pendingFilePaths.forEach((fp, i) => {
-    const el = document.createElement('div');
-    const removeBtn = makeRemoveBtn(() => {
-      const withSpace = fp.path + ' ';
-      messageInput.value = messageInput.value.includes(withSpace)
-        ? messageInput.value.replace(withSpace, '')
-        : messageInput.value.replace(fp.path, '');
-      messageInput.dispatchEvent(new Event('input'));
-      pendingFilePaths.splice(i, 1);
-      renderAttachmentPreviews();
-    });
-
-    if (IMAGE_EXTS.has(fp.ext)) {
-      el.className = 'image-preview';
-      el.title = fp.path;
-      const thumb = document.createElement('img');
-      thumb.style.cssText = 'width:100%;height:100%;object-fit:cover';
-      const previewParams = new URLSearchParams({ path: fp.path });
-      if (fp.sessionId) previewParams.set('sessionId', fp.sessionId);
-      thumb.src = `/api/file/preview?${previewParams.toString()}`;
-      thumb.onerror = () => {
-        el.classList.add('file-chip');
-        thumb.remove();
-        const icon = document.createElement('span');
-        icon.className = 'file-chip-icon';
-        icon.textContent = getFileChipIcon(fp.name);
-        const label = document.createElement('span');
-        label.className = 'file-chip-name';
-        label.textContent = fp.name;
-        el.insertBefore(label, removeBtn);
-        el.insertBefore(icon, label);
-      };
-      el.appendChild(thumb);
-    } else {
-      el.className = 'image-preview file-chip';
-      el.title = fp.path;
-      const icon = document.createElement('span');
-      icon.className = 'file-chip-icon';
-      icon.textContent = getFileChipIcon(fp.ext);
-      const label = document.createElement('span');
-      label.className = 'file-chip-name';
-      label.textContent = fp.name;
-      el.appendChild(icon);
-      el.appendChild(label);
-    }
-
-    el.appendChild(removeBtn);
     imagePreviews.appendChild(el);
   });
 }
@@ -1627,8 +1519,8 @@ function sendMessage() {
   // of sending the text to the model.
   const compactCommand = parseCompactCommand(message);
   if (compactCommand) {
-    if (pendingImages.length > 0 || pendingFilePaths.length > 0) {
-      showCompactionNote('Compaction cannot use attached images or files. Remove them to compact.');
+    if (pendingImages.length > 0) {
+      showCompactionNote('Compaction cannot use attached images. Remove them to compact.');
       return;
     }
     // A refused /compact stays in the input so the user can send it again.
@@ -1638,6 +1530,8 @@ function sendMessage() {
     }
     return;
   }
+
+  if (handleTerminalCommand(message)) return;
 
   messageInput.value = '';
   messageInput.style.height = 'auto';
@@ -1652,7 +1546,6 @@ function sendMessage() {
     pendingImages = [];
   }
 
-  pendingFilePaths = [];
   renderAttachmentPreviews();
 
   if (!activeLiveSessionId) {
@@ -1676,6 +1569,46 @@ function sendMessage() {
   cmd.id = `prompt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
   sentPrompts.set(cmd.id, activeLiveSessionId);
   wsClient.send(cmd);
+}
+
+/**
+ * Pi's RPC prompt does not run the built-in commands of its terminal. Tau runs
+ * the ones it has a feature for, and for the rest it keeps the text in the
+ * input and says why it was not sent. Returns true when the message was
+ * handled here, and false when it should go to Pi.
+ */
+function handleTerminalCommand(message: string): boolean {
+  const name = slashCommandName(message);
+  const sessionId = viewingActiveSession ? activeLiveSessionId : null;
+  if (!name || !sessionId || !isTauHandledName(name)) return false;
+  // A command that Pi lists always goes to Pi, so Pi's list must be known.
+  if (!composerCompletion.hasCommands(sessionId)) {
+    void composerCompletion.loadCommands(sessionId).then(() => sendMessage());
+    return true;
+  }
+  const action = resolveSlashCommand(message, composerCompletion.commandNames(sessionId));
+  if (action.kind === 'prompt') return false;
+  if (action.kind === 'blocked') {
+    showCommandNote(blockedCommandNote(action));
+    return true;
+  }
+  messageInput.value = '';
+  messageInput.style.height = 'auto';
+  if (action.name === 'tree') void treeViewController.open();
+  else if (action.name === 'export') void rpcExportHtml();
+  else if (action.name === 'session') void showSessionStats();
+  else modelPickerController.open();
+  return true;
+}
+
+/** A short note in the transcript about a command. A newer note replaces the previous one. */
+function showCommandNote(text: string) {
+  messagesContainer.querySelector('.command-note')?.remove();
+  const note = document.createElement('div');
+  note.className = 'system-message command-note';
+  note.textContent = text;
+  messagesContainer.appendChild(note);
+  messageRenderer.scrollToBottom();
 }
 
 /** A short note in the transcript. A newer note replaces the previous one. */

@@ -300,6 +300,46 @@ test('a failed compact says whether Pi had started compacting', async () => {
   assert.equal(resp.compactionStarted, true);
 });
 
+test('get_commands lists what Pi offers and hides Tau\'s own tree navigation command', async () => {
+  const sent: Array<Record<string, unknown>> = [];
+  const session = injectSession({
+    send: async (cmd) => {
+      sent.push(cmd);
+      return {
+        type: 'response', id: cmd.id, success: true,
+        data: {
+          commands: [
+            { name: 'bg', description: 'Run in the background', source: 'extension', sourceInfo: { path: '/secret/place' } },
+            { name: 'tau-tree-navigate', description: 'internal', source: 'extension' },
+            { name: 'review', description: 'Review code', source: 'prompt' },
+            { name: 'skill:tdd', description: 'Test first', source: 'skill' },
+          ],
+        },
+      };
+    },
+  });
+  const resp = await handleRpcCommand({ type: 'get_commands', sessionId: session.id });
+  assert.equal(resp.success, true);
+  assert.deepEqual(resp.data.commands, [
+    { name: 'bg', description: 'Run in the background', source: 'extension' },
+    { name: 'review', description: 'Review code', source: 'prompt' },
+    { name: 'skill:tdd', description: 'Test first', source: 'skill' },
+  ]);
+  assert.deepEqual(sent.map((cmd) => cmd.type), ['get_commands']);
+});
+
+test('get_commands reports Pi\'s failure and needs a live session', async () => {
+  const session = injectSession({
+    send: async (cmd) => ({ type: 'response', id: cmd.id, success: false, data: {}, error: 'not available' }),
+  });
+  const failed = await handleRpcCommand({ type: 'get_commands', sessionId: session.id });
+  assert.equal(failed.success, false);
+  assert.match(failed.error, /not available/);
+  const missing = await handleRpcCommand({ type: 'get_commands' });
+  assert.equal(missing.success, false);
+  assert.match(missing.error, /No active Tau session/);
+});
+
 test('native commands require an active live session', async () => {
   const resp = await handleRpcCommand({ type: 'prompt', message: 'hi' });
   assert.equal(resp.success, false);

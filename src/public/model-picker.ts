@@ -389,5 +389,5 @@ async function fetchModelInfo() {
     return true;
   }
 
-  return { applyModelSpec, closeIfOpen, fetchModelInfo, setEnabled, setModelState, setThinkingLevel, updateModelDisplay };
+  return { applyModelSpec, closeIfOpen, fetchModelInfo, open: openModelPicker, setEnabled, setModelState, setThinkingLevel, updateModelDisplay };
 }

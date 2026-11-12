@@ -120,7 +120,6 @@ export type AppEvent = {
 };
 
 export type PendingImage = { data: string; mimeType: string };
-export type PendingFilePath = { path: string; name: string; ext: string; sessionId?: string | null };
 export type QueuedCommand = { type: string; id?: string; message?: string; images?: PendingImage[]; sessionId?: string; error?: string };
 export type ExtensionUIRequest = { sessionId: string; event: AppEvent };
 export type RpcCommand = { type: string; sessionId?: string; filePath?: string; [key: string]: unknown };

@@ -156,11 +156,12 @@ to local access.
 - Token usage percentage with context window visualisation
 - Cost tracking per session
 
-### File browser
+### `@` and `/` completion
 
-- Right sidebar rooted at the active live session's working directory
-- Navigate directories and open files natively
-- Drag files onto the input to insert their path
+- Type `@` in the message box to find files and folders in the tab's working directory. Accepting a suggestion inserts `@path/to/file `, the same text Pi's terminal inserts. `@~/…` and `@/absolute/…` reach outside the project.
+- File search uses `fd` when it is available (Pi's copy in `~/.pi/agent/bin`, or `fd` or `fdfind` on your `PATH`), so `.gitignore` is respected. Without `fd`, Tau uses a slower built-in search that skips folders such as `node_modules` and `dist` and does not read `.gitignore`.
+- Type `/` at the start of the message to pick one of Pi's extension commands, prompt templates, and skills, or one of Tau's own commands: `/compact`, `/tree`, `/export`, `/session`, and `/model`. Only command names are completed, because Pi does not offer argument completion over RPC.
+- Pi's terminal-only commands, such as `/settings`, cannot run over RPC. Tau keeps them in the message box and explains why, instead of sending them to the model as text.
 
 ### Session browser
 

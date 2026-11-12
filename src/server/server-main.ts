@@ -24,6 +24,7 @@ import type { JsonRecord, RpcCommand, RpcResponse, StatusError } from './types.j
 import { ARGS, AUTH_CONFIGURED, HOST, MIME_TYPES, PI_AGENT_DIR, PI_COMMAND, PORT, SESSIONS_DIR, STATIC_DIR, TAU_SETTINGS, USER_HOME, expandHome, loadTauSettings, parseArgs, resolvePiCommand, saveTauSetting } from './config.js';
 import { SESSION_COOKIE_NAME, SESSION_REFRESH_THRESHOLD_SECONDS, buildSessionCookie, issueSessionToken, parseCookies, verifySessionToken } from './auth.js';
 import { completeDirectories } from './path-completion.js';
+import { searchFiles } from './file-completion.js';
 import { getAvailableModels, modelLabel, normalizeModel, parseModelSpecToModel, parsePiListModels, _clearModelListCacheForTest, _setExecFileForTest } from './model-utils.js';
 import { LiveSessionManager, PiRpcSession, isGenericSessionName, liveManager, makeId, _setSpawnPiForTest } from './sessions.js';
 import { NAVIGATE_COMMAND, NAVIGATION_MARKER_TYPE, flattenTree, isTreeNavigationInProgress, leafDescendsFrom, navigateTree, pathFromRoot, selectNavigationTarget } from './tree.js';
@@ -188,24 +189,6 @@ function isWithinPath(root: string, target: string) {
   return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
-function resolveLiveSessionPath(session: PiRpcSession | null | undefined, requestedPath?: string | null) {
-  if (!session) {
-    const err = new Error('Live session not found') as StatusError;
-    err.status = 404;
-    throw err;
-  }
-  const root = fs.realpathSync(path.resolve(session.cwd));
-  const candidate = path.resolve(expandHome(requestedPath || session.cwd));
-  let resolved = candidate;
-  try { resolved = fs.realpathSync(candidate); } catch {}
-  if (!isWithinPath(root, resolved)) {
-    const err = new Error('Path is outside the active session directory') as StatusError;
-    err.status = 403;
-    throw err;
-  }
-  return resolved;
-}
-
 function openUrl(url: string): Promise<void> {
   if (!/^https?:\/\//i.test(url)) return Promise.reject(new Error('Invalid URL'));
   if (process.platform === 'win32') {
@@ -330,6 +313,19 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
     });
   }
   if (cmd === 'get_messages') return success({ entries: session.entries });
+  // The commands behind the chat input's `/` menu. Tau's own tree navigation
+  // command is an internal detail, so it is never listed.
+  if (cmd === 'get_commands') {
+    try {
+      const response = await session.send({ type: 'get_commands' }, { timeoutMs: 15000 });
+      if (response.success === false) return error(String(response.error || 'Pi could not list its commands'));
+      const listed = ((response.data || {}) as { commands?: Array<{ name?: string; description?: string; source?: string }> }).commands || [];
+      const commands = listed
+        .filter((command) => command.name !== NAVIGATE_COMMAND)
+        .map(({ name, description, source }) => ({ name, description, source }));
+      return success({ commands });
+    } catch (e) { return error(errorMessage(e)); }
+  }
   if (cmd === 'live_session_snapshot_request') return { type: 'live_session_snapshot', sessionId: session.id, ...session.snapshot() };
   if (cmd === 'set_auto_compaction' && typeof command.enabled !== 'boolean') return error('enabled must be true or false');
   // Pi's compact aborts a running reply before it compacts. Never throw a
@@ -459,7 +455,7 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
   const parsed = new URL(`http://localhost${req.url}`);
   const cleanPath = parsed.pathname;
 
-  if (cleanPath === '/api/health') return json(res, 200, { status: 'ok', role: 'rpc-session-manager', liveSessionCount: liveManager.sessions.size, lanUrl, tailscaleUrl: tailscaleUrl || undefined, platform: process.platform });
+  if (cleanPath === '/api/health') return json(res, 200, { status: 'ok', role: 'rpc-session-manager', liveSessionCount: liveManager.sessions.size, lanUrl, tailscaleUrl: tailscaleUrl || undefined });
   if (cleanPath === '/api/live-sessions' && req.method === 'GET') return json(res, 200, { sessions: liveManager.list() });
   if (cleanPath === '/api/live-sessions' && req.method === 'POST') {
     readBody(req).then(async (body) => {
@@ -547,30 +543,22 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
     const items = completeDirectories(parsed.searchParams.get('prefix') || '', TAU_SETTINGS.projectsDir || USER_HOME);
     return json(res, 200, { items });
   }
+  if (cleanPath === '/api/complete/files' && req.method === 'GET') {
+    const sessionId = parsed.searchParams.get('sessionId');
+    if (!sessionId) return json(res, 400, { error: 'sessionId required' });
+    const session = liveManager.get(sessionId);
+    if (!session) return json(res, 404, { error: 'Live session not found' });
+    // Closing the request ends the search, including its `fd` process.
+    const search = new AbortController();
+    res.on('close', () => { if (!res.writableFinished) search.abort(); });
+    searchFiles(parsed.searchParams.get('query') || '', session.cwd, { signal: search.signal })
+      .then((items) => { if (!search.signal.aborted) json(res, 200, { items }); })
+      .catch((e) => { if (!search.signal.aborted) json(res, 500, { error: errorMessage(e) }); });
+    return;
+  }
   if (cleanPath === '/api/projects' && req.method === 'GET') return serveProjectsList(res);
   if (cleanPath === '/api/sessions' && req.method === 'GET') return serveSessionsList(res);
   if (cleanPath.startsWith('/api/search') && req.method === 'GET') return serveSearch(res, parsed.searchParams.get('q') || '');
-  if ((cleanPath === '/api/files') && req.method === 'GET') {
-    const explicitPath = parsed.searchParams.get('path');
-    const sessionId = parsed.searchParams.get('sessionId');
-    if (!sessionId) return json(res, 400, { error: 'No live session selected' });
-    const session = liveManager.get(sessionId);
-    if (!session) return json(res, 404, { error: 'Live session not found' });
-    try {
-      const dirPath = resolveLiveSessionPath(session, explicitPath || session.cwd);
-      return serveFileList(res, dirPath);
-    } catch (e) { return json(res, errorStatus(e), { error: errorMessage(e) }); }
-  }
-  if (cleanPath === '/api/file/preview' && req.method === 'GET') {
-    const sessionId = parsed.searchParams.get('sessionId');
-    if (!sessionId) return json(res, 400, { error: 'No live session selected' });
-    const session = liveManager.get(sessionId);
-    if (!session) return json(res, 404, { error: 'Live session not found' });
-    try {
-      const filePath = resolveLiveSessionPath(session, parsed.searchParams.get('path'));
-      return serveFilePreview(res, filePath);
-    } catch (e) { return json(res, errorStatus(e), { error: errorMessage(e) }); }
-  }
   if (cleanPath === '/api/open' && req.method === 'POST') {
     readBody(req).then((body) => {
       try {
@@ -782,38 +770,6 @@ function serveSessionFile(res: ServerResponse, dirName: string, file: string) {
   stream.on('error', (e: Error) => json(res, 500, { error: e.message }));
 }
 
-const IGNORED_NAMES = new Set(['node_modules', '.git', '__pycache__', '.DS_Store', '.Trash', '.next', '.nuxt', 'dist', 'build', '.cache', '.turbo', 'venv', '.venv', 'env', '.env.local', '.pi', 'coverage', '.nyc_output', '.parcel-cache']);
-function serveFileList(res: ServerResponse, dirPath: string) {
-  try {
-    dirPath = path.resolve(expandHome(dirPath));
-    if (!fs.existsSync(dirPath) || !fs.statSync(dirPath).isDirectory()) return json(res, 400, { error: 'Not a directory' });
-    const items = [];
-    for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
-      if (entry.name.startsWith('.') && entry.name !== '.env') continue;
-      if (IGNORED_NAMES.has(entry.name)) continue;
-      try {
-        const fullPath = path.join(dirPath, entry.name);
-        const stat = fs.statSync(fullPath);
-        items.push({ name: entry.name, path: fullPath, isDirectory: entry.isDirectory(), size: entry.isDirectory() ? null : stat.size, mtime: stat.mtimeMs });
-      } catch {}
-    }
-    items.sort((a, b) => a.isDirectory !== b.isDirectory ? (a.isDirectory ? -1 : 1) : a.name.localeCompare(b.name));
-    json(res, 200, { path: dirPath, items });
-  } catch (e) { json(res, 500, { error: errorMessage(e) }); }
-}
-
-function serveFilePreview(res: ServerResponse, filePath: string) {
-  if (!filePath) return json(res, 400, { error: 'path required' });
-  const mimes: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', ico: 'image/x-icon' };
-  const mime = mimes[path.extname(filePath).toLowerCase().slice(1)];
-  if (!mime) return json(res, 415, { error: 'Not a previewable image' });
-  try {
-    if (!fs.statSync(filePath).isFile()) throw new Error('Not a file');
-    res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'max-age=60' });
-    fs.createReadStream(filePath).pipe(res);
-  } catch (e) { json(res, 404, { error: errorMessage(e) }); }
-}
-
 function resolveExportedSessionPath(filePath: string) {
   const resolved = path.resolve(expandHome(filePath || ''));
   const root = path.resolve(SESSIONS_DIR);
@@ -858,16 +814,6 @@ function resolveExportOutputPath(outputPath: string, sessionFile: string) {
 
 function resolveOpenPath(body: RpcCommand) {
   if (!body?.filePath || typeof body.filePath !== 'string') throw new Error('filePath required');
-  if (body.sessionId) {
-    const session = liveManager.get(body.sessionId);
-    const resolved = resolveLiveSessionPath(session, body.filePath);
-    if (!fs.existsSync(resolved)) {
-      const err = new Error('File not found') as StatusError;
-      err.status = 404;
-      throw err;
-    }
-    return resolved;
-  }
   return resolveExportedSessionPath(body.filePath);
 }
 
@@ -1066,7 +1012,6 @@ export {
   appendSessionName,
   updateLiveSessionName,
   isWithinPath,
-  resolveLiveSessionPath,
   resolveExportOutputPath,
   resolveExportedSessionPath,
   resolveOpenPath,

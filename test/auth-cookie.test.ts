@@ -149,6 +149,15 @@ test('cookie-only WebSocket upgrade succeeds and receives initial state', async 
   ws.close();
 });
 
+test('file completion requires credentials when auth is on', async () => {
+  const anonymous = await fetch(`${base}/api/complete/files?sessionId=tau_missing&query=a`);
+  assert.equal(anonymous.status, 401);
+  assert.equal(anonymous.headers.get('www-authenticate'), 'Basic realm="Tau"');
+  // With credentials the request reaches the route, which does not know this session.
+  const authed = await fetch(`${base}/api/complete/files?sessionId=tau_missing&query=a`, { headers: { Authorization: BASIC } });
+  assert.equal(authed.status, 404);
+});
+
 test('tampered cookie is rejected with 401, WWW-Authenticate, and a clearing Set-Cookie', async () => {
   const token = _issueSessionTokenForTest();
   const flipped = token.slice(0, -1) + (token.endsWith('A') ? 'B' : 'A');

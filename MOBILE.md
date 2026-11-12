@@ -6,7 +6,6 @@ Everything customised for mobile (≤768px) compared to the desktop experience.
 - **Slide-over sidebar** — 80% width (max 320px) panel with dark overlay behind it, instead of persistent sidebar
 - **Swipe-from-edge gesture** — swipe right from the left 20px edge to open sidebar
 - **Sidebar tinted backgrounds** — per-theme tint (warm for Terracotta, green for Sage, cool for Clean, slightly lighter for dark themes)
-- **File browser hidden** — panel and toggle both removed on mobile
 
 ## Header
 - **Slimmed down** — tighter padding (6px 12px), reduced gaps
