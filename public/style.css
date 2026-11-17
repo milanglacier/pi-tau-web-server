@@ -1859,9 +1859,14 @@ body {
 }
 
 .message.assistant .message-content .task-list-item {
-  display: flex;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
   align-items: baseline;
-  gap: 6px;
+  column-gap: 6px;
+}
+
+.message.assistant .message-content .task-list-item > :not(input) {
+  grid-column: 2;
 }
 
 .message.assistant .message-content .task-list-item input[type="checkbox"] {
@@ -1872,7 +1877,6 @@ body {
   border: 1px solid var(--border-bright);
   border-radius: var(--radius-xs);
   background: var(--bg-glass);
-  flex-shrink: 0;
   position: relative;
   top: 2px;
 }

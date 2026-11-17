@@ -203,7 +203,7 @@ export function renderMarkdown(text: string) {
     const taskMatch = line.match(/^(\s*)[*\-+]\s+\[([ xX])\]\s+(.+)$/);
     if (taskMatch) {
       const checked = taskMatch[2] !== ' ';
-      startListItem('ul', ' class="task-list"', `<li class="task-list-item"><input type="checkbox" disabled ${checked ? 'checked' : ''}> ${renderInline(taskMatch[3])}`);
+      startListItem('ul', ' class="task-list"', `<li class="task-list-item"><input type="checkbox" disabled ${checked ? 'checked' : ''}><span>${renderInline(taskMatch[3])}</span>`);
       continue;
     }
 
