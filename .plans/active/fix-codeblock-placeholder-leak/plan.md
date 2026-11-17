@@ -126,3 +126,22 @@ code:
    background).
 5. `npm run benchmark:render -- --preset long --iterations 20` before and after.
    The baseline for "Markdown, 60 replies" is 6.5 to 6.7 ms.
+
+## Results
+
+- All new tests failed before each part and pass after it. `npm run
+  typecheck`, `npm test` (332 tests), and `npm run test:e2e` (104 tests, about
+  35 s) pass.
+- Rendering all 6,565 assistant replies in the local session history with the
+  old and new renderer: 75 replies showed a leftover placeholder before the
+  fix and none after. The one remaining match is a reply that quotes the
+  placeholder name in inline code. One reply that was cut off inside a code
+  block now shows the partial code as code.
+- The list change altered 482 replies. They split into lists that no longer
+  break at blank lines or indented content (339), lists that show their real
+  starting number (174), and indented paragraphs or code blocks that now stay
+  inside their item (253). Some replies fall into more than one group.
+- "Markdown, 60 replies" in `npm run benchmark:render -- --preset long`: 6.5 to
+  6.7 ms on `main`, 6.8 to 7.0 ms after the code block change, and 6.9 to 7.0
+  ms after the list change. That is about 0.3 ms more for all 60 replies,
+  which is close to run-to-run noise.

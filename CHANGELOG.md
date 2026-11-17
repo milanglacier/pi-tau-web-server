@@ -5,6 +5,7 @@
 ### Fixed
 
 - Code blocks inside list items and quotes show as code instead of a `%%CODEBLOCK_N%%` mark, and code blocks with `~~~` fences or languages such as `c++` render as code.
+- Numbered lists keep their numbering when items are separated by blank lines, code blocks, or extra paragraphs, and those code blocks and paragraphs stay inside their item.
 
 ## [1.2.1] - 2026-11-03
 

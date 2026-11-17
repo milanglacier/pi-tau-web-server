@@ -227,3 +227,25 @@ test('backticks after other text or around one line are not fences', () => {
   assert.equal(renderMarkdown('Run this: ```bash'), '<p>Run this: ```bash</p>');
   assert.deepEqual(codeBlocks(renderMarkdown('```x``` and more')), []);
 });
+
+test('indented code blocks and paragraphs stay inside their list item', () => {
+  const html = renderMarkdown(LIST_WITH_CODE);
+  assert.equal((html.match(/<ol\b/g) || []).length, 1);
+  assert.match(html, /<li><strong>No profile\.<\/strong> Run:<div class="code-block-wrapper">[\s\S]*?<\/div><p>Same command without the table fails\.<\/p><\/li><li><strong>Resume\.<\/strong>/);
+  assert.match(html, /<li><strong>Fan-out\.<\/strong> One definition serves all profiles\.<\/li><\/ol>$/);
+});
+
+test('blank lines between list items keep one list', () => {
+  assert.equal(renderMarkdown('1. a\n\n2. b\n\n3. c'), '<ol><li>a</li><li>b</li><li>c</li></ol>');
+  assert.equal(renderMarkdown('- a\n\n- b'), '<ul><li>a</li><li>b</li></ul>');
+});
+
+test('an ordered list keeps the number it starts at', () => {
+  assert.equal(renderMarkdown('3. c\n4. d'), '<ol start="3"><li>c</li><li>d</li></ol>');
+});
+
+test('a line that is not indented ends the list', () => {
+  assert.equal(renderMarkdown('1. a\nplain'), '<ol><li>a</li></ol><p>plain</p>');
+  assert.equal(renderMarkdown('1. a\n\nplain'), '<ol><li>a</li></ol><p>plain</p>');
+  assert.equal(renderMarkdown('- a\n\n```\nx\n```'), '<ul><li>a</li></ul>' + renderMarkdown('```\nx\n```'));
+});

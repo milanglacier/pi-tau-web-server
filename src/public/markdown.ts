@@ -58,8 +58,30 @@ export function renderMarkdown(text: string) {
     }
   }
 
+  // The current list item stays open so indented lines after it can join it.
   function flushList() {
-    if (inList) { html += `</${listType}>`; inList = false; }
+    if (inList) { html += `</li></${listType}>`; inList = false; }
+  }
+
+  // Opens a list item, continuing the current list when it has the same type.
+  // `opening` is the list tag's attributes, used only for a new list.
+  function startListItem(type: 'ul' | 'ol', opening: string, itemHtml: string) {
+    if (inList && listType === type) {
+      html += '</li>';
+    } else {
+      flushList();
+      html += `<${type}${opening}>`;
+      inList = true;
+      listType = type;
+    }
+    html += itemHtml;
+  }
+
+  // A blank line inside a list keeps the list open when the next non-blank
+  // line is indented or is another list item.
+  function listContinuesAfter(i: number) {
+    while (i < lines.length && lines[i].trim() === '') i++;
+    return i < lines.length && (/^\s/.test(lines[i]) || /^([*\-+]|\d+\.)\s/.test(lines[i]));
   }
 
   // Check if a line is a table separator (e.g. |---|---|)
@@ -88,7 +110,8 @@ export function renderMarkdown(text: string) {
     // Code block placeholder
     const codeMatch = line.match(CODE_PLACEHOLDER);
     if (codeMatch) {
-      flushList();
+      // An indented block right after a list item belongs to that item.
+      if (!/^\s/.test(line)) flushList();
       flushBlockquote();
       html += renderCodeBlock(codeBlocks[Number(codeMatch[1])]);
       continue;
@@ -179,14 +202,8 @@ export function renderMarkdown(text: string) {
     // Task list (must check before regular list)
     const taskMatch = line.match(/^(\s*)[*\-+]\s+\[([ xX])\]\s+(.+)$/);
     if (taskMatch) {
-      if (!inList || listType !== 'ul') {
-        flushList();
-        html += '<ul class="task-list">';
-        inList = true;
-        listType = 'ul';
-      }
       const checked = taskMatch[2] !== ' ';
-      html += `<li class="task-list-item"><input type="checkbox" disabled ${checked ? 'checked' : ''}> ${renderInline(taskMatch[3])}</li>`;
+      startListItem('ul', ' class="task-list"', `<li class="task-list-item"><input type="checkbox" disabled ${checked ? 'checked' : ''}> ${renderInline(taskMatch[3])}`);
       continue;
     }
 
@@ -194,37 +211,33 @@ export function renderMarkdown(text: string) {
     const ulMatch = line.match(/^(\s*)[*\-+]\s+(.+)$/);
     if (ulMatch) {
       flushBlockquote();
-      if (!inList || listType !== 'ul') {
-        if (inList) html += `</${listType}>`;
-        html += '<ul>';
-        inList = true;
-        listType = 'ul';
-      }
-      html += `<li>${renderInline(ulMatch[2])}</li>`;
+      startListItem('ul', '', `<li>${renderInline(ulMatch[2])}`);
       continue;
     }
 
     // Ordered list
-    const olMatch = line.match(/^(\s*)\d+\.\s+(.+)$/);
+    const olMatch = line.match(/^(\s*)(\d+)\.\s+(.+)$/);
     if (olMatch) {
       flushBlockquote();
-      if (!inList || listType !== 'ol') {
-        if (inList) html += `</${listType}>`;
-        html += '<ol>';
-        inList = true;
-        listType = 'ol';
-      }
-      html += `<li>${renderInline(olMatch[2])}</li>`;
+      const start = Number(olMatch[2]);
+      startListItem('ol', start === 1 ? '' : ` start="${start}"`, `<li>${renderInline(olMatch[3])}`);
       continue;
     }
 
-    // Close list if we're out of list items
-    flushList();
-
-    // Empty line
+    // Empty line. Only the first blank line of a run decides whether the
+    // list goes on.
     if (line.trim() === '') {
+      if (inList && lines[i - 1].trim() !== '' && !listContinuesAfter(i)) flushList();
       continue;
     }
+
+    // An indented line after a list item is another paragraph of that item.
+    if (inList && /^\s/.test(line)) {
+      html += `<p>${renderInline(line.trim())}</p>`;
+      continue;
+    }
+
+    flushList();
 
     // Regular paragraph
     html += `<p>${renderInline(line)}</p>`;
