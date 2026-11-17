@@ -16,12 +16,8 @@ export function renderMarkdown(text: string) {
   text = text.replace(/\r\n/g, '\n');
 
   // Extract code blocks first to protect them
-  const codeBlocks: { lang: string; code: string }[] = [];
-  text = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang: string, code: string) => {
-    const idx = codeBlocks.length;
-    codeBlocks.push({ lang, code: code.replace(/\n$/, '') });
-    return `%%CODEBLOCK_${idx}%%`;
-  });
+  const codeBlocks: CodeBlock[] = [];
+  text = extractCodeBlocks(text, codeBlocks);
 
   // Extract display math after code fences (so $$ inside fences stays literal)
   // but before the line split, since $$...$$ may span multiple lines.
@@ -36,9 +32,27 @@ export function renderMarkdown(text: string) {
   let inBlockquote = false;
   let blockquoteLines: string[] = [];
 
+  // Quoted text lines are joined with <br>; a code block placeholder line
+  // becomes the code block itself, with no <br> on either side.
   function flushBlockquote() {
     if (inBlockquote) {
-      html += '<blockquote>' + blockquoteLines.map(l => renderInline(l)).join('<br>') + '</blockquote>';
+      let body = '';
+      let text: string[] = [];
+      const flushText = () => {
+        if (text.length) body += text.map(l => renderInline(l)).join('<br>');
+        text = [];
+      };
+      for (const l of blockquoteLines) {
+        const codeMatch = l.match(CODE_PLACEHOLDER);
+        if (codeMatch) {
+          flushText();
+          body += renderCodeBlock(codeBlocks[Number(codeMatch[1])]);
+        } else {
+          text.push(l);
+        }
+      }
+      flushText();
+      html += '<blockquote>' + body + '</blockquote>';
       inBlockquote = false;
       blockquoteLines = [];
     }
@@ -72,15 +86,11 @@ export function renderMarkdown(text: string) {
     let line = lines[i];
 
     // Code block placeholder
-    const codeMatch = line.match(/^%%CODEBLOCK_(\d+)%%$/);
+    const codeMatch = line.match(CODE_PLACEHOLDER);
     if (codeMatch) {
       flushList();
       flushBlockquote();
-      const block = codeBlocks[parseInt(codeMatch[1])];
-      const langLabel = block.lang || 'code';
-      html += `<div class="code-block-wrapper">`;
-      html += `<div class="code-block-header"><span>${escapeHtml(langLabel)}</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>`;
-      html += `<pre><code>${escapeHtml(block.code)}</code></pre></div>`;
+      html += renderCodeBlock(codeBlocks[Number(codeMatch[1])]);
       continue;
     }
 
@@ -225,6 +235,65 @@ export function renderMarkdown(text: string) {
   flushBlockquote();
 
   return html;
+}
+
+type CodeBlock = { lang: string; code: string };
+
+// A code block placeholder on its own line, after optional indentation.
+const CODE_PLACEHOLDER = /^\s*%%CODEBLOCK(\d+)%%$/;
+
+// Optional quote marker, indentation, three or more backticks or tildes, and
+// the info string.
+const OPENING_FENCE = /^(\s*>\s?)?([ \t]*)(`{3,}|~{3,})(.*)$/;
+const QUOTE_MARKER = /^\s*>\s?/;
+
+/**
+ * Replaces each fenced code block with a %%CODEBLOCK<N>%% placeholder line
+ * and pushes its language and code into `blocks`. The placeholder keeps the
+ * opening fence's quote marker and indentation, so a block inside a quote or
+ * list item stays there. It has no underscore, so the italic rule cannot
+ * split it.
+ *
+ * The rules follow CommonMark fenced code blocks: a fence may be indented, a
+ * backtick fence's info string has no backticks, and the closing fence uses
+ * the same character, is at least as long, and has only whitespace after it.
+ * The closing fence may be indented at most three spaces more than the
+ * opening fence. Each code line loses up to as many leading spaces or tabs as
+ * the opening fence has. A block opened inside a quote ends at the first line
+ * without a quote marker. A block that is never closed runs to the end of
+ * the text.
+ */
+function extractCodeBlocks(text: string, blocks: CodeBlock[]) {
+  const lines = text.split('\n');
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const open = lines[i].match(OPENING_FENCE);
+    if (!open || (open[3][0] === '`' && open[4].includes('`'))) {
+      out.push(lines[i]);
+      continue;
+    }
+    const [, quote = '', indent, fence, info] = open;
+    const closing = new RegExp(`^[ \\t]{0,${indent.length + 3}}${fence[0]}{${fence.length},}\\s*$`);
+    const code: string[] = [];
+    for (i++; i < lines.length; i++) {
+      let line = lines[i];
+      if (quote) {
+        const marker = line.match(QUOTE_MARKER);
+        if (!marker) { i--; break; }
+        line = line.slice(marker[0].length);
+      }
+      if (closing.test(line)) break;
+      code.push(line.replace(new RegExp(`^[ \\t]{0,${indent.length}}`), ''));
+    }
+    out.push(`${quote}${indent}%%CODEBLOCK${blocks.push({ lang: info.trim().split(/\s/)[0], code: code.join('\n') }) - 1}%%`);
+  }
+  return out.join('\n');
+}
+
+function renderCodeBlock(block: CodeBlock) {
+  return `<div class="code-block-wrapper">`
+    + `<div class="code-block-header"><span>${escapeHtml(block.lang || 'code')}</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>`
+    + `<pre><code>${escapeHtml(block.code)}</code></pre></div>`;
 }
 
 /**

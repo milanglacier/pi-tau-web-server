@@ -156,3 +156,74 @@ test('math and code keep their source when HTML is escaped', () => {
   assert.match(html, /data-display="false">x < y & z</);
   assert.match(html, /<code>&lt;b&gt;<\/code>/);
 });
+
+// Returns each rendered code block's language label and code, in order.
+function codeBlocks(html: string) {
+  return [...html.matchAll(/<div class="code-block-header"><span>(.*?)<\/span>.*?<pre><code>([\s\S]*?)<\/code><\/pre><\/div>/g)]
+    .map(([, lang, code]) => ({ lang, code }));
+}
+
+// A reply excerpt where each numbered item holds an indented code block and
+// an indented paragraph after it.
+const LIST_WITH_CODE = [
+  'Three paths prove it:',
+  '',
+  '1. **No profile.** Run:',
+  '   ```',
+  '   codex exec -c model=deepseek-flash',
+  '   → provider: deepseek',
+  '   ```',
+  '   Same command without the table fails.',
+  '',
+  '2. **Resume.** The error is:',
+  '   ```text',
+  '   This chat uses model provider X.',
+  '   ```',
+  '   Only `-p` brings it back.',
+  '',
+  '3. **Fan-out.** One definition serves all profiles.',
+].join('\n');
+
+test('fenced code blocks indented under list items render as code', () => {
+  const html = renderMarkdown(LIST_WITH_CODE);
+  assert.doesNotMatch(html, /%%|```/);
+  assert.deepEqual(codeBlocks(html), [
+    { lang: 'code', code: 'codex exec -c model=deepseek-flash\n→ provider: deepseek' },
+    { lang: 'text', code: 'This chat uses model provider X.' },
+  ]);
+  assert.deepEqual(codeBlocks(renderMarkdown('- item:\n  ```bash\n  ls\n    -la\n  ```')), [{ lang: 'bash', code: 'ls\n  -la' }]);
+});
+
+test('fenced code blocks inside a quote render as code between the quoted text', () => {
+  const html = renderMarkdown('> before\n> ```js\n> let a = 1;\n> ```\n> after');
+  assert.doesNotMatch(html, /%%|```/);
+  assert.match(html, /^<blockquote>before<div class="code-block-wrapper">.*<\/div>after<\/blockquote>$/);
+  assert.deepEqual(codeBlocks(html), [{ lang: 'js', code: 'let a = 1;' }]);
+  // A line without the quote marker ends both the code block and the quote.
+  const open = renderMarkdown('> ```\n> a\nb');
+  assert.deepEqual(codeBlocks(open), [{ lang: 'code', code: 'a' }]);
+  assert.match(open, /<\/blockquote><p>b<\/p>$/);
+});
+
+test('a closing fence must stand alone and be at least as long as the opening fence', () => {
+  assert.deepEqual(codeBlocks(renderMarkdown('```\na\n``` not a fence\nb\n```')), [{ lang: 'code', code: 'a\n``` not a fence\nb' }]);
+  const html = renderMarkdown('````md\n```js\ninner\n```\n````\nafter');
+  assert.deepEqual(codeBlocks(html), [{ lang: 'md', code: '```js\ninner\n```' }]);
+  assert.match(html, /<p>after<\/p>$/);
+  assert.deepEqual(codeBlocks(renderMarkdown('~~~\na\n```\n~~~')), [{ lang: 'code', code: 'a\n```' }]);
+});
+
+test('fence languages may contain any characters except whitespace', () => {
+  assert.deepEqual(codeBlocks(renderMarkdown('```c++\nint x;\n```')), [{ lang: 'c++', code: 'int x;' }]);
+  assert.deepEqual(codeBlocks(renderMarkdown('```objective-c title="a.m"\nint x;\n```')), [{ lang: 'objective-c', code: 'int x;' }]);
+  assert.deepEqual(codeBlocks(renderMarkdown('~~~python\nx = 1\n~~~')), [{ lang: 'python', code: 'x = 1' }]);
+});
+
+test('an unclosed fence runs to the end of the reply', () => {
+  assert.deepEqual(codeBlocks(renderMarkdown('intro\n\n```py\nprint(1)\n\n# more')), [{ lang: 'py', code: 'print(1)\n\n# more' }]);
+});
+
+test('backticks after other text or around one line are not fences', () => {
+  assert.equal(renderMarkdown('Run this: ```bash'), '<p>Run this: ```bash</p>');
+  assert.deepEqual(codeBlocks(renderMarkdown('```x``` and more')), []);
+});

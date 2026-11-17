@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Code blocks inside list items and quotes show as code instead of a `%%CODEBLOCK_N%%` mark, and code blocks with `~~~` fences or languages such as `c++` render as code.
+
 ## [1.2.1] - 2026-11-03
 
 ### Changed
