@@ -22,6 +22,8 @@ export type FixtureOptions = {
   imageEvery: number;
   /** Width and height of each attached PNG, in pixels. */
   imageSide: number;
+  /** Write replies full of list items that hold code and paragraphs, quotes, and less common code fences. */
+  richMarkdown?: boolean;
 };
 
 export const PRESETS: Record<string, FixtureOptions> = {
@@ -31,6 +33,12 @@ export const PRESETS: Record<string, FixtureOptions> = {
   long: { rounds: 60, toolStepsPerRound: 16, thinkingChars: 5000, replyChars: 2500, toolOutputChars: 2500, imageEvery: 0, imageSide: 0 },
   // A short chat with several large screenshots: ~8 MB, mostly base64.
   images: { rounds: 14, toolStepsPerRound: 2, thinkingChars: 3000, replyChars: 2000, toolOutputChars: 2000, imageEvery: 2, imageSide: 560 },
+  // Long, structured replies: numbered steps with code blocks and paragraphs
+  // inside them, nested bullets, checklists, and quotes. Each reply is about
+  // as long as the longest real replies (~6 KB). Few tool steps keep the
+  // session small, so Markdown is a large share of the work: ~180 entries,
+  // ~1 MB.
+  'rich-markdown': { rounds: 30, toolStepsPerRound: 2, thinkingChars: 3000, replyChars: 6000, toolOutputChars: 2000, imageEvery: 0, imageSide: 0, richMarkdown: true },
 };
 
 export type Fixture = {
@@ -107,6 +115,70 @@ function markdown(random: Random, chars: number) {
       text += '\n';
     } else {
       text += `The cost grows as $O(n \\log n)$ when $n_${Math.floor(random() * 9)}$ ${sentence(random)}\n\n`;
+    }
+  }
+  return text;
+}
+
+function codeFence(random: Random, indent: string, language: string, lines: number) {
+  return [`${indent}\`\`\`${language}`, ...codeLines(random, lines).map(line => indent + line), `${indent}\`\`\``].join('\n') + '\n';
+}
+
+// Markdown shaped like long replies that walk through steps. Numbered items
+// hold indented code blocks and paragraphs, some lists put blank lines between
+// items, and some continue the numbering of an earlier list. Bullets nest,
+// checklist items carry extra lines, quotes contain code, and some code
+// blocks use `~~~`, four backticks, or a language name with symbols. Real
+// replies use these less densely; packing them in makes their cost visible.
+function richMarkdown(random: Random, chars: number) {
+  let text = `## ${sentence(random)}\n\n`;
+  let nextStep = 1;
+  while (text.length < chars) {
+    const kind = random();
+    if (kind < 0.15) {
+      text += `${sentence(random)} Use \`${pick(random, WORDS)}()\` with **${pick(random, WORDS)}** and *${pick(random, WORDS)}*. ${sentence(random)}\n\n`;
+    } else if (kind < 0.4) {
+      const loose = random() < 0.5;
+      const gap = loose ? '\n' : '';
+      const count = 2 + Math.floor(random() * 3);
+      for (let i = 0; i < count; i++) {
+        text += `${nextStep++}. **${sentence(random)}** ${sentence(random)}\n`;
+        if (random() < 0.6) text += gap + codeFence(random, '   ', pick(random, ['bash', 'ts']), 3 + Math.floor(random() * 4));
+        if (random() < 0.5) text += `${gap}   ${sentence(random)}\n`;
+        text += gap;
+      }
+      text += '\n';
+      if (random() < 0.6) nextStep = 1;
+    } else if (kind < 0.55) {
+      for (let i = 0; i < 3; i++) {
+        text += `- ${sentence(random)}\n`;
+        const roll = random();
+        if (roll < 0.4) text += `  - ${sentence(random)}\n  - ${sentence(random)}\n`;
+        else if (roll < 0.7) text += `  ${sentence(random)}\n`;
+      }
+      text += '\n';
+    } else if (kind < 0.63) {
+      for (let i = 0; i < 3; i++) {
+        text += `- [${random() < 0.4 ? 'x' : ' '}] ${sentence(random)}\n`;
+        if (random() < 0.5) text += `  ${sentence(random)}\n`;
+        if (random() < 0.3) text += codeFence(random, '  ', 'bash', 2);
+      }
+      text += '\n';
+    } else if (kind < 0.71) {
+      text += `> ${sentence(random)}\n>\n` + codeFence(random, '> ', 'ts', 4) + '\n';
+    } else if (kind < 0.81) {
+      const variant = random();
+      if (variant < 0.34) text += '~~~ts\n' + codeLines(random, 5).join('\n') + '\n~~~\n\n';
+      else if (variant < 0.67) text += '````markdown\n' + `${sentence(random)}\n\n` + codeFence(random, '', 'ts', 3) + '````\n\n';
+      else text += codeFence(random, '', 'c++', 5) + '\n';
+    } else if (kind < 0.9) {
+      text += '| Name | Value | Note |\n| --- | ---: | --- |\n';
+      for (let i = 0; i < 4; i++) text += `| ${pick(random, WORDS)} | ${Math.floor(random() * 1000)} | ${sentence(random)} |\n`;
+      text += '\n';
+    } else if (kind < 0.95) {
+      text += `### ${sentence(random)}\n\n`;
+    } else {
+      text += codeFence(random, '', 'ts', 8) + '\n';
     }
   }
   return text;
@@ -286,7 +358,7 @@ export function buildSession(options: FixtureOptions, tag: string, cwd: string, 
     tailMarker = `benchmark-${tag}-end-${round}`;
     entries.push(assistant(random, turn++, [
       thinking(random, options.thinkingChars),
-      { type: 'text', text: `${markdown(random, options.replyChars)}\n\n${tailMarker}` },
+      { type: 'text', text: `${(options.richMarkdown ? richMarkdown : markdown)(random, options.replyChars)}\n\n${tailMarker}` },
     ], 'stop'));
   }
   entries.push({ type: 'session_info', name: `Benchmark ${tag}` });

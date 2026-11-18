@@ -35,7 +35,7 @@ import { PRESETS, buildSession } from './fixtures.ts';
 
 const { values: options } = parseArgs({
   options: {
-    preset: { type: 'string', default: 'typical,long,images' },
+    preset: { type: 'string', default: 'typical,long,images,rich-markdown' },
     runs: { type: 'string', default: '3' },
     cpu: { type: 'string', default: '1' },
     profile: { type: 'string' },

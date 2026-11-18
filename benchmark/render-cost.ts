@@ -12,7 +12,7 @@ import { PRESETS, buildSession } from './fixtures.ts';
 
 const { values: options } = parseArgs({
   options: {
-    preset: { type: 'string', default: 'typical,long,images' },
+    preset: { type: 'string', default: 'typical,long,images,rich-markdown' },
     iterations: { type: 'string', default: '5' },
   },
 });
