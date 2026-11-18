@@ -15,6 +15,20 @@ written any other way. Describe only the current state:
   behavior is acceptable is in **commit messages or plans**, where readers have
   the relevant context.
 
+### README
+
+The README is for people who install and use Tau. It covers what Tau does, how
+to install, configure, and run it, the available commands and flags, and how to
+read their output.
+
+- Keep implementation details out of the README: how something works inside,
+  internal names, JSON field names, test or benchmark setup, fixture contents
+  and counts, and investigation results. Put those in code comments, plans,
+  review notes, or commit messages.
+- Edit the README only when a change affects what a user does or sees. Do not
+  update it as a side effect of debugging, investigating, or measuring
+  performance.
+
 ### Commit Messages & Communication
 
 Write commit messages and explanations to the user in plain English, since the
@@ -47,9 +61,38 @@ subject or the opening paragraph.
 ## Changelog
 
 Record only breaking changes, new features, and important bug fixes, described
-as what users receive rather than how it was built. A fix belongs in the
-changelog only when the bug shipped in an earlier version; bugs in features
-still under development stay out.
+as what users receive rather than how it was built. A bug has shipped only when
+it reached a released version. A fix belongs in the changelog only for a bug
+that shipped; bugs in features still under development stay out, including
+mistakes made and fixed during the same task.
+
+## Tests
+
+Add a test only when it protects behavior that users rely on, or a contract that
+other code depends on. Every test must be worth its maintenance and run time.
+
+- Write a regression test only for a bug that shipped, as defined under
+  Changelog. For a bug that never shipped, fix it and move on. If the feature's
+  behavior needs coverage, test the final behavior, not the mistake made along
+  the way, and do not call it a regression test.
+- Do not write tests for test tooling: benchmarks, fixtures, test harnesses, or
+  debugging scripts. To check them, run them once and report the result.
+- Do not lock incidental details into tests, such as fixture hashes, exact item
+  counts, or generated sizes, unless that value is a real contract.
+- If you are unsure whether a test is worth keeping, ask instead of adding it.
+
+## Code review
+
+When asked to review a change, run the style review in its own subagent that
+follows the `review-style` skill and checks only code and writing style. Keep
+logic reviews, which cover correctness, behavior, performance, security, and
+test coverage, out of that subagent; split them across as many reviewers as the
+change needs.
+
+Merge all results into one review and remove duplicates. Keep the style
+reviewer's `[S1]`–`[S3]` tags so style findings stay apart from the logic
+findings' `[P0]`–`[P3]` tags. If subagents are not available, do the style
+review as a separate pass after the logic review.
 
 # Important Notes About the Codebase and Rabbit Holes
 
@@ -92,9 +135,10 @@ naturally produces `openrouter/z-ai/glm-5.2`. When adding a thinking level for
 the model input box, append `:level` to the full string:
 `openrouter/z-ai/glm-5.2:high`.
 
-## Keep the end-to-end suite near 35 seconds
+## The end-to-end suite is slow, so keep its tests fast
 
-A full `npm run test:e2e` run takes about 35 seconds. Files run in parallel,
-so one slow file decides the total. Give the command a long enough timeout or
-run it as a background task. A file that takes minutes usually leaves browser
-pages open after each test or slows the CPU when it does not need to.
+A full `npm run test:e2e` run currently takes about 35 seconds. Give the command a long
+enough timeout or run it as a background task. When you add or change browser
+tests, keep them fast. Files run in parallel, so one slow file decides the
+total. A file that takes minutes usually leaves browser pages open after each
+test or slows the CPU when it does not need to.
