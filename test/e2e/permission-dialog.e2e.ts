@@ -713,7 +713,9 @@ test('switching tabs while disconnected reloads messages missed by the previous 
   first.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'answer before disconnect' } });
   await page.waitForFunction(() => document.getElementById('messages')?.textContent?.includes('answer before disconnect'));
 
-  await page.clock.pauseAt(await page.evaluate(() => Date.now()));
+  // The page clock keeps running until it is paused, so pausing at the time
+  // just read can be in the past and throw. A second ahead leaves room.
+  await page.clock.pauseAt(await page.evaluate(() => Date.now()) + 1000);
   for (const client of liveManager.clients) client.close();
   await page.getByText('Disconnected', { exact: true }).waitFor();
   const secondSnapshot = page.waitForResponse(response => new URL(response.url()).pathname === `/api/live-sessions/${second.sessionId}/snapshot`);
