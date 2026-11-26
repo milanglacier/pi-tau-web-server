@@ -108,3 +108,37 @@ Linux and macOS this is the same check as before. On Windows, a query such as
 `D:/docs/gu` now searches `D:/docs/` instead of a folder under the session
 cwd. No other Windows path handling was changed or tested. Checked with
 typecheck and the unit and HTTP tests on Linux.
+
+## Follow-up: the failing model suggestion test
+
+The note above that the review fixes may make the end-to-end test "typing a
+model name lists matching models" fail more often is wrong. The check that
+drops out-of-date suggestions never fires for the model field, because its
+suggestions are computed right away from a list already in the page, so the
+text cannot change before the check runs. The earlier counts are within
+chance for a test that also failed on the code before the fixes.
+
+The test failed for two reasons that were already in the code:
+
+- The popup asks the server for the model list when it opens. Text typed
+  before the list arrived was searched against an empty list, and nothing
+  searched again once the list came in, so no suggestions appeared until the
+  next key press. A real user can hit this, because the first
+  `pi --list-models` call can be slow. Model suggestions now wait for the
+  list to load.
+- The popup focused the folder field one frame after opening. When the test
+  had already moved into the model field, that focus took the caret away, the
+  model list closed on blur, and its pending search was dropped. Only a fast
+  script hits this. The popup now focuses the folder field only when no field
+  in it has focus yet.
+
+Delaying the model list by 500 ms and the popup's focus by 150 ms made the
+test fail every time before these fixes. With them, all tests in the file pass
+under those delays, the file passed 25 of 25 runs on its own, and the full
+end-to-end suite passed 4 of 4 runs. Typecheck and all 375 unit and HTTP tests
+pass.
+
+Two other end-to-end tests failed once each during these runs and are not
+related to this branch: "switching tabs while disconnected reloads messages
+missed by the previous tab" and "prepending older chunks preserves the reading
+position".

@@ -751,8 +751,14 @@ async function loadProjectChips() {
 
 // Model suggestions use the same list and matching as the status-bar model picker.
 let newLiveSessionModels: Array<ModelRecord | string> = [];
+// Suggestions wait for this, so text typed before the list arrives still gets them.
+let newLiveSessionModelsLoaded: Promise<void> = Promise.resolve();
 
-async function loadNewLiveSessionModels() {
+function loadNewLiveSessionModels() {
+  newLiveSessionModelsLoaded = fetchNewLiveSessionModels();
+}
+
+async function fetchNewLiveSessionModels() {
   try {
     const res = await fetch('/api/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'get_available_models', sessionId: null }) });
     const data = await res.json();
@@ -774,8 +780,9 @@ const cwdCompletion = attachCompletionList({
 const modelCompletion = attachCompletionList({
   input: newLiveSessionModel,
   highlightFirst: true,
-  getItems(text) {
+  async getItems(text) {
     if (text.includes(':')) return [];
+    await newLiveSessionModelsLoaded;
     return searchModels(normalizeModelList(newLiveSessionModels), text).map((model) => ({
       primary: model.id,
       badge: model.provider,
@@ -793,7 +800,10 @@ function openNewLiveSessionModal(cwd?: string) {
   else if (!newLiveSessionCwd.value) newLiveSessionCwd.value = liveSessions.find(s => s.id === activeLiveSessionId)?.cwd || '';
   loadProjectChips();
   loadNewLiveSessionModels();
-  requestAnimationFrame(() => newLiveSessionCwd?.focus());
+  // A field the user has already moved to keeps the focus.
+  requestAnimationFrame(() => {
+    if (!newLiveSessionModal?.contains(document.activeElement)) newLiveSessionCwd?.focus();
+  });
 }
 
 function closeNewLiveSessionModal() {
