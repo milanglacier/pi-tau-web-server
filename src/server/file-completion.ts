@@ -80,7 +80,8 @@ function runFd(baseDir: string, fdPath: string, query: string, maxResults: numbe
   ];
   if (maxDepth !== undefined) args.push('--max-depth', String(maxDepth));
   if (toDisplayPath(query).includes('/')) args.push('--full-path');
-  if (query) args.push(buildFdPattern(query));
+  // `--` keeps a pattern that starts with `-` from being read as an option.
+  if (query) args.push('--', buildFdPattern(query));
 
   return new Promise((resolve) => {
     if (signal.aborted) return resolve([]);
@@ -103,7 +104,8 @@ function runFd(baseDir: string, fdPath: string, query: string, maxResults: numbe
     child.on('close', (code) => {
       if (signal.aborted || code !== 0 || !stdout) return finish([]);
       const results: Candidate[] = [];
-      for (const line of stdout.trim().split('\n').filter(Boolean)) {
+      // Only line breaks are removed, since spaces can be part of a name.
+      for (const line of stdout.split('\n').filter(Boolean)) {
         const display = toDisplayPath(line);
         const normalized = display.endsWith('/') ? display.slice(0, -1) : display;
         if (normalized === '.git' || normalized.startsWith('.git/') || normalized.includes('/.git/')) continue;
@@ -138,6 +140,7 @@ async function walkWithNode(baseDir: string, query: string, maxResults: number, 
   for (let depth = 1; depth <= maxDepth && level.length; depth++) {
     const next: string[] = [];
     for (const dir of level) {
+      if (signal.aborted || Date.now() > deadline) return results;
       let entries: fs.Dirent[];
       try { entries = await fs.promises.readdir(path.join(baseDir, dir), { withFileTypes: true }); } catch { continue; }
       for (const entry of entries) {
@@ -189,7 +192,7 @@ function resolveScopedQuery(rawQuery: string, cwd: string) {
   const query = normalized.slice(slash + 1);
   let baseDir: string;
   if (displayBase.startsWith('~/')) baseDir = path.join(USER_HOME, displayBase.slice(2));
-  else if (displayBase.startsWith('/')) baseDir = displayBase;
+  else if (path.isAbsolute(displayBase)) baseDir = displayBase;
   else baseDir = path.join(cwd, displayBase);
   try {
     if (!fs.statSync(baseDir).isDirectory()) return null;

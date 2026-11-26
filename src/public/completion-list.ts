@@ -166,6 +166,13 @@ export function attachCompletionList<Context extends CompletionContext = Complet
     try {
       const result = await getItems(found.context.query, controller.signal, found.context);
       if (current !== requestId) return;
+      // The text can change in code without an `input` event, as when a
+      // sent message clears the input. Rows for other text are dropped.
+      const now = readContext();
+      if (!now || now.start !== found.start || now.end !== found.end || now.context.query !== found.context.query) {
+        close();
+        return;
+      }
       items = result;
       active = highlightFirst && items.length ? 0 : -1;
       render();

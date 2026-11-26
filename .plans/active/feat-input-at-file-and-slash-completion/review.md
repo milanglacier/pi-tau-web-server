@@ -53,3 +53,58 @@ The fallback checks cancellation and its deadline only while processing returned
 **Verdict:** Patch is incorrect.
 
 **Explanation:** Reviewed `feat/input-at-file-and-slash-completion` against `main` from merge base `96d2afb39f3e4de3afbf96732fa4e17674dfeaa4`. The patch has an unintended-submission race and completion correctness and cancellation bugs. Typechecking, all 375 unit/HTTP tests, and all 114 end-to-end tests pass, but do not cover the reproduced cases.
+
+## Revisit and decisions
+
+Each finding was weighed by how likely a user is to hit it in daily use and by
+how much code the fix needs.
+
+| Finding | How likely | Decision |
+|---|---|---|
+| [P1] Deferred command handling | Rare. The text or the tab must change in the few milliseconds before `get_commands` answers, the first time a Tau-handled command is sent in a tab. The result, a draft sent without Enter, is serious. | Fix. Lower to P2. |
+| [P2] Pending completions after send | Common. Typing `@file` and pressing Enter at once is normal, and `fd` takes long enough for the late answer to arrive. | Fix. |
+| [P2] Exact command names first | Common. Pairs like `review` and `review-code` are a normal way to name skills and prompts, and the wrong command runs without any sign. | Fix. |
+| [P2] Refresh commands on a new menu | Rare. Only matters after an extension reload, which happens mostly while developing extensions, and the list refreshes after any non-slash typing. | Fix partly: reset the cached marker when a message is sent. Leave Escape as it is, because tracking each menu opening is more state than the gain is worth. |
+| [P2] `--` before the fd pattern | Rare. File names starting with `-` are uncommon, but the fix is one line. | Fix. |
+| [P2] Windows drive-qualified paths | Only on Windows, which is not a tested or supported platform. Fixing one Windows path case suggests support that is not there. | Do not fix. |
+| [P2] Stop checks before each directory read | Only without `fd`, on a slow mount, with many empty or unreadable folders. The cost is wasted background reads that the user cannot see. | Fix, since it only moves an existing check. Lower to P3. |
+| [P3] Whitespace in fd output | Only for names that start or end with a space, and only when they are the first or last result. | Fix by dropping `trim()`. NUL-delimited output is not needed. |
+
+## Fix summary
+
+- `src/public/app-main.ts`: the deferred send after loading Pi's command list
+  happens only if the input still holds the same text and the same tab is
+  still being viewed. Every path that sends a message and clears the input
+  also closes the composer menu.
+- `src/public/completion-list.ts`: when suggestions arrive, they are shown
+  only if the text and caret still match the request. Otherwise the list
+  closes. This covers any code that changes the input without an `input`
+  event.
+- `src/public/composer-completion.ts`: closing the composer menu from code
+  also forgets which tab's command list the current menu has read, so the
+  next `/` menu after a sent message reads Pi's list again.
+- `src/public/slash-commands.ts`: a command whose full name equals the query
+  is moved to the top of the matches.
+- `src/server/file-completion.ts`: `--` goes before the `fd` pattern. Only
+  empty lines are removed from `fd` output, so spaces in names are kept. The
+  fallback checks cancellation and its deadline before reading each folder.
+
+Checked with typecheck, 375 unit and HTTP tests, and the end-to-end suite.
+Real `fd` runs now find `-dash.txt` for `-da`, return nothing for `--help`,
+and keep ` lead.txt` with its leading space. `/review` now ranks above
+`/review-code`. The end-to-end test "typing a model name lists matching
+models" fails now and then. It also failed on the code before these fixes,
+in 1 of 12 runs of that file alone. The likely cause, not yet confirmed, is
+that typing starts before the popup has loaded its model list. In full-suite
+runs it failed in 2 of 7 runs with these fixes and in 0 of 9 without them, so
+the fixes may make it fail more often and it needs a closer look.
+
+## Follow-up: Windows drive-qualified paths
+
+The Windows finding is now fixed after all, because the fix is one line and
+does not claim wider Windows support. A query folder is treated as absolute
+when `path.isAbsolute` says so, instead of only when it starts with `/`. On
+Linux and macOS this is the same check as before. On Windows, a query such as
+`D:/docs/gu` now searches `D:/docs/` instead of a folder under the session
+cwd. No other Windows path handling was changed or tested. Checked with
+typecheck and the unit and HTTP tests on Linux.

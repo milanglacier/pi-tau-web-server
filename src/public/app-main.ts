@@ -1525,6 +1525,7 @@ function sendMessage() {
     }
     // A refused /compact stays in the input so the user can send it again.
     if (requestCompaction(compactCommand.customInstructions)) {
+      composerCompletion.close();
       messageInput.value = '';
       messageInput.style.height = 'auto';
     }
@@ -1533,6 +1534,7 @@ function sendMessage() {
 
   if (handleTerminalCommand(message)) return;
 
+  composerCompletion.close();
   messageInput.value = '';
   messageInput.style.height = 'auto';
 
@@ -1583,7 +1585,12 @@ function handleTerminalCommand(message: string): boolean {
   if (!name || !sessionId || !isTauHandledName(name)) return false;
   // A command that Pi lists always goes to Pi, so Pi's list must be known.
   if (!composerCompletion.hasCommands(sessionId)) {
-    void composerCompletion.loadCommands(sessionId).then(() => sendMessage());
+    // Send it once the list is read, unless the user has since changed the
+    // text or the tab, so a draft is never sent without Enter.
+    void composerCompletion.loadCommands(sessionId).then(() => {
+      const stillViewing = viewingActiveSession ? activeLiveSessionId : null;
+      if (stillViewing === sessionId && messageInput.value.trim() === message) sendMessage();
+    });
     return true;
   }
   const action = resolveSlashCommand(message, composerCompletion.commandNames(sessionId));
@@ -1592,6 +1599,7 @@ function handleTerminalCommand(message: string): boolean {
     showCommandNote(blockedCommandNote(action));
     return true;
   }
+  composerCompletion.close();
   messageInput.value = '';
   messageInput.style.height = 'auto';
   if (action.name === 'tree') void treeViewController.open();

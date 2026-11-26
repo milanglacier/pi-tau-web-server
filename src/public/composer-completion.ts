@@ -119,6 +119,11 @@ export function setupComposerCompletion({ input, anchor, getSessionId }: Compose
 
   return {
     ...list,
+    /** Close the menu. The next `/` menu reads Pi's list again. */
+    close() {
+      commandMenuSession = null;
+      list.close();
+    },
     /** True once Pi's command list for the tab has been read. */
     hasCommands: (sessionId: string) => commandsBySession.has(sessionId),
     /** Read Pi's command list for the tab. */

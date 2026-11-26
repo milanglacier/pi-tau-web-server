@@ -109,5 +109,10 @@ export function matchCommands(piCommands: PiCommand[], query: string): CommandMe
   const byBareName = fuzzyFilter(all, query, bareName).map((match) => match.item);
   const taken = new Set(byBareName);
   const byFullName = fuzzyFilter(all.filter((entry) => entry.name.startsWith('skill:') && !taken.has(entry)), query, (entry) => entry.name).map((match) => match.item);
-  return [...byBareName, ...byFullName];
+  // A fully typed name comes first, so Enter runs it instead of a longer
+  // name that happens to be listed before it.
+  const matches = [...byBareName, ...byFullName];
+  const exact = matches.findIndex((entry) => entry.name === query);
+  if (exact > 0) matches.unshift(...matches.splice(exact, 1));
+  return matches;
 }
