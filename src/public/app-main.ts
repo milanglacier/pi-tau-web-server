@@ -1560,18 +1560,19 @@ function sendMessage() {
   }
 
   cmd.sessionId = activeLiveSessionId;
+  lastSentMessage = message;
+  // The reader wants to see what they just sent and the reply to it. A queued
+  // message follows too, until the reader scrolls up again.
+  bottomFollower.setFollowing(true);
 
   if (state.isStreaming || sessionHasPendingWork(activeLiveSessionId)) {
     // Queue it for the current Tau tab only; do not let tab switches retarget it.
     messageQueue.push(cmd);
-    lastSentMessage = message;
     renderQueuedMessages();
+    bottomFollower.scrollToBottom();
     return;
   }
 
-  lastSentMessage = message;
-  // The reader wants to see the reply to what they just sent.
-  bottomFollower.setFollowing(true);
   messageRenderer.renderUserMessage({ content: message, images: cmd.images });
   cmd.id = `prompt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
   sentPrompts.set(cmd.id, activeLiveSessionId);

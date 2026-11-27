@@ -44,13 +44,15 @@ function streamReply(t: TestContext, broadcast: (event: JsonAgentSessionEvent) =
   t.after(() => clearInterval(timer));
 }
 
-// A finger drags down the page in small steps, which scrolls it up.
+// A finger drags down the page in small steps, which scrolls it up. It rests
+// before lifting, so the page does not keep scrolling after the touch ends.
 async function dragDown(cdp: CDPSession, page: Page, distance: number) {
   await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 400, y: 150 }] });
   for (let y = 155; y <= 150 + distance; y += 5) {
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 400, y }] });
     await page.waitForTimeout(16);
   }
+  await page.waitForTimeout(200);
   await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
 }
 
