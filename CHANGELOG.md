@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Scrolling up while a reply is streaming now works on the first try, on both mouse and touch, instead of snapping back to the bottom with each new line. The view follows the reply again once you scroll back to the bottom, press the scroll-to-bottom button, or send a message.
 - Code blocks inside list items and quotes show as code instead of a `%%CODEBLOCK_N%%` mark, and code blocks with `~~~` fences or languages such as `c++` render as code.
 - Numbered lists keep their numbering when items are separated by blank lines, code blocks, or extra paragraphs, and those code blocks and paragraphs stay inside their item.
 

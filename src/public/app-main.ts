@@ -6,6 +6,7 @@ import { WebSocketClient } from './websocket-client.js';
 import { StateManager } from './state.js';
 import { MessageRenderer } from './message-renderer.js';
 import { ToolCardRenderer, type ToolCardState, type ToolExecution, type ToolResult } from './tool-card.js';
+import { BottomFollower } from './bottom-follow.js';
 import { attachCompletionList } from './completion-list.js';
 import { modelMeta, modelRef, normalizeModelList, searchModels } from './model-match.js';
 import { DialogHandler, type DialogRequest } from './dialogs.js';
@@ -54,8 +55,9 @@ const state = new StateManager();
 // present before this module runs (the script is a deferred module at the end
 // of <body>). A missing element means the page is structurally broken, so we
 // assert non-null at the query site rather than guarding every usage.
-const messageRenderer = new MessageRenderer(document.getElementById('messages')!);
-const toolCardRenderer = new ToolCardRenderer(document.getElementById('messages')!);
+const bottomFollower = new BottomFollower(document.getElementById('messages')!);
+const messageRenderer = new MessageRenderer(document.getElementById('messages')!, bottomFollower);
+const toolCardRenderer = new ToolCardRenderer(document.getElementById('messages')!, bottomFollower);
 const dialogHandler = new DialogHandler(document.getElementById('dialog-container')!, {
   async send(command) {
     const response = await fetch('/api/rpc', {
@@ -207,7 +209,6 @@ let contextWindowSize = 0;  // fetched from model info
 let originalTitle = document.title;
 let hasFocus = true;
 let unreadCount = 0;
-let isScrolledUp = false;
 let hasNewWhileScrolled = false;
 let lastSentMessage: string | null = null; // Track to avoid duplicate rendering from backend echo events
 let lastUsage: UsageRecord | null = null; // Full usage object for context visualiser
@@ -275,12 +276,8 @@ document.addEventListener('visibilitychange', () => {
 // Scroll-to-bottom button + new message indicator
 // ═══════════════════════════════════════
 
-messagesContainer.addEventListener('scroll', () => {
-  const threshold = 150;
-  const atBottom = messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight < threshold;
-  isScrolledUp = !atBottom;
-  
-  if (atBottom) {
+bottomFollower.onChange((following) => {
+  if (following) {
     scrollBottomBtn.classList.add('hidden');
     scrollBottomBadge.classList.add('hidden');
     hasNewWhileScrolled = false;
@@ -289,19 +286,15 @@ messagesContainer.addEventListener('scroll', () => {
   }
 });
 
-scrollBottomBtn.addEventListener('click', () => {
-  messagesContainer.scrollTo({ top: messagesContainer.scrollHeight, behavior: 'smooth' });
-  scrollBottomBtn.classList.add('hidden');
-  scrollBottomBadge.classList.add('hidden');
-  hasNewWhileScrolled = false;
-});
+scrollBottomBtn.addEventListener('click', scrollToBottom);
 
 function scrollToBottom() {
+  bottomFollower.setFollowing(true);
   messagesContainer.scrollTo({ top: messagesContainer.scrollHeight, behavior: 'smooth' });
 }
 
 function showNewMessageBadge() {
-  if (isScrolledUp) {
+  if (!bottomFollower.following) {
     hasNewWhileScrolled = true;
     scrollBottomBadge.classList.remove('hidden');
   }
@@ -1577,6 +1570,8 @@ function sendMessage() {
   }
 
   lastSentMessage = message;
+  // The reader wants to see the reply to what they just sent.
+  bottomFollower.setFollowing(true);
   messageRenderer.renderUserMessage({ content: message, images: cmd.images });
   cmd.id = `prompt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
   sentPrompts.set(cmd.id, activeLiveSessionId);
@@ -2413,6 +2408,7 @@ function clearConversation() {
   resetCompactionRow();
   messageRenderer.clear();
   toolCardRenderer.clear();
+  bottomFollower.setFollowing(true);
   state.toolExecutions.clear();
   activeViewReady = false;
 }
@@ -2637,7 +2633,7 @@ function continueHistoryFill(fill: HistoryFill) {
 type ParkedView = {
   nodes: DocumentFragment;
   scrollTop: number;
-  atBottom: boolean;
+  following: boolean;
   toolCards: ToolCardState;
   toolExecutions: Map<string, Record<string, unknown>>;
   streamingElement: HTMLElement | null;
@@ -2674,11 +2670,10 @@ function parkActiveView() {
   const sessionId = activeLiveSessionId;
   const fill = historyFill;
   cancelHistoryRender();
-  const atBottom = messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight < 150;
   const view: ParkedView = {
     nodes: document.createDocumentFragment(),
     scrollTop: messagesContainer.scrollTop,
-    atBottom,
+    following: bottomFollower.following,
     toolCards: toolCardRenderer.takeState(),
     toolExecutions: state.toolExecutions,
     streamingElement: currentStreamingElement,
@@ -2739,9 +2734,9 @@ function restoreParkedView(sessionId: string, view: ParkedView, session: LiveSes
   activeViewReady = true;
 
   messagesContainer.style.scrollBehavior = 'auto';
-  messagesContainer.scrollTop = view.atBottom ? messagesContainer.scrollHeight : view.scrollTop;
+  messagesContainer.scrollTop = view.following ? messagesContainer.scrollHeight : view.scrollTop;
   messagesContainer.style.scrollBehavior = '';
-  messageRenderer.isNearBottom = view.atBottom;
+  bottomFollower.setFollowing(view.following);
 
   applyingMissedEvents = true;
   try {

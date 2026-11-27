@@ -175,10 +175,10 @@ export function skipUnlessBrowser(t: TestContext) {
 // `throttleCpu` slows the page 4x. Tests that must observe the history while
 // it is still filling need it, because it makes the progressive fill span
 // many frames even on fast machines.
-export type OpenPageOptions = { forceManualScrollAnchoring?: boolean; blockServiceWorkers?: boolean; throttleCpu?: boolean };
+export type OpenPageOptions = { forceManualScrollAnchoring?: boolean; blockServiceWorkers?: boolean; throttleCpu?: boolean; hasTouch?: boolean };
 
 export async function openPage(t: TestContext, options: OpenPageOptions = {}) {
-  const context = await browser!.newContext({ serviceWorkers: options.blockServiceWorkers ? 'block' : 'allow' });
+  const context = await browser!.newContext({ serviceWorkers: options.blockServiceWorkers ? 'block' : 'allow', hasTouch: options.hasTouch });
   t.after(() => context.close());
   if (options.forceManualScrollAnchoring) {
     await context.addInitScript(() => {

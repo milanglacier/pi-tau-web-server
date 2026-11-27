@@ -5,6 +5,7 @@
 import { NestedToolCallsModel } from './nested-tool-calls.js';
 import { createCodeBlock, createJavaScriptCodeBlock } from './javascript-code-block.js';
 import { imageSource, type ImageBlock } from './image-source.js';
+import { BottomFollower } from './bottom-follow.js';
 import type { NestedCallSummary, NestedCallsRecord, NestedCallsSummary } from './nested-tool-calls.js';
 
 export type ToolArgs = Record<string, unknown>;
@@ -303,11 +304,11 @@ export class ToolCardRenderer {
   private unbuiltBodies = new Map<string, UnbuiltBody>();
   /** Bumped to stop an Expand All that is still building bodies. */
   private expandRun = 0;
-  private bottomScrollFrame: number | undefined;
-  private bottomScrollTop: number | undefined;
+  private follower: BottomFollower;
 
-  constructor(container: HTMLElement) {
+  constructor(container: HTMLElement, follower = new BottomFollower(container)) {
     this.container = container;
+    this.follower = follower;
     this.toolCards = new Map(); // toolCallId -> element
     this.historyCardsExpanded = false;
   }
@@ -391,7 +392,6 @@ export class ToolCardRenderer {
     if (!card) return;
     this.buildBody(toolCallId);
 
-    const wasFollowing = this.isFollowingBottom();
     // Update status
     const statusElement = card.querySelector('.tool-status');
     if (statusElement) {
@@ -414,7 +414,7 @@ export class ToolCardRenderer {
       this.setBodyExpanded(card, false);
     }
     this.renderNestedCalls(toolCallId);
-    if (summary) this.scrollToBottom(wasFollowing);
+    if (summary) this.scrollToBottom();
   }
 
   /**
@@ -550,10 +550,9 @@ export class ToolCardRenderer {
     const owner = this.nestedCalls.observe(event);
     if (owner) {
       this.liveRoots.add(owner);
-      const wasFollowing = this.isFollowingBottom();
       this.toolCards.get(owner)?.classList.remove('history');
       this.renderNestedCalls(owner);
-      this.scrollToBottom(wasFollowing);
+      this.scrollToBottom();
     }
   }
 
@@ -947,26 +946,8 @@ export class ToolCardRenderer {
     return div.innerHTML;
   }
 
-  private isFollowingBottom() {
-    return this.container.scrollHeight - this.container.scrollTop - this.container.clientHeight < 100 ||
-      (this.bottomScrollFrame !== undefined && Math.abs(this.container.scrollTop - this.bottomScrollTop!) < 1);
-  }
-
-  scrollToBottom(wasFollowing = this.isFollowingBottom()) {
-    if (!wasFollowing) return;
-    if (this.bottomScrollFrame !== undefined) cancelAnimationFrame(this.bottomScrollFrame);
-    const top = this.container.scrollTop;
-    this.bottomScrollTop = top;
-    this.bottomScrollFrame = requestAnimationFrame(() => {
-      this.bottomScrollFrame = undefined;
-      this.bottomScrollTop = undefined;
-      // A reader can scroll away before the next frame.
-      if (Math.abs(this.container.scrollTop - top) >= 1) return;
-      const behavior = this.container.style.scrollBehavior;
-      this.container.style.scrollBehavior = 'auto';
-      this.container.scrollTop = this.container.scrollHeight;
-      this.container.style.scrollBehavior = behavior;
-    });
+  scrollToBottom() {
+    this.follower.scrollToBottom();
   }
 
   expandAll() {
@@ -1013,9 +994,7 @@ export class ToolCardRenderer {
    */
   takeState(): ToolCardState {
     this.expandRun++;
-    if (this.bottomScrollFrame !== undefined) cancelAnimationFrame(this.bottomScrollFrame);
-    this.bottomScrollFrame = undefined;
-    this.bottomScrollTop = undefined;
+    this.follower.cancelScroll();
     const state: ToolCardState = {
       toolCards: this.toolCards,
       historyCardsExpanded: this.historyCardsExpanded,

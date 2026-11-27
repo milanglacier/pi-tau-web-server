@@ -4,6 +4,7 @@
 
 import { renderMarkdown, renderUserMarkdown } from './markdown.js';
 import { imageSource } from './image-source.js';
+import { BottomFollower } from './bottom-follow.js';
 
 type RenderedImage = {
   data: string;
@@ -30,13 +31,13 @@ type RenderMessage = {
 
 export class MessageRenderer {
   container: HTMLElement;
-  isNearBottom: boolean;
+  private follower: BottomFollower;
   /** Text of history thinking blocks that have not been opened yet. */
   private unopenedThinking = new WeakMap<Element, string>();
 
-  constructor(container: HTMLElement) {
+  constructor(container: HTMLElement, follower = new BottomFollower(container)) {
     this.container = container;
-    this.isNearBottom = true;
+    this.follower = follower;
 
     // One handler opens and closes every thinking block in the conversation.
     this.container.addEventListener('click', (event) => {
@@ -46,13 +47,6 @@ export class MessageRenderer {
       if (content) this.fillThinking(content);
       content?.classList.toggle('expanded');
       toggle.classList.toggle('expanded');
-    });
-
-    // Track scroll position for smart auto-scroll
-    this.container.addEventListener('scroll', () => {
-      const threshold = 100;
-      this.isNearBottom =
-        this.container.scrollHeight - this.container.scrollTop - this.container.clientHeight < threshold;
     });
   }
 
@@ -348,10 +342,6 @@ export class MessageRenderer {
   }
 
   scrollToBottom() {
-    if (this.isNearBottom) {
-      requestAnimationFrame(() => {
-        this.container.scrollTop = this.container.scrollHeight;
-      });
-    }
+    this.follower.scrollToBottom();
   }
 }
